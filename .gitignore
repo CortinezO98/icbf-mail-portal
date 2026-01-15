@@ -1,0 +1,27 @@
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.log
+
+# --- FastAPI / Uvicorn ---
+*.pid
+
+# --- PHP / Composer (si luego se usa) ---
+vendor/
+composer.lock
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Uploads / attachments (NUNCA versionar) ---
+/data/
+/attachments/
+/portal/uploads/
