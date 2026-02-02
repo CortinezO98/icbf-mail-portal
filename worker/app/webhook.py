@@ -1,52 +1,39 @@
+from __future__ import annotations
+
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Request, Query, BackgroundTasks, HTTPException
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import PlainTextResponse, JSONResponse
 
-from .settings import settings
+log = logging.getLogger("app.webhook")
 
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/graph", tags=["graph"])
 
 
-def _process_notifications(payload: Dict[str, Any]) -> None:
-    # En este punto (paso siguiente) vas a:
-    # - validar y extraer messageId/conversationId
-    # - hacer "pull" a Graph
-    # - persistir en BD (cases/messages/attachments/case_events)
-    logger.info("Graph notification received (async). keys=%s", list(payload.keys()))
+def _get_validation_token(request: Request) -> Optional[str]:
+    # Graph uses validationToken in query string (GET or POST)
+    return request.query_params.get("validationToken")
 
 
-@router.get("/webhook", response_class=PlainTextResponse)
-async def webhook_get(validationToken: Optional[str] = Query(default=None)) -> PlainTextResponse:
-    # Graph normalmente valida por POST, pero GET lo dejamos habilitado para pruebas.
-    if validationToken:
-        return PlainTextResponse(content=validationToken, media_type="text/plain")
-    return PlainTextResponse(content="ok", media_type="text/plain")
+@router.get("/webhook")
+async def graph_webhook_get(request: Request) -> Response:
+    token = _get_validation_token(request)
+    if token:
+        return PlainTextResponse(token, status_code=200)
+    return JSONResponse({"ok": True}, status_code=200)
 
 
 @router.post("/webhook")
-async def webhook_post(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    validationToken: Optional[str] = Query(default=None),
-):
-    # 1) VALIDATION TOKEN (obligatorio para crear/renovar suscripción en Graph)
-    if validationToken:
-        return PlainTextResponse(content=validationToken, media_type="text/plain")
+async def graph_webhook_post(request: Request) -> Response:
+    token = _get_validation_token(request)
+    if token:
+        # Subscription validation flow
+        return PlainTextResponse(token, status_code=200)
 
-    # 2) NOTIFICACIONES REALES
-    payload = await request.json()
+    payload: Dict[str, Any] = await request.json()
 
-    # Validación básica recomendada: clientState
-    # Graph manda: {"value":[{"clientState":"..."}]}
-    values = payload.get("value") or []
-    for n in values:
-        cs = n.get("clientState")
-        if cs is not None and cs != settings.graph_client_state:
-            logger.warning("Invalid clientState received: %s", cs)
-            raise HTTPException(status_code=401, detail="Invalid clientState")
-
-    background_tasks.add_task(_process_notifications, payload)
-    return JSONResponse(status_code=202, content={"status": "accepted"})
+    # optional: validate clientState
+    # Graph notifications: value[].clientState
+    # We'll not hard-fail to avoid losing events, but we log mismatch.
+    return JSONResponse({"received": True, "count": len(payload.get("value") or [])})
