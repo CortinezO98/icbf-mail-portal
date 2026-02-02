@@ -1,11 +1,19 @@
-from __future__ import annotations
 import logging
 import sys
 
+LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+
+
 def setup_logging(level: str = "INFO") -> None:
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(level.upper())
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    root.addHandler(handler)
+
+    # Reduce ruido de librerías
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.error").setLevel(level.upper())
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)

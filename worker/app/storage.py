@@ -4,69 +4,85 @@ import base64
 import hashlib
 import logging
 import os
-from dataclasses import dataclass
+import re
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
-log = logging.getLogger("app.storage")
+from app.settings import settings
 
-
-@dataclass
-class SavedFile:
-    path: str
-    sha256: str
-    size_bytes: int
+logger = logging.getLogger("app.storage")
 
 
 def _safe_filename(name: str) -> str:
-    # minimal hardening for filesystem
-    name = name.replace("\\", "_").replace("/", "_").strip()
-    if not name:
-        return "attachment.bin"
-    return name[:200]
+    name = name.strip().replace("\x00", "")
+    name = re.sub(r"[^\w\-.() ]+", "_", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name[:180] if len(name) > 180 else name
 
 
-def _ext(name: str) -> str:
-    p = Path(name)
-    return p.suffix.lower().lstrip(".")
+def _get_ext(filename: str) -> str:
+    ext = Path(filename).suffix.lower().lstrip(".")
+    return ext
 
 
-def validate_attachment(filename: str, size_bytes: int, max_mb: int, allowed_ext: list[str], blocked_ext: list[str]) -> None:
-    if size_bytes > max_mb * 1024 * 1024:
-        raise ValueError(f"Attachment too large: {size_bytes} bytes > {max_mb}MB")
+def validate_attachment(filename: str, size_bytes: int) -> None:
+    ext = _get_ext(filename)
+    allowed = settings.allowed_ext_set()
+    blocked = settings.blocked_ext_set()
 
-    ext = _ext(filename)
-    if ext in blocked_ext:
-        raise ValueError(f"Blocked attachment extension: .{ext}")
+    if ext in blocked:
+        raise ValueError(f"Blocked extension: .{ext}")
+    if allowed and ext not in allowed:
+        raise ValueError(f"Extension not allowed: .{ext}")
 
-    if allowed_ext and ext and ext not in allowed_ext:
-        # if ext empty -> allow (some rare cases), else enforce allowlist
-        raise ValueError(f"Attachment extension not allowed: .{ext}")
+    max_bytes = int(settings.MAX_ATTACHMENT_SIZE_MB) * 1024 * 1024
+    if size_bytes > max_bytes:
+        raise ValueError(f"Attachment too large: {size_bytes} bytes > {max_bytes} bytes")
 
 
-def ensure_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+def ensure_base_dir() -> Path:
+    base = Path(settings.ATTACHMENTS_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+    return base
 
 
 def save_attachment_bytes(
-    base_dir: Path,
+    *,
     case_number: str,
     message_id: str,
     filename: str,
     content_bytes: bytes,
-) -> SavedFile:
-    safe = _safe_filename(filename)
-    # folder structure: /base/YYYY/CASE/MSG/
-    year = case_number.split("-")[1] if "-" in case_number else "unknown"
-    target_dir = base_dir / year / case_number / message_id
-    ensure_dir(target_dir)
+) -> Tuple[str, str, int]:
+    """
+    Guarda adjunto en disco:
+    /ATTACHMENTS_DIR/<case_number>/<message_id>/<filename>
+    Retorna: (storage_path, sha256, size_bytes)
+    """
+    safe_name = _safe_filename(filename)
+    size_bytes = len(content_bytes)
+    validate_attachment(safe_name, size_bytes)
 
-    file_path = target_dir / safe
+    sha256 = hashlib.sha256(content_bytes).hexdigest()
+    base = ensure_base_dir()
 
-    sha = hashlib.sha256(content_bytes).hexdigest()
-    file_path.write_bytes(content_bytes)
+    target_dir = base / case_number / message_id
+    target_dir.mkdir(parents=True, exist_ok=True)
 
-    return SavedFile(path=str(file_path), sha256=sha, size_bytes=len(content_bytes))
+    target_path = target_dir / safe_name
+
+    # Si ya existe, no lo reescribas (dedupe por contenido)
+    if target_path.exists():
+        logger.info("Attachment already exists on disk: %s", str(target_path))
+        return str(target_path), sha256, size_bytes
+
+    with open(target_path, "wb") as f:
+        f.write(content_bytes)
+
+    # Endurecer permisos en Linux (en Windows no aplica igual)
+    if os.name != "nt":
+        os.chmod(target_path, 0o640)
+
+    return str(target_path), sha256, size_bytes
 
 
 def decode_graph_content_bytes(content_bytes_b64: str) -> bytes:

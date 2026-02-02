@@ -1,80 +1,79 @@
 from __future__ import annotations
 
 import logging
-import re
-from typing import Any, Dict, List, Optional
-from datetime import datetime
+import httpx
+from typing import Any
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from app.auth_graph import graph_auth
 
-from .auth_graph import GraphAuth
+logger = logging.getLogger("app.graph_client")
 
-log = logging.getLogger("app.graph_client")
-
-
-def _requests_session() -> requests.Session:
-    s = requests.Session()
-    retry = Retry(
-        total=5,
-        backoff_factor=0.5,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=("GET", "POST"),
-        raise_on_status=False,
-    )
-    s.mount("https://", HTTPAdapter(max_retries=retry))
-    return s
-
-
-def parse_message_id_from_notification(n: Dict[str, Any]) -> Optional[str]:
-    # 1) resourceData.id
-    rd = n.get("resourceData") or {}
-    if isinstance(rd, dict) and rd.get("id"):
-        return str(rd["id"])
-
-    # 2) parse from resource path .../messages/{id}
-    resource = n.get("resource") or ""
-    m = re.search(r"/messages/([A-Za-z0-9\-_=]+)", resource)
-    if m:
-        return m.group(1)
-
-    return None
+GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 
 class GraphClient:
-    BASE = "https://graph.microsoft.com/v1.0"
+    def __init__(self) -> None:
+        self._timeout = 60
 
-    def __init__(self, auth: GraphAuth) -> None:
-        self.auth = auth
-        self.session = _requests_session()
-
-    def _headers(self) -> Dict[str, str]:
-        token = self.auth.get_access_token()
-        return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-
-    def get_message(self, mailbox_email: str, message_id: str) -> Dict[str, Any]:
-        # We use /users/{mail}/messages/{id} for app permissions
-        url = f"{self.BASE}/users/{mailbox_email}/messages/{message_id}"
-        params = {
-            "$select": "id,conversationId,internetMessageId,inReplyTo,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,sentDateTime,hasAttachments,body,bodyPreview",
+    async def _headers(self) -> dict[str, str]:
+        token = await graph_auth.get_token()
+        return {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
         }
-        r = self.session.get(url, headers=self._headers(), params=params, timeout=30)
-        if r.status_code >= 300:
-            raise RuntimeError(f"Graph get_message failed {r.status_code}: {r.text[:400]}")
-        return r.json()
 
-    def list_attachments(self, mailbox_email: str, message_id: str) -> List[Dict[str, Any]]:
-        url = f"{self.BASE}/users/{mailbox_email}/messages/{message_id}/attachments"
-        r = self.session.get(url, headers=self._headers(), timeout=30)
-        if r.status_code >= 300:
-            raise RuntimeError(f"Graph list_attachments failed {r.status_code}: {r.text[:400]}")
-        data = r.json()
-        return data.get("value", []) if isinstance(data, dict) else []
+    async def get_message(self, mailbox_email: str, message_id: str) -> dict[str, Any]:
+        """
+        Trae el mensaje completo. Para adjuntos, Graph puede enviar metadata;
+        si existe contentBytes lo usamos; si no, hacemos llamada por attachment.
+        """
+        url = f"{GRAPH_BASE}/users/{mailbox_email}/messages/{message_id}"
+        params = {
+            # bodyPreview no sirve para guardar HTML completo, pedimos body
+            "$select": ",".join([
+                "id",
+                "subject",
+                "receivedDateTime",
+                "sentDateTime",
+                "from",
+                "toRecipients",
+                "ccRecipients",
+                "bccRecipients",
+                "body",
+                "internetMessageId",
+                "inReplyTo",
+                "conversationId",
+                "hasAttachments",
+            ])
+        }
+        headers = await self._headers()
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(url, headers=headers, params=params)
+            if resp.status_code != 200:
+                logger.error("get_message failed: %s %s", resp.status_code, resp.text)
+                raise RuntimeError("Graph get_message failed")
+            return resp.json()
 
-    def get_attachment(self, mailbox_email: str, message_id: str, attachment_id: str) -> Dict[str, Any]:
-        url = f"{self.BASE}/users/{mailbox_email}/messages/{message_id}/attachments/{attachment_id}"
-        r = self.session.get(url, headers=self._headers(), timeout=30)
-        if r.status_code >= 300:
-            raise RuntimeError(f"Graph get_attachment failed {r.status_code}: {r.text[:400]}")
-        return r.json()
+    async def list_attachments(self, mailbox_email: str, message_id: str) -> list[dict[str, Any]]:
+        url = f"{GRAPH_BASE}/users/{mailbox_email}/messages/{message_id}/attachments"
+        headers = await self._headers()
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code != 200:
+                logger.error("list_attachments failed: %s %s", resp.status_code, resp.text)
+                raise RuntimeError("Graph list_attachments failed")
+            data = resp.json()
+            return data.get("value", [])
+
+    async def get_attachment(self, mailbox_email: str, message_id: str, attachment_id: str) -> dict[str, Any]:
+        url = f"{GRAPH_BASE}/users/{mailbox_email}/messages/{message_id}/attachments/{attachment_id}"
+        headers = await self._headers()
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code != 200:
+                logger.error("get_attachment failed: %s %s", resp.status_code, resp.text)
+                raise RuntimeError("Graph get_attachment failed")
+            return resp.json()
+
+
+graph_client = GraphClient()

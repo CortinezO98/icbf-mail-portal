@@ -1,71 +1,46 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
-from typing import Iterator, Optional, Dict
-
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine, Connection
-from sqlalchemy.exc import SQLAlchemyError
-
-from .settings import Settings, RuntimeConfig
-
-
-_engine: Optional[Engine] = None
+from sqlalchemy.orm import sessionmaker, Session
+from contextlib import contextmanager
+from app.settings import settings
 
 
-def init_engine(settings: Settings) -> Engine:
-    global _engine
-    if _engine is None:
-        _engine = create_engine(
-            settings.db_url(),
-            pool_pre_ping=True,
-            pool_size=settings.DB_POOL_SIZE,
-            max_overflow=settings.DB_MAX_OVERFLOW,
-            future=True,
-        )
-    return _engine
+def build_db_url() -> str:
+    # MySQL/MariaDB via PyMySQL
+    # mysql+pymysql://user:pass@host:port/db?charset=utf8mb4
+    user = settings.DB_USER
+    pwd = settings.DB_PASSWORD or ""
+    host = settings.DB_HOST
+    port = settings.DB_PORT
+    db = settings.DB_NAME
+    return f"mysql+pymysql://{user}:{pwd}@{host}:{port}/{db}?charset=utf8mb4"
+
+
+engine = create_engine(
+    build_db_url(),
+    pool_pre_ping=True,
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    future=True,
+)
+
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
 @contextmanager
-def db_conn(engine: Engine) -> Iterator[Connection]:
-    conn = engine.connect()
-    trans = conn.begin()
+def get_db_session() -> Session:
+    db: Session = SessionLocal()
     try:
-        yield conn
-        trans.commit()
+        yield db
+        db.commit()
     except Exception:
-        trans.rollback()
+        db.rollback()
         raise
     finally:
-        conn.close()
+        db.close()
 
 
-def load_runtime_config_from_db(engine: Engine) -> RuntimeConfig:
-    """
-    Reads system_config for operational (non-secret) settings.
-    Missing keys are ignored.
-    """
-    keys = [
-        "ATTACHMENTS_DIR",
-        "MAX_ATTACHMENT_SIZE_MB",
-        "ALLOWED_ATTACHMENT_EXT",
-        "BLOCKED_ATTACHMENT_EXT",
-        "MAILBOX_EMAIL",
-    ]
-    cfg: Dict[str, str] = {}
+def ping_db() -> None:
     with engine.connect() as conn:
-        rows = conn.execute(
-            text("SELECT config_key, config_value FROM system_config WHERE config_key IN :keys"),
-            {"keys": tuple(keys)},
-        ).fetchall()
-        for k, v in rows:
-            if v is not None:
-                cfg[str(k)] = str(v)
-
-    return RuntimeConfig(
-        ATTACHMENTS_DIR=cfg.get("ATTACHMENTS_DIR"),
-        MAX_ATTACHMENT_SIZE_MB=int(cfg["MAX_ATTACHMENT_SIZE_MB"]) if "MAX_ATTACHMENT_SIZE_MB" in cfg else None,
-        ALLOWED_ATTACHMENT_EXT=cfg.get("ALLOWED_ATTACHMENT_EXT"),
-        BLOCKED_ATTACHMENT_EXT=cfg.get("BLOCKED_ATTACHMENT_EXT"),
-        MAILBOX_EMAIL=cfg.get("MAILBOX_EMAIL"),
-    )
+        conn.execute(text("SELECT 1"))

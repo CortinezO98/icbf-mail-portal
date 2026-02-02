@@ -1,242 +1,229 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional, List
+from datetime import datetime
+from typing import Any
 
-from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
-from .graph_client import GraphClient, parse_message_id_from_notification
-from . import repos
-from .storage import (
-    validate_attachment,
-    save_attachment_bytes,
-    decode_graph_content_bytes,
-)
+from app.settings import settings
+from app.graph_client import graph_client
+from app.storage import decode_graph_content_bytes, save_attachment_bytes
+from app import repos
 
-log = logging.getLogger("app.sync_service")
+logger = logging.getLogger("app.sync_service")
 
 
-def _parse_dt(dt_str: Optional[str]) -> Optional[datetime]:
+def _parse_dt(dt_str: str | None) -> datetime | None:
     if not dt_str:
         return None
-    # Graph gives ISO8601 like 2026-01-15T15:22:11Z
-    # store as UTC naive (DATETIME without TZ)
-    d = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-    d = d.astimezone(timezone.utc).replace(tzinfo=None)
-    return d
+    # Graph típicamente: 2026-01-15T17:19:44Z
+    try:
+        if dt_str.endswith("Z"):
+            dt_str = dt_str.replace("Z", "+00:00")
+        return datetime.fromisoformat(dt_str).replace(tzinfo=None)
+    except Exception:
+        return None
 
 
-def _emails_list(recips: Any) -> str:
-    if not recips:
-        return ""
-    out = []
-    for r in recips:
-        addr = (r.get("emailAddress") or {}).get("address")
+def _emails_list(recipients: list[dict[str, Any]] | None) -> str | None:
+    if not recipients:
+        return None
+    emails = []
+    for r in recipients:
+        addr = (((r or {}).get("emailAddress") or {}).get("address")) if r else None
         if addr:
-            out.append(addr)
-    return ",".join(out)
+            emails.append(addr)
+    return ",".join(emails) if emails else None
 
 
 class SyncService:
-    def __init__(
-        self,
-        engine: Engine,
-        graph: GraphClient,
-        mailbox_email: str,
-        attachments_dir: str,
-        max_attachment_mb: int,
-        allowed_ext: list[str],
-        blocked_ext: list[str],
-        worker_version: str = "1.0.0",
-    ) -> None:
-        self.engine = engine
-        self.graph = graph
-        self.mailbox_email = mailbox_email
-        self.attachments_dir = attachments_dir
-        self.max_attachment_mb = max_attachment_mb
-        self.allowed_ext = allowed_ext
-        self.blocked_ext = blocked_ext
-        self.worker_version = worker_version
-
-    def process_notifications(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def process_notifications(self, db: Session, payload: dict[str, Any]) -> dict[str, Any]:
         """
-        Graph notifications payload: {"value":[{notification},...]}
-        For each notification:
-          - pull message from Graph
-          - dedupe insert messages
-          - create case if new conversation
-          - save attachments to disk
-          - audit case_events
+        payload = {"value": [ ...notifications... ]}
         """
-        notifications = payload.get("value") or []
+        notifs = payload.get("value") or []
         processed = 0
-        inserted_messages = 0
-        skipped_dupe = 0
-        attachments_saved = 0
-        errors: List[str] = []
+        skipped = 0
+        errors = 0
 
-        for n in notifications:
+        mailbox_email = settings.MAILBOX_EMAIL
+        mailbox_id = repos.get_or_create_mailbox(db, mailbox_email)
+
+        for n in notifs:
             try:
-                res = self._process_single_notification(n)
-                processed += 1
-                inserted_messages += (1 if res.get("inserted_message") else 0)
-                skipped_dupe += (1 if res.get("skipped_dupe") else 0)
-                attachments_saved += int(res.get("attachments_saved") or 0)
-            except Exception as e:
-                log.exception("Failed processing notification")
-                errors.append(str(e)[:300])
+                # 1) Validación clientState
+                client_state = n.get("clientState")
+                if settings.GRAPH_CLIENT_STATE and client_state != settings.GRAPH_CLIENT_STATE:
+                    skipped += 1
+                    continue
 
-        return {
-            "processed": processed,
-            "inserted_messages": inserted_messages,
-            "skipped_dupe": skipped_dupe,
-            "attachments_saved": attachments_saved,
-            "errors": errors,
-        }
+                # 2) Identificar messageId
+                rd = n.get("resourceData") or {}
+                message_id = rd.get("id")
+                if not message_id:
+                    # a veces viene en resource
+                    skipped += 1
+                    continue
 
-    def _process_single_notification(self, n: Dict[str, Any]) -> Dict[str, Any]:
-        msg_id = parse_message_id_from_notification(n)
-        if not msg_id:
-            raise ValueError("Notification without message id")
+                # 3) Pull mensaje a Graph
+                msg = await graph_client.get_message(mailbox_email, message_id)
 
-        message = self.graph.get_message(self.mailbox_email, msg_id)
+                provider_message_id = str(msg.get("id", message_id))
+                # Dedupe: si ya existe message para ese mailbox+provider_message_id -> skip
+                existing_case = repos.get_case_by_message_dedupe(db, mailbox_id, provider_message_id)
+                if existing_case:
+                    skipped += 1
+                    continue
 
-        provider_message_id = str(message.get("id"))
-        conversation_id = message.get("conversationId")
-        internet_message_id = message.get("internetMessageId")
-        in_reply_to = message.get("inReplyTo")
-        subject = message.get("subject") or "(sin asunto)"
+                subject = (msg.get("subject") or "(Sin asunto)")[:255]
 
-        from_email = ((message.get("from") or {}).get("emailAddress") or {}).get("address") or ""
-        to_emails = _emails_list(message.get("toRecipients"))
-        cc_emails = _emails_list(message.get("ccRecipients"))
-        bcc_emails = _emails_list(message.get("bccRecipients"))
+                from_obj = (msg.get("from") or {}).get("emailAddress") or {}
+                from_email = (from_obj.get("address") or "").strip() or "unknown@unknown"
 
-        received_at = _parse_dt(message.get("receivedDateTime"))
-        sent_at = _parse_dt(message.get("sentDateTime"))
-        has_attachments = 1 if message.get("hasAttachments") else 0
+                requester_name = (from_obj.get("name") or None)
 
-        body = message.get("body") or {}
-        body_type = (body.get("contentType") or "").lower()
-        body_content = body.get("content") or ""
-        body_text = None
-        body_html = None
-        if body_type == "html":
-            body_html = body_content
-        else:
-            body_text = body_content
+                received_at = _parse_dt(msg.get("receivedDateTime")) or datetime.utcnow()
+                sent_at = _parse_dt(msg.get("sentDateTime"))
 
-        # business decision: IN messages create/attach cases
-        direction = "IN"  # webhook we process for inbound folder (MVP)
-        requester_email = from_email or "unknown@unknown"
-        requester_name = None  # could be enriched later
+                to_emails = _emails_list(msg.get("toRecipients"))
+                cc_emails = _emails_list(msg.get("ccRecipients"))
+                bcc_emails = _emails_list(msg.get("bccRecipients"))
 
-        with repos.db_conn(self.engine) as conn:
-            mailbox_id = repos.ensure_mailbox(conn, self.mailbox_email)
+                conversation_id = msg.get("conversationId")
+                internet_message_id = msg.get("internetMessageId")
+                in_reply_to = msg.get("inReplyTo")
 
-            # case association by conversation
-            case_id = None
-            if conversation_id:
-                case_id = repos.get_case_by_conversation_id(conn, mailbox_id, conversation_id)
+                body = msg.get("body") or {}
+                body_ct = (body.get("contentType") or "").upper()
+                body_content = body.get("content")
 
-            if case_id is None:
-                # create new case for new conversation
-                if not received_at:
-                    received_at = repos.utcnow()
+                body_text = body_content if body_ct == "TEXT" else None
+                body_html = body_content if body_ct == "HTML" else None
+
+                has_attachments = 1 if msg.get("hasAttachments") else 0
+
+                # 4) Crear caso
                 case_id = repos.create_case(
-                    conn=conn,
+                    db,
                     mailbox_id=mailbox_id,
                     subject=subject,
-                    requester_email=requester_email,
+                    requester_email=from_email,
                     requester_name=requester_name,
-                    received_at_utc=received_at,
+                    received_at=received_at,
                 )
 
-            inserted, db_message_id = repos.insert_message_dedupe(
-                conn=conn,
-                case_id=case_id,
-                mailbox_id=mailbox_id,
-                folder_id=None,
-                direction=direction,
-                provider_message_id=provider_message_id,
-                conversation_id=conversation_id,
-                internet_message_id=internet_message_id,
-                in_reply_to=in_reply_to,
-                from_email=from_email[:190] if from_email else "",
-                to_emails=to_emails,
-                cc_emails=cc_emails,
-                bcc_emails=bcc_emails,
-                subject=subject,
-                body_text=body_text,
-                body_html=body_html,
-                received_at_utc=received_at,
-                sent_at_utc=sent_at,
-                has_attachments=has_attachments,
-                processed_by_worker=self.worker_version,
-            )
-
-            if not inserted:
-                return {"inserted_message": False, "skipped_dupe": True, "attachments_saved": 0}
-
-            # If attachments exist, fetch + store
-            saved_count = 0
-            if has_attachments:
-                # need case_number for path
-                row = conn.execute(
-                    repos.text("SELECT case_number FROM cases WHERE id = :id LIMIT 1"),
-                    {"id": case_id},
-                ).fetchone()
-                case_number = str(row[0]) if row else f"ICBF-{datetime.utcnow().year}-000000"
-
-                att_list = self.graph.list_attachments(self.mailbox_email, provider_message_id)
-                for att in att_list:
-                    # Graph attachment types: fileAttachment, itemAttachment, referenceAttachment
-                    odata_type = (att.get("@odata.type") or "").lower()
-                    if "fileattachment" not in odata_type:
-                        continue  # ignore non-file for MVP
-
-                    filename = att.get("name") or "attachment.bin"
-                    content_type = att.get("contentType") or "application/octet-stream"
-                    size_bytes = int(att.get("size") or 0)
-                    is_inline = 1 if att.get("isInline") else 0
-                    content_id = att.get("contentId")
-
-                    validate_attachment(
-                        filename=filename,
-                        size_bytes=size_bytes,
-                        max_mb=self.max_attachment_mb,
-                        allowed_ext=self.allowed_ext,
-                        blocked_ext=self.blocked_ext,
+                # 5) Insert message (dedupe lo impone UNIQUE en DB)
+                try:
+                    repos.insert_message_inbound(
+                        db,
+                        case_id=case_id,
+                        mailbox_id=mailbox_id,
+                        folder_id=None,
+                        provider_message_id=provider_message_id,
+                        conversation_id=conversation_id,
+                        internet_message_id=internet_message_id,
+                        in_reply_to=in_reply_to,
+                        from_email=from_email,
+                        to_emails=to_emails,
+                        cc_emails=cc_emails,
+                        bcc_emails=bcc_emails,
+                        subject=subject,
+                        body_text=body_text,
+                        body_html=body_html,
+                        received_at=received_at,
+                        sent_at=sent_at,
+                        has_attachments=has_attachments,
+                        processed_by_worker="worker",
                     )
+                except IntegrityError:
+                    # ya existía (race)
+                    skipped += 1
+                    continue
 
-                    # Pull full attachment to obtain contentBytes
-                    att_id = str(att.get("id"))
-                    full_att = self.graph.get_attachment(self.mailbox_email, provider_message_id, att_id)
-                    content_b64 = full_att.get("contentBytes")
-                    if not content_b64:
-                        continue
+                message_pk = repos.get_message_pk(db, mailbox_id, provider_message_id)
 
-                    content_bytes = decode_graph_content_bytes(content_b64)
-                    saved = save_attachment_bytes(
-                        base_dir=repos.Path(self.attachments_dir),
-                        case_number=case_number,
-                        message_id=str(db_message_id),
-                        filename=filename,
-                        content_bytes=content_bytes,
-                    )
+                # 6) Adjuntos
+                if has_attachments:
+                    attachments = await graph_client.list_attachments(mailbox_email, provider_message_id)
+                    # Necesitamos case_number para ruta (lo buscamos)
+                    row = db.execute(
+                        repos.text("SELECT case_number FROM cases WHERE id = :id LIMIT 1"),
+                        {"id": case_id},
+                    ).fetchone()
+                    case_number = str(row[0]) if row else f"ICBF-{datetime.utcnow().year}-000000"
 
-                    repos.insert_attachment(
-                        conn=conn,
-                        message_id=db_message_id,
-                        filename=filename,
-                        content_type=content_type,
-                        size_bytes=saved.size_bytes,
-                        sha256=saved.sha256,
-                        is_inline=is_inline,
-                        content_id=content_id,
-                        storage_path=saved.path,
-                    )
-                    saved_count += 1
+                    for a in attachments:
+                        odata_type = (a.get("@odata.type") or "").lower()
+                        if "fileattachment" not in odata_type:
+                            # itemAttachment / referenceAttachment etc -> (MVP) skip
+                            continue
 
-            return {"inserted_message": True, "skipped_dupe": False, "attachments_saved": saved_count}
+                        filename = a.get("name") or "attachment.bin"
+                        content_type = a.get("contentType") or "application/octet-stream"
+                        size_bytes = int(a.get("size") or 0)
+
+                        # contentBytes puede no venir; si no viene, hacemos get_attachment
+                        content_b64 = a.get("contentBytes")
+                        if not content_b64:
+                            att_id = a.get("id")
+                            if not att_id:
+                                continue
+                            full = await graph_client.get_attachment(mailbox_email, provider_message_id, att_id)
+                            content_b64 = full.get("contentBytes")
+                            size_bytes = int(full.get("size") or size_bytes)
+                            content_type = full.get("contentType") or content_type
+                            filename = full.get("name") or filename
+
+                        if not content_b64:
+                            continue
+
+                        content_bytes = decode_graph_content_bytes(content_b64)
+                        storage_path, sha256, real_size = save_attachment_bytes(
+                            case_number=case_number,
+                            message_id=provider_message_id,
+                            filename=filename,
+                            content_bytes=content_bytes,
+                        )
+
+                        repos.insert_attachment(
+                            db,
+                            message_id_pk=message_pk,
+                            filename=filename,
+                            content_type=content_type,
+                            size_bytes=real_size,
+                            sha256=sha256,
+                            is_inline=int(a.get("isInline") or 0),
+                            content_id=a.get("contentId"),
+                            storage_path=storage_path,
+                        )
+
+                # 7) Auditoría
+                repos.insert_case_event(
+                    db,
+                    case_id=case_id,
+                    actor_user_id=None,
+                    source="WORKER",
+                    event_type="EMAIL_RECEIVED",
+                    from_status_id=None,
+                    to_status_id=repos.get_status_id_by_code(db, "NUEVO"),
+                    details={
+                        "provider_message_id": provider_message_id,
+                        "conversation_id": conversation_id,
+                        "from_email": from_email,
+                        "subject": subject,
+                        "has_attachments": bool(has_attachments),
+                    },
+                )
+
+                processed += 1
+
+            except Exception as e:
+                errors += 1
+                logger.exception("Error processing notification: %s", str(e))
+
+        return {"processed": processed, "skipped": skipped, "errors": errors}
+
+
+sync_service = SyncService()

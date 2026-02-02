@@ -1,62 +1,48 @@
 from __future__ import annotations
 
+import time
 import logging
-from pathlib import Path
-from typing import Optional, Dict, Any
+import httpx
+from app.settings import settings
 
-import msal
-
-log = logging.getLogger("app.auth_graph")
+logger = logging.getLogger("app.auth_graph")
 
 
 class GraphAuth:
-    def __init__(
-        self,
-        tenant_id: str,
-        client_id: str,
-        client_secret: str = "",
-        cert_private_key_path: str = "",
-        cert_thumbprint: str = "",
-    ) -> None:
-        self.tenant_id = tenant_id
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.cert_private_key_path = cert_private_key_path
-        self.cert_thumbprint = cert_thumbprint
+    """
+    Token OAuth2 client_credentials (secret).
+    Cachea token hasta expirar.
+    """
+    def __init__(self) -> None:
+        self._access_token: str | None = None
+        self._expires_at: float = 0.0
 
-        self.authority = f"https://login.microsoftonline.com/{tenant_id}"
-        self.scope = ["https://graph.microsoft.com/.default"]
+    async def get_token(self) -> str:
+        now = time.time()
+        if self._access_token and now < (self._expires_at - 60):
+            return self._access_token
 
-        self._app = self._build_app()
+        if not settings.GRAPH_TENANT_ID or not settings.GRAPH_CLIENT_ID or not settings.GRAPH_CLIENT_SECRET:
+            raise RuntimeError("Graph credentials missing: set GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET")
 
-    def _build_app(self) -> msal.ConfidentialClientApplication:
-        if self.cert_private_key_path and self.cert_thumbprint:
-            key_pem = Path(self.cert_private_key_path).read_text(encoding="utf-8")
-            cred = {"private_key": key_pem, "thumbprint": self.cert_thumbprint}
-            log.info("GraphAuth using certificate-based auth")
-            return msal.ConfidentialClientApplication(
-                client_id=self.client_id,
-                authority=self.authority,
-                client_credential=cred,
-            )
+        token_url = f"https://login.microsoftonline.com/{settings.GRAPH_TENANT_ID}/oauth2/v2.0/token"
+        data = {
+            "client_id": settings.GRAPH_CLIENT_ID,
+            "client_secret": settings.GRAPH_CLIENT_SECRET,
+            "grant_type": "client_credentials",
+            "scope": "https://graph.microsoft.com/.default",
+        }
 
-        if self.client_secret:
-            log.info("GraphAuth using client-secret auth")
-            return msal.ConfidentialClientApplication(
-                client_id=self.client_id,
-                authority=self.authority,
-                client_credential=self.client_secret,
-            )
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(token_url, data=data)
+            if resp.status_code != 200:
+                logger.error("Token request failed: %s %s", resp.status_code, resp.text)
+                raise RuntimeError("Graph token request failed")
+            payload = resp.json()
 
-        raise RuntimeError("Graph credentials missing. Set GRAPH_CLIENT_SECRET or certificate settings.")
+        self._access_token = payload["access_token"]
+        self._expires_at = now + float(payload.get("expires_in", 3599))
+        return self._access_token
 
-    def get_access_token(self) -> str:
-        # Try cache first
-        result = self._app.acquire_token_silent(self.scope, account=None)
-        if not result:
-            result = self._app.acquire_token_for_client(scopes=self.scope)
 
-        if "access_token" not in result:
-            raise RuntimeError(f"Graph token error: {result.get('error')} - {result.get('error_description')}")
-
-        return str(result["access_token"])
+graph_auth = GraphAuth()
