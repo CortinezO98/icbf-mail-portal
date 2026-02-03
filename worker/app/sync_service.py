@@ -37,6 +37,23 @@ def _emails(recipients: list[dict[str, Any]] | None) -> str | None:
     return ";".join(out) if out else None
 
 
+def _header_value(headers: list[dict[str, Any]] | None, name: str) -> str | None:
+    """
+    Busca un header por nombre (case-insensitive) en internetMessageHeaders.
+    Devuelve el value como string o None.
+    """
+    if not headers:
+        return None
+    lname = name.lower()
+    for h in headers:
+        if not isinstance(h, dict):
+            continue
+        if str(h.get("name", "")).lower() == lname:
+            v = h.get("value")
+            return str(v) if v else None
+    return None
+
+
 def _extract_message_id(notification: dict[str, Any]) -> str | None:
     """
     Preferimos resourceData.id (Graph normalmente lo trae).
@@ -195,7 +212,10 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
 
     internet_message_id = msg.get("internetMessageId")
     conversation_id = msg.get("conversationId")
-    in_reply_to = msg.get("inReplyTo")
+
+    # ✅ Cambio PROD: In-Reply-To sale de headers (internetMessageHeaders)
+    internet_headers = msg.get("internetMessageHeaders") or []
+    in_reply_to = _header_value(internet_headers, "In-Reply-To")
 
     body = msg.get("body") or {}
     body_type = (body.get("contentType") or "").lower()
@@ -371,8 +391,11 @@ async def _process_attachments(*, mailbox_id: int, provider_message_id: str, mai
         # Evita duplicar adjuntos si ya estaban
         existing_count = _attachments_count(db, message_pk=message_pk)
         if existing_count > 0:
-            logger.info("Attachments already exist for message_pk=%s count=%s -> skip insert", message_pk, existing_count)
-            return
+            logger.info(
+                "Attachments already exist for message_pk=%s count=%s -> will continue (idempotent insert)",
+                message_pk,
+                existing_count,
+            )
 
         for p in prepared:
             repos.insert_attachment(
@@ -388,6 +411,7 @@ async def _process_attachments(*, mailbox_id: int, provider_message_id: str, mai
             )
 
     logger.info("Inserted attachments=%s for provider_message_id=%s", len(prepared), provider_message_id)
+
 
 async def process_message_id_async(message_id: str) -> None:
     """

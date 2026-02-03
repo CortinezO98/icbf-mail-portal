@@ -10,8 +10,7 @@ from app.settings import settings
 from app.webhook import router as webhook_router
 from app.subscriptions_routes import router as subs_router
 from app.delta_routes import router as delta_router
-
-
+from app.background_jobs import start_background_jobs, stop_background_jobs
 
 logger = logging.getLogger("app.main")
 
@@ -20,7 +19,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="ICBF Mail Worker", version="1.0.0")
 
     @app.on_event("startup")
-    def on_startup() -> None:
+    async def on_startup() -> None:
         # Log seguro (NO imprime secretos)
         logger.warning(
             "STARTUP | env=%s | host=%s | port=%s | mailbox=%s | admin_key_configured=%s | public_base_url=%s | env_file=%s",
@@ -32,6 +31,12 @@ def create_app() -> FastAPI:
             settings.PUBLIC_BASE_URL,
             "worker/.env",
         )
+
+        await start_background_jobs()
+
+    @app.on_event("shutdown")
+    async def on_shutdown() -> None:
+        await stop_background_jobs()
 
     @app.get("/health")
     def health() -> dict:

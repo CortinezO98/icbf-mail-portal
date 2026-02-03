@@ -219,7 +219,7 @@ def insert_attachment(
 ) -> None:
     db.execute(
         text("""
-            INSERT INTO attachments (
+            INSERT IGNORE INTO attachments (
               message_id, filename, content_type, size_bytes,
               sha256, is_inline, content_id, storage_path, created_at
             )
@@ -239,7 +239,6 @@ def insert_attachment(
             "storage_path": storage_path[:600],
         },
     )
-
 
 def get_message_pk(db: Session, mailbox_id: int, provider_message_id: str) -> int:
     row = db.execute(
@@ -408,38 +407,35 @@ def ensure_graph_delta_state_table(db: Session) -> None:
     """))
 
 
-def list_monitored_folders(db: Session, *, mailbox_id: int) -> list[dict]:
+def list_monitored_folders(db: Session, *, mailbox_id: int) -> list[tuple[int, str, str | None]]:
     """
-    Returns folders to run delta against.
-    Uses mailbox_folders.is_monitored=1.
+    Returns: [(folder_id, folder_code, graph_folder_id), ...]
     """
     rows = db.execute(text("""
-        SELECT id, folder_code, graph_folder_id, display_name
+        SELECT id, folder_code, graph_folder_id
         FROM mailbox_folders
-        WHERE mailbox_id = :mailbox_id
+        WHERE mailbox_id = :mid
           AND is_monitored = 1
         ORDER BY id ASC
-    """), {"mailbox_id": mailbox_id}).fetchall()
+    """), {"mid": mailbox_id}).fetchall()
 
-    out: list[dict] = []
+    out: list[tuple[int, str, str | None]] = []
     for r in rows:
-        out.append({
-            "folder_id": int(r[0]),
-            "folder_code": str(r[1]),
-            "graph_folder_id": (str(r[2]) if r[2] else None),
-            "display_name": (str(r[3]) if r[3] else None),
-        })
+        out.append((int(r[0]), str(r[1]), (str(r[2]) if r[2] else None)))
     return out
 
 
 def get_delta_state(db: Session, *, mailbox_id: int, folder_id: int):
+    """
+    Returns row or None:
+      (delta_link, next_link, last_sync_at, last_status_code, last_error)
+    """
     return db.execute(text("""
-        SELECT id, delta_link, next_link, last_sync_at, last_status_code, last_error
+        SELECT delta_link, next_link, last_sync_at, last_status_code, last_error
         FROM graph_delta_state
-        WHERE mailbox_id = :mailbox_id
-          AND folder_id  = :folder_id
+        WHERE mailbox_id = :mid AND folder_id = :fid
         LIMIT 1
-    """), {"mailbox_id": mailbox_id, "folder_id": folder_id}).fetchone()
+    """), {"mid": mailbox_id, "fid": folder_id}).fetchone()
 
 
 def upsert_delta_state(
@@ -457,17 +453,17 @@ def upsert_delta_state(
         INSERT INTO graph_delta_state
           (mailbox_id, folder_id, delta_link, next_link, last_sync_at, last_status_code, last_error, created_at, updated_at)
         VALUES
-          (:mailbox_id, :folder_id, :delta_link, :next_link, :last_sync_at, :last_status_code, :last_error, NOW(6), NOW(6))
+          (:mid, :fid, :delta_link, :next_link, :last_sync_at, :last_status_code, :last_error, NOW(6), NOW(6))
         ON DUPLICATE KEY UPDATE
           delta_link = VALUES(delta_link),
-          next_link = VALUES(next_link),
+          next_link  = VALUES(next_link),
           last_sync_at = VALUES(last_sync_at),
           last_status_code = VALUES(last_status_code),
           last_error = VALUES(last_error),
           updated_at = NOW(6)
     """), {
-        "mailbox_id": mailbox_id,
-        "folder_id": folder_id,
+        "mid": mailbox_id,
+        "fid": folder_id,
         "delta_link": delta_link,
         "next_link": next_link,
         "last_sync_at": last_sync_at,
