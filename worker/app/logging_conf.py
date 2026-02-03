@@ -16,6 +16,5 @@ def setup_logging() -> None:
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-    # Silencia un poco ruido
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.INFO)

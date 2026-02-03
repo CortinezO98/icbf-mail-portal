@@ -6,3 +6,5 @@ pymysql>=1.1
 python-dotenv>=1.0
 pydantic>=2.7
 pydantic-settings>=2.3
+msal>=1.29.0
+truststore>=0.10

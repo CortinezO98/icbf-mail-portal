@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import time
+from typing import Any, Optional
+
 import httpx
-from typing import Any
 
 from app.auth_graph import graph_auth
 
@@ -22,14 +24,30 @@ class GraphClient:
             "Accept": "application/json",
         }
 
+    async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        headers = await self._headers()
+        kwargs.setdefault("headers", headers)
+        kwargs.setdefault("timeout", self._timeout)
+
+        # retry simple para 429 / 5xx
+        for attempt in range(1, 4):
+            async with httpx.AsyncClient() as client:
+                resp = await client.request(method, url, **kwargs)
+
+            if resp.status_code in (429, 500, 502, 503, 504):
+                retry_after = resp.headers.get("Retry-After")
+                sleep_s = int(retry_after) if retry_after and retry_after.isdigit() else attempt * 2
+                logger.warning("Graph retry %s %s status=%s sleep=%ss", method, url, resp.status_code, sleep_s)
+                time.sleep(sleep_s)
+                continue
+
+            return resp
+
+        return resp
+
     async def get_message(self, mailbox_email: str, message_id: str) -> dict[str, Any]:
-        """
-        Trae el mensaje completo. Para adjuntos, Graph puede enviar metadata;
-        si existe contentBytes lo usamos; si no, hacemos llamada por attachment.
-        """
         url = f"{GRAPH_BASE}/users/{mailbox_email}/messages/{message_id}"
         params = {
-            # bodyPreview no sirve para guardar HTML completo, pedimos body
             "$select": ",".join([
                 "id",
                 "subject",
@@ -46,34 +64,73 @@ class GraphClient:
                 "hasAttachments",
             ])
         }
-        headers = await self._headers()
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.get(url, headers=headers, params=params)
-            if resp.status_code != 200:
-                logger.error("get_message failed: %s %s", resp.status_code, resp.text)
-                raise RuntimeError("Graph get_message failed")
-            return resp.json()
+        resp = await self._request("GET", url, params=params)
+        if resp.status_code != 200:
+            logger.error("get_message failed: %s %s", resp.status_code, resp.text)
+            raise RuntimeError("Graph get_message failed")
+        return resp.json()
 
     async def list_attachments(self, mailbox_email: str, message_id: str) -> list[dict[str, Any]]:
         url = f"{GRAPH_BASE}/users/{mailbox_email}/messages/{message_id}/attachments"
-        headers = await self._headers()
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.get(url, headers=headers)
-            if resp.status_code != 200:
-                logger.error("list_attachments failed: %s %s", resp.status_code, resp.text)
-                raise RuntimeError("Graph list_attachments failed")
-            data = resp.json()
-            return data.get("value", [])
+        resp = await self._request("GET", url)
+        if resp.status_code != 200:
+            logger.error("list_attachments failed: %s %s", resp.status_code, resp.text)
+            raise RuntimeError("Graph list_attachments failed")
+        data = resp.json()
+        return data.get("value", [])
 
     async def get_attachment(self, mailbox_email: str, message_id: str, attachment_id: str) -> dict[str, Any]:
         url = f"{GRAPH_BASE}/users/{mailbox_email}/messages/{message_id}/attachments/{attachment_id}"
-        headers = await self._headers()
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.get(url, headers=headers)
-            if resp.status_code != 200:
-                logger.error("get_attachment failed: %s %s", resp.status_code, resp.text)
-                raise RuntimeError("Graph get_attachment failed")
-            return resp.json()
+        resp = await self._request("GET", url)
+        if resp.status_code != 200:
+            logger.error("get_attachment failed: %s %s", resp.status_code, resp.text)
+            raise RuntimeError("Graph get_attachment failed")
+        return resp.json()
+
+    # ============================
+    # Subscriptions (webhooks)
+    # ============================
+
+    async def create_subscription(
+        self,
+        *,
+        change_type: str,
+        notification_url: str,
+        resource: str,
+        expiration_datetime_iso: str,
+        client_state: str,
+    ) -> dict[str, Any]:
+        url = f"{GRAPH_BASE}/subscriptions"
+        payload = {
+            "changeType": change_type,
+            "notificationUrl": notification_url,
+            "resource": resource,
+            "expirationDateTime": expiration_datetime_iso,
+            "clientState": client_state,
+            "latestSupportedTlsVersion": "v1_2",
+        }
+        resp = await self._request("POST", url, json=payload)
+        if resp.status_code not in (200, 201):
+            logger.error("create_subscription failed: %s %s", resp.status_code, resp.text)
+            raise RuntimeError("Graph create_subscription failed")
+        return resp.json()
+
+    async def renew_subscription(self, subscription_id: str, expiration_datetime_iso: str) -> dict[str, Any]:
+        url = f"{GRAPH_BASE}/subscriptions/{subscription_id}"
+        payload = {"expirationDateTime": expiration_datetime_iso}
+        resp = await self._request("PATCH", url, json=payload)
+        if resp.status_code != 200:
+            logger.error("renew_subscription failed: %s %s", resp.status_code, resp.text)
+            raise RuntimeError("Graph renew_subscription failed")
+        return resp.json()
+
+    async def get_subscription(self, subscription_id: str) -> dict[str, Any]:
+        url = f"{GRAPH_BASE}/subscriptions/{subscription_id}"
+        resp = await self._request("GET", url)
+        if resp.status_code != 200:
+            logger.error("get_subscription failed: %s %s", resp.status_code, resp.text)
+            raise RuntimeError("Graph get_subscription failed")
+        return resp.json()
 
 
 graph_client = GraphClient()

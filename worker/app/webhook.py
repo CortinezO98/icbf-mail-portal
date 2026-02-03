@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from fastapi import APIRouter, Request, Response, HTTPException
 
 from app.settings import settings
-from app.sync_service import process_notifications_async
 
 logger = logging.getLogger("app.webhook")
 router = APIRouter()
@@ -12,7 +12,6 @@ router = APIRouter()
 
 @router.get("/graph/webhook")
 async def graph_webhook_get(request: Request) -> Response:
-    # Graph validation handshake
     token = request.query_params.get("validationToken")
     if token:
         return Response(content=token, media_type="text/plain", status_code=200)
@@ -21,25 +20,31 @@ async def graph_webhook_get(request: Request) -> Response:
 
 @router.post("/graph/webhook")
 async def graph_webhook_post(request: Request) -> Response:
-    # Graph validation handshake (también puede venir por POST)
     token = request.query_params.get("validationToken")
     if token:
         return Response(content=token, media_type="text/plain", status_code=200)
 
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    # Validación mínima de seguridad: clientState
     notifications = payload.get("value", [])
     if not isinstance(notifications, list):
         raise HTTPException(status_code=400, detail="Invalid notifications payload")
 
     for n in notifications:
         cs = n.get("clientState")
-        if cs and settings.GRAPH_CLIENT_STATE and cs != settings.GRAPH_CLIENT_STATE:
-            logger.warning("Rejected notification: invalid clientState")
+        if not cs or cs != settings.GRAPH_CLIENT_STATE:
+            logger.warning("Rejected notification: invalid/missing clientState")
             raise HTTPException(status_code=401, detail="Invalid clientState")
 
-    # Procesar async (no bloquear webhook)
-    await process_notifications_async(payload)
+    # ✅ respuesta rápida, proceso async (aquí solo simulamos)
+    asyncio.create_task(_process_dummy(payload))
 
     return Response(content="OK", media_type="text/plain", status_code=202)
+
+
+async def _process_dummy(payload: dict) -> None:
+    # En tu versión final aquí llamas sync_service.process_notifications_async(payload)
+    logger.info("Queued notifications=%s", len(payload.get("value", []) or []))

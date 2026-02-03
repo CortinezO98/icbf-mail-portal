@@ -37,7 +37,6 @@ def get_status_id_by_code(db: Session, code: str) -> int:
 
 def next_case_number(db: Session) -> str:
     year = datetime.utcnow().year
-    # lock row por año
     db.execute(text("INSERT IGNORE INTO case_sequences (year, last_value, updated_at) VALUES (:y, 0, NOW(6))"), {"y": year})
     row = db.execute(
         text("SELECT last_value FROM case_sequences WHERE year = :y FOR UPDATE"),
@@ -101,9 +100,6 @@ def create_case(
 
 
 def get_case_by_message_dedupe(db: Session, mailbox_id: int, provider_message_id: str) -> int | None:
-    """
-    Si un mensaje ya existe, obtenemos el case_id asociado (dedupe).
-    """
     row = db.execute(
         text("""
             SELECT case_id FROM messages
@@ -137,10 +133,6 @@ def insert_message_inbound(
     has_attachments: int,
     processed_by_worker: str | None,
 ) -> None:
-    """
-    Inserta message IN con dedupe por uq_messages_mailbox_provider.
-    Si ya existe, falla por unique -> capturar arriba si se requiere.
-    """
     db.execute(
         text("""
             INSERT INTO messages (
@@ -280,3 +272,75 @@ def insert_case_event(
 def load_system_config(db: Session) -> dict[str, str]:
     rows = db.execute(text("SELECT config_key, config_value FROM system_config")).fetchall()
     return {str(k): ("" if v is None else str(v)) for k, v in rows}
+
+
+# ============================================================
+# ✅ Subscriptions persistence (graph_subscriptions table)
+# ============================================================
+
+def ensure_graph_subscriptions_table(db: Session) -> None:
+    db.execute(text("""
+        CREATE TABLE IF NOT EXISTS graph_subscriptions (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          subscription_id VARCHAR(190) NOT NULL UNIQUE,
+          mailbox_email VARCHAR(190) NOT NULL,
+          resource VARCHAR(255) NOT NULL,
+          notification_url VARCHAR(600) NOT NULL,
+          expiration_datetime DATETIME(6) NOT NULL,
+          status VARCHAR(30) NOT NULL DEFAULT 'active',
+          created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+          updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """))
+
+
+def upsert_subscription(
+    db,
+    subscription_id: str,
+    mailbox_id: int,
+    resource: str,
+    notification_url: str,
+    expires_at,
+    status: str = "ACTIVE",
+):
+    db.execute(text("""
+        INSERT INTO graph_subscriptions
+          (subscription_id, mailbox_id, resource, notification_url, expires_at, status, last_renew_at)
+        VALUES
+          (%(sid)s, %(mbid)s, %(res)s, %(url)s, %(exp)s, %(st)s, CURRENT_TIMESTAMP(6))
+        ON DUPLICATE KEY UPDATE
+          mailbox_id=VALUES(mailbox_id),
+          resource=VALUES(resource),
+          notification_url=VALUES(notification_url),
+          expires_at=VALUES(expires_at),
+          status=VALUES(status),
+          last_renew_at=CURRENT_TIMESTAMP(6)
+    """), {
+        "sid": subscription_id,
+        "mbid": mailbox_id,
+        "res": resource,
+        "url": notification_url,
+        "exp": expires_at,
+        "st": status,
+    })
+
+
+def get_active_subscription(db, mailbox_id: int, resource: str):
+    return db.execute(text("""
+        SELECT subscription_id, expires_at, status
+        FROM graph_subscriptions
+        WHERE mailbox_id=%(mbid)s
+          AND resource=%(res)s
+          AND status='ACTIVE'
+        ORDER BY COALESCE(last_renew_at, created_at) DESC
+        LIMIT 1
+    """), {"mbid": mailbox_id, "res": resource}).fetchone()
+
+
+def mark_subscription_status(db: Session, subscription_id: str, status: str) -> None:
+    db.execute(text("""
+        UPDATE graph_subscriptions
+        SET status=:st, updated_at=CURRENT_TIMESTAMP(6)
+        WHERE subscription_id=:sid
+        LIMIT 1
+    """), {"sid": subscription_id, "st": status})
