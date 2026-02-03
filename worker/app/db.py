@@ -1,20 +1,25 @@
 from __future__ import annotations
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker, Session
 from contextlib import contextmanager
+from urllib.parse import quote_plus
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session, sessionmaker
+
 from app.settings import settings
 
 
 def build_db_url() -> str:
-    # MySQL/MariaDB via PyMySQL
-    # mysql+pymysql://user:pass@host:port/db?charset=utf8mb4
     user = settings.DB_USER
     pwd = settings.DB_PASSWORD or ""
     host = settings.DB_HOST
     port = settings.DB_PORT
     db = settings.DB_NAME
-    return f"mysql+pymysql://{user}:{pwd}@{host}:{port}/{db}?charset=utf8mb4"
+
+    # IMPORTANT: encode password for URL safety (handles @ * : / etc.)
+    pwd_enc = quote_plus(pwd)
+
+    return f"mysql+pymysql://{user}:{pwd_enc}@{host}:{port}/{db}?charset=utf8mb4"
 
 
 engine = create_engine(
