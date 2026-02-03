@@ -29,7 +29,6 @@ class GraphAuth:
 
         authority = f"https://login.microsoftonline.com/{settings.GRAPH_TENANT_ID}"
 
-        # ✅ Prefer certificate if provided
         if settings.GRAPH_CERT_PRIVATE_KEY_PATH and settings.GRAPH_CERT_THUMBPRINT:
             key_path = Path(settings.GRAPH_CERT_PRIVATE_KEY_PATH).expanduser()
             if not key_path.exists():
@@ -65,7 +64,6 @@ class GraphAuth:
         scopes = ["https://graph.microsoft.com/.default"]
 
         def _acquire() -> dict:
-            # Silent uses in-memory cache first
             result = app.acquire_token_silent(scopes=scopes, account=None)
             if not result:
                 result = app.acquire_token_for_client(scopes=scopes)

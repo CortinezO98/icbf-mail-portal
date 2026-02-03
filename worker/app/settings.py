@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     SUBSCRIPTION_LIFETIME_MINUTES: int = 10080
     SUB_RENEW_THRESHOLD_MINUTES: int = 1440
 
+    # Delta backstop
+    DELTA_ENABLED: int = 1
+    DELTA_INTERVAL_MINUTES: int = 10
+    DELTA_PAGE_SIZE: int = 50
+    DELTA_MAX_PAGES_PER_RUN: int = 25
+    DELTA_CONCURRENCY: int = 3   
+
     # Admin
     ADMIN_API_KEY: str = ""
 

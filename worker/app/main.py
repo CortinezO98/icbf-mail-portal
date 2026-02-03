@@ -9,6 +9,8 @@ from fastapi import FastAPI
 from app.settings import settings
 from app.webhook import router as webhook_router
 from app.subscriptions_routes import router as subs_router
+from app.delta_routes import router as delta_router
+
 
 
 logger = logging.getLogger("app.main")
@@ -37,6 +39,8 @@ def create_app() -> FastAPI:
 
     app.include_router(webhook_router)
     app.include_router(subs_router)
+    app.include_router(delta_router)
+
     return app
 
 

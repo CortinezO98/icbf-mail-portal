@@ -378,3 +378,112 @@ def mark_subscription_status(db: Session, *, subscription_id: str, status: str) 
         WHERE subscription_id = :subscription_id
         LIMIT 1
     """), {"subscription_id": subscription_id, "status": status})
+
+# ============================================================
+# Delta state persistence (graph_delta_state table)
+# ============================================================
+
+def ensure_graph_delta_state_table(db: Session) -> None:
+    """
+    Safe-guard: create table if missing.
+    If you already created it manually, this won't change it.
+    """
+    db.execute(text("""
+        CREATE TABLE IF NOT EXISTS graph_delta_state (
+          id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+          mailbox_id BIGINT(20) UNSIGNED NOT NULL,
+          folder_id  BIGINT(20) UNSIGNED NOT NULL,
+          delta_link MEDIUMTEXT NULL,
+          next_link  MEDIUMTEXT NULL,
+          last_sync_at DATETIME(6) NULL,
+          last_status_code INT NULL,
+          last_error VARCHAR(500) NULL,
+          created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+          updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+          PRIMARY KEY (id),
+          UNIQUE KEY uq_graph_delta_state_mailbox_folder (mailbox_id, folder_id),
+          KEY idx_graph_delta_state_mailbox (mailbox_id),
+          KEY idx_graph_delta_state_folder (folder_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+    """))
+
+
+def list_monitored_folders(db: Session, *, mailbox_id: int) -> list[dict]:
+    """
+    Returns folders to run delta against.
+    Uses mailbox_folders.is_monitored=1.
+    """
+    rows = db.execute(text("""
+        SELECT id, folder_code, graph_folder_id, display_name
+        FROM mailbox_folders
+        WHERE mailbox_id = :mailbox_id
+          AND is_monitored = 1
+        ORDER BY id ASC
+    """), {"mailbox_id": mailbox_id}).fetchall()
+
+    out: list[dict] = []
+    for r in rows:
+        out.append({
+            "folder_id": int(r[0]),
+            "folder_code": str(r[1]),
+            "graph_folder_id": (str(r[2]) if r[2] else None),
+            "display_name": (str(r[3]) if r[3] else None),
+        })
+    return out
+
+
+def get_delta_state(db: Session, *, mailbox_id: int, folder_id: int):
+    return db.execute(text("""
+        SELECT id, delta_link, next_link, last_sync_at, last_status_code, last_error
+        FROM graph_delta_state
+        WHERE mailbox_id = :mailbox_id
+          AND folder_id  = :folder_id
+        LIMIT 1
+    """), {"mailbox_id": mailbox_id, "folder_id": folder_id}).fetchone()
+
+
+def upsert_delta_state(
+    db: Session,
+    *,
+    mailbox_id: int,
+    folder_id: int,
+    delta_link: str | None,
+    next_link: str | None,
+    last_sync_at: datetime | None,
+    last_status_code: int | None,
+    last_error: str | None,
+) -> None:
+    db.execute(text("""
+        INSERT INTO graph_delta_state
+          (mailbox_id, folder_id, delta_link, next_link, last_sync_at, last_status_code, last_error, created_at, updated_at)
+        VALUES
+          (:mailbox_id, :folder_id, :delta_link, :next_link, :last_sync_at, :last_status_code, :last_error, NOW(6), NOW(6))
+        ON DUPLICATE KEY UPDATE
+          delta_link = VALUES(delta_link),
+          next_link = VALUES(next_link),
+          last_sync_at = VALUES(last_sync_at),
+          last_status_code = VALUES(last_status_code),
+          last_error = VALUES(last_error),
+          updated_at = NOW(6)
+    """), {
+        "mailbox_id": mailbox_id,
+        "folder_id": folder_id,
+        "delta_link": delta_link,
+        "next_link": next_link,
+        "last_sync_at": last_sync_at,
+        "last_status_code": last_status_code,
+        "last_error": (last_error[:500] if last_error else None),
+    })
+
+
+def reset_delta_state(db: Session, *, mailbox_id: int, folder_id: int, note: str = "reset") -> None:
+    upsert_delta_state(
+        db,
+        mailbox_id=mailbox_id,
+        folder_id=folder_id,
+        delta_link=None,
+        next_link=None,
+        last_sync_at=utcnow(),
+        last_status_code=None,
+        last_error=note,
+    )
