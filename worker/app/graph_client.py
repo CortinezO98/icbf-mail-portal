@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-import time
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
@@ -29,21 +29,21 @@ class GraphClient:
         kwargs.setdefault("headers", headers)
         kwargs.setdefault("timeout", self._timeout)
 
-        # retry simple para 429 / 5xx
-        for attempt in range(1, 4):
-            async with httpx.AsyncClient() as client:
+        # Reutiliza client en reintentos
+        async with httpx.AsyncClient() as client:
+            for attempt in range(1, 4):
                 resp = await client.request(method, url, **kwargs)
 
-            if resp.status_code in (429, 500, 502, 503, 504):
-                retry_after = resp.headers.get("Retry-After")
-                sleep_s = int(retry_after) if retry_after and retry_after.isdigit() else attempt * 2
-                logger.warning("Graph retry %s %s status=%s sleep=%ss", method, url, resp.status_code, sleep_s)
-                time.sleep(sleep_s)
-                continue
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    retry_after = resp.headers.get("Retry-After")
+                    sleep_s = int(retry_after) if retry_after and retry_after.isdigit() else attempt * 2
+                    logger.warning("Graph retry %s %s status=%s sleep=%ss", method, url, resp.status_code, sleep_s)
+                    await asyncio.sleep(sleep_s)
+                    continue
+
+                return resp
 
             return resp
-
-        return resp
 
     async def get_message(self, mailbox_email: str, message_id: str) -> dict[str, Any]:
         url = f"{GRAPH_BASE}/users/{mailbox_email}/messages/{message_id}"

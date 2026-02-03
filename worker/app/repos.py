@@ -95,8 +95,21 @@ def create_case(
             "last_activity_at": received_at,
         },
     )
-    row = db.execute(text("SELECT id, case_number FROM cases WHERE case_number = :cn LIMIT 1"), {"cn": case_number}).fetchone()
+    row = db.execute(text("SELECT id FROM cases WHERE case_number = :cn LIMIT 1"), {"cn": case_number}).fetchone()
     return int(row[0])
+
+
+def touch_case_activity(db: Session, *, case_id: int, last_activity_at: datetime) -> None:
+    db.execute(
+        text("""
+            UPDATE cases
+            SET last_activity_at = :dt,
+                updated_at = NOW(6)
+            WHERE id = :cid
+            LIMIT 1
+        """),
+        {"cid": case_id, "dt": last_activity_at},
+    )
 
 
 def get_case_by_message_dedupe(db: Session, mailbox_id: int, provider_message_id: str) -> int | None:
@@ -107,6 +120,21 @@ def get_case_by_message_dedupe(db: Session, mailbox_id: int, provider_message_id
             LIMIT 1
         """),
         {"mailbox_id": mailbox_id, "pmid": provider_message_id},
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
+def get_case_by_conversation_id(db: Session, *, mailbox_id: int, conversation_id: str) -> int | None:
+    row = db.execute(
+        text("""
+            SELECT case_id
+            FROM messages
+            WHERE mailbox_id = :mailbox_id
+              AND conversation_id = :cid
+            ORDER BY id ASC
+            LIMIT 1
+        """),
+        {"mailbox_id": mailbox_id, "cid": conversation_id},
     ).fetchone()
     return int(row[0]) if row else None
 
@@ -275,7 +303,7 @@ def load_system_config(db: Session) -> dict[str, str]:
 
 
 # ============================================================
-# ✅ Subscriptions persistence (graph_subscriptions table)
+# Subscriptions persistence (graph_subscriptions table)
 # ============================================================
 
 def ensure_graph_subscriptions_table(db: Session) -> None:

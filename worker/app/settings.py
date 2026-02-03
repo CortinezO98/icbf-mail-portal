@@ -55,7 +55,6 @@ class Settings(BaseSettings):
 
     GRAPH_CLIENT_STATE: str = ""
     MAILBOX_EMAIL: str = ""
-
     PUBLIC_BASE_URL: str = ""
 
     # Subscriptions
@@ -68,6 +67,7 @@ class Settings(BaseSettings):
     # Admin
     ADMIN_API_KEY: str = ""
 
+    # ---------- helpers ----------
     def allowed_ext_set(self) -> Set[str]:
         return {x.strip().lower().lstrip(".") for x in self.ALLOWED_ATTACHMENT_EXT.split(",") if x.strip()}
 
@@ -76,6 +76,10 @@ class Settings(BaseSettings):
 
     def max_attachment_bytes(self) -> int:
         return int(self.MAX_ATTACHMENT_SIZE_MB) * 1024 * 1024
+
+    def attachments_path(self) -> Path:
+        # Carpeta fuera del webroot (como definimos en arquitectura)
+        return Path(self.ATTACHMENTS_DIR).expanduser()
 
 
 settings = Settings()
