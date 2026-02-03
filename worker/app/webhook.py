@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from fastapi import APIRouter, Request, Response, HTTPException
+from typing import Any
+
+from fastapi import APIRouter, Request, Response
 
 from app.settings import settings
 
@@ -25,26 +28,69 @@ async def graph_webhook_post(request: Request) -> Response:
         return Response(content=token, media_type="text/plain", status_code=200)
 
     try:
-        payload = await request.json()
+        raw = await request.body()
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
+        logger.warning("Webhook invalid JSON | ip=%s", _client_ip(request))
+        return Response(status_code=202)  
 
-    notifications = payload.get("value", [])
+    notifications = payload.get("value") or []
     if not isinstance(notifications, list):
-        raise HTTPException(status_code=400, detail="Invalid notifications payload")
+        logger.warning("Webhook invalid payload shape | ip=%s | keys=%s", _client_ip(request), list(payload.keys()))
+        return Response(status_code=202)
+
+    valid: list[dict[str, Any]] = []
+    invalid = 0
 
     for n in notifications:
-        cs = n.get("clientState")
-        if not cs or cs != settings.GRAPH_CLIENT_STATE:
-            logger.warning("Rejected notification: invalid/missing clientState")
-            raise HTTPException(status_code=401, detail="Invalid clientState")
+        cs = (n or {}).get("clientState")
+        if cs and cs == settings.GRAPH_CLIENT_STATE:
+            valid.append(n)
+        else:
+            invalid += 1
 
-    # ✅ respuesta rápida, proceso async (aquí solo simulamos)
-    asyncio.create_task(_process_dummy(payload))
+    subs = list({(n.get("subscriptionId") or "") for n in valid if isinstance(n, dict)})
+    resources = list({(n.get("resource") or "") for n in valid if isinstance(n, dict)})
 
-    return Response(content="OK", media_type="text/plain", status_code=202)
+    logger.info(
+        "Webhook received | ip=%s | total=%s | valid=%s | invalid=%s | subs=%s",
+        _client_ip(request),
+        len(notifications),
+        len(valid),
+        invalid,
+        subs[:5],
+    )
+    if resources:
+        logger.info("Webhook resources (sample) | %s", resources[:3])
+
+    if valid:
+        asyncio.create_task(_process_notifications(valid))
+    else:
+        if invalid:
+            logger.warning("Webhook all notifications rejected by clientState | ip=%s", _client_ip(request))
+
+    return Response(status_code=202)
 
 
-async def _process_dummy(payload: dict) -> None:
-    # En tu versión final aquí llamas sync_service.process_notifications_async(payload)
-    logger.info("Queued notifications=%s", len(payload.get("value", []) or []))
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+async def _process_notifications(notifications: list[dict[str, Any]]) -> None:
+    """
+    Aquí vas a llamar tu lógica real:
+      - parsear resourceData.id (messageId)
+      - traer el mensaje por Graph
+      - persistir en BD
+    """
+    try:
+        logger.info("Queued notifications=%s", len(notifications))
+        # TODO: reemplazar por tu servicio real:
+        # await sync_service.process_notifications_async(notifications)
+    except Exception:
+        logger.exception("Webhook processing failed")

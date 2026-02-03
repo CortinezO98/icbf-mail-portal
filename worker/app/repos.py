@@ -282,65 +282,71 @@ def ensure_graph_subscriptions_table(db: Session) -> None:
     db.execute(text("""
         CREATE TABLE IF NOT EXISTS graph_subscriptions (
           id INT AUTO_INCREMENT PRIMARY KEY,
-          subscription_id VARCHAR(190) NOT NULL UNIQUE,
-          mailbox_email VARCHAR(190) NOT NULL,
+          mailbox_id INT NOT NULL,
+          subscription_id VARCHAR(190) NOT NULL,
           resource VARCHAR(255) NOT NULL,
           notification_url VARCHAR(600) NOT NULL,
-          expiration_datetime DATETIME(6) NOT NULL,
-          status VARCHAR(30) NOT NULL DEFAULT 'active',
+          expires_at DATETIME(6) NOT NULL,
+          status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
+          last_renew_at DATETIME(6) NULL,
           created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-          updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)
+          updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+          UNIQUE KEY uq_subscription_id (subscription_id),
+          UNIQUE KEY uq_mailbox_resource (mailbox_id, resource),
+          KEY idx_mailbox_status (mailbox_id, status)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """))
 
 
 def upsert_subscription(
-    db,
+    db: Session,
+    *,
     subscription_id: str,
     mailbox_id: int,
     resource: str,
     notification_url: str,
-    expires_at,
+    expires_at: datetime,
     status: str = "ACTIVE",
-):
+) -> None:
     db.execute(text("""
         INSERT INTO graph_subscriptions
-          (subscription_id, mailbox_id, resource, notification_url, expires_at, status, last_renew_at)
+          (mailbox_id, resource, subscription_id, notification_url, expires_at, status, last_renew_at)
         VALUES
-          (%(sid)s, %(mbid)s, %(res)s, %(url)s, %(exp)s, %(st)s, CURRENT_TIMESTAMP(6))
+          (:mailbox_id, :resource, :subscription_id, :notification_url, :expires_at, :status, CURRENT_TIMESTAMP(6))
         ON DUPLICATE KEY UPDATE
-          mailbox_id=VALUES(mailbox_id),
-          resource=VALUES(resource),
-          notification_url=VALUES(notification_url),
-          expires_at=VALUES(expires_at),
-          status=VALUES(status),
-          last_renew_at=CURRENT_TIMESTAMP(6)
+          subscription_id = VALUES(subscription_id),
+          notification_url = VALUES(notification_url),
+          expires_at = VALUES(expires_at),
+          status = VALUES(status),
+          last_renew_at = CURRENT_TIMESTAMP(6),
+          updated_at = CURRENT_TIMESTAMP(6)
     """), {
-        "sid": subscription_id,
-        "mbid": mailbox_id,
-        "res": resource,
-        "url": notification_url,
-        "exp": expires_at,
-        "st": status,
+        "mailbox_id": mailbox_id,
+        "resource": resource,
+        "subscription_id": subscription_id,
+        "notification_url": notification_url,
+        "expires_at": expires_at,
+        "status": status,
     })
 
 
-def get_active_subscription(db, mailbox_id: int, resource: str):
+def get_active_subscription(db: Session, *, mailbox_id: int, resource: str):
     return db.execute(text("""
         SELECT subscription_id, expires_at, status
         FROM graph_subscriptions
-        WHERE mailbox_id=%(mbid)s
-          AND resource=%(res)s
-          AND status='ACTIVE'
+        WHERE mailbox_id = :mailbox_id
+          AND resource = :resource
+          AND status = 'ACTIVE'
         ORDER BY COALESCE(last_renew_at, created_at) DESC
         LIMIT 1
-    """), {"mbid": mailbox_id, "res": resource}).fetchone()
+    """), {"mailbox_id": mailbox_id, "resource": resource}).fetchone()
 
 
-def mark_subscription_status(db: Session, subscription_id: str, status: str) -> None:
+def mark_subscription_status(db: Session, *, subscription_id: str, status: str) -> None:
     db.execute(text("""
         UPDATE graph_subscriptions
-        SET status=:st, updated_at=CURRENT_TIMESTAMP(6)
-        WHERE subscription_id=:sid
+        SET status = :status,
+            updated_at = CURRENT_TIMESTAMP(6)
+        WHERE subscription_id = :subscription_id
         LIMIT 1
-    """), {"sid": subscription_id, "st": status})
+    """), {"subscription_id": subscription_id, "status": status})

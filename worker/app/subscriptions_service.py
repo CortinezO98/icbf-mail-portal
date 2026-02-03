@@ -30,7 +30,6 @@ def _notification_url() -> str:
 
 
 def _needs_renew(expires_at: datetime) -> bool:
-    # En tu BD MySQL normalmente viene naive (sin tz). Conservamos ese contrato.
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     delta = expires_at - now
     return delta.total_seconds() <= int(settings.SUB_RENEW_THRESHOLD_MINUTES) * 60
@@ -43,10 +42,8 @@ async def ensure_subscription(dry_run: bool = False) -> dict:
     notification_url = _notification_url()
     resource = _resolve_resource()
 
-    # OJO: Graph limita el expiry (ya viste el error). Mantén <= 10070 min.
     exp_dt = datetime.now(timezone.utc) + timedelta(minutes=int(settings.SUBSCRIPTION_LIFETIME_MINUTES))
 
-    # ✅ Dry-run explícito
     if dry_run:
         return {
             "action": "dry_run",
@@ -57,13 +54,11 @@ async def ensure_subscription(dry_run: bool = False) -> dict:
             "note": "Dry run: no se llamó a Graph (dry_run=1).",
         }
 
-    # ✅ Resolver mailbox_id desde BD (sin depender de MAILBOX_ID en .env)
     with get_db_session() as db:
         mailbox_id = repos.get_or_create_mailbox(db, settings.MAILBOX_EMAIL)
-        repos.ensure_graph_subscriptions_table(db)  # NO-OP (según ajuste en repos.py)
+        repos.ensure_graph_subscriptions_table(db)
         current = repos.get_active_subscription(db, mailbox_id=mailbox_id, resource=resource)
 
-    # ✅ Crear si no existe
     if not current:
         logger.info("Creating Graph subscription | url=%s | resource=%s", notification_url, resource)
         created = await graph_client.create_subscription(
@@ -92,11 +87,9 @@ async def ensure_subscription(dry_run: bool = False) -> dict:
 
         return {"action": "created", "subscription_id": sid, "expiration": exp}
 
-    # current viene como Row: (subscription_id, expires_at, status)
     sid = str(current[0])
     expires_at = current[1]
 
-    # ✅ Renovar si está por vencer
     if _needs_renew(expires_at):
         logger.info("Renewing Graph subscription | id=%s", sid)
         new_exp_dt = datetime.now(timezone.utc) + timedelta(minutes=int(settings.SUBSCRIPTION_LIFETIME_MINUTES))
