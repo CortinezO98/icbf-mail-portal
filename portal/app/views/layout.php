@@ -5,6 +5,9 @@ use function App\Config\url;
 
 // $viewPath is defined by controller render()
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+
+// Definir ANTES de usarlo
+$isLogin = str_ends_with($path, '/login') || $path === '/login';
 ?>
 <!doctype html>
 <html lang="es">
@@ -19,15 +22,10 @@ $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
   <link href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css" rel="stylesheet">
 
   <!-- App styles -->
-  <link href="<?= htmlspecialchars(\App\Config\url('/assets/css/app.css?v=1')) ?>" rel="stylesheet">
+  <link href="<?= htmlspecialchars(\App\Config\url('/assets/css/app.css?v=2')) ?>" rel="stylesheet">
 </head>
 
 <body class="bg-light <?= $isLogin ? 'page-login' : 'page-app' ?>">
-
-<?php
-// Ocultar navbar en pantalla de login (similar a tu Django)
-$isLogin = str_ends_with($path, '/login') || $path === '/login';
-?>
 
 <?php if (!$isLogin): ?>
   <nav class="navbar navbar-expand-lg navbar-dark" style="background:#4CAF50;">
