@@ -1,9 +1,19 @@
+DirectoryIndex index.php
+
 RewriteEngine On
 
-# If the request is for an existing file or directory, serve it directly
+# --- Normaliza: si entran sin slash al final (ej: /public), forzar /public/ ---
+RewriteCond %{REQUEST_URI} !/$
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ %{REQUEST_URI}/ [R=301,L]
+
+# --- Evita loops al pedir index.php ---
+RewriteRule ^index\.php$ - [L]
+
+# --- Servir archivos y carpetas reales tal cual ---
 RewriteCond %{REQUEST_FILENAME} -f [OR]
 RewriteCond %{REQUEST_FILENAME} -d
 RewriteRule ^ - [L]
 
-# Otherwise route everything through index.php
+# --- Front controller ---
 RewriteRule ^ index.php [QSA,L]

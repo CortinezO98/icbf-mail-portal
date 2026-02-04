@@ -94,7 +94,59 @@ try {
     }
 
     http_response_code(404);
-    echo "404 Not Found";
+    $title = "404 | Recurso no encontrado";
+    $requested = htmlspecialchars($path, ENT_QUOTES, 'UTF-8');
+    $home = \App\Config\url('/cases');
+    $login = \App\Config\url('/login');
+
+    echo <<<HTML
+    <!doctype html>
+    <html lang="es">
+    <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{$title}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    </head>
+    <body class="bg-light">
+    <div class="container py-5">
+        <div class="row justify-content-center">
+        <div class="col-lg-8">
+            <div class="card shadow-sm border-0">
+            <div class="card-body p-4 p-md-5">
+                <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                <div>
+                    <h1 class="h3 mb-1">Recurso no encontrado</h1>
+                    <p class="text-muted mb-0">No pudimos encontrar la ruta solicitada en el portal.</p>
+                </div>
+                <span class="badge text-bg-secondary">HTTP 404</span>
+                </div>
+
+                <hr class="my-4">
+
+                <p class="mb-2"><strong>Ruta solicitada:</strong></p>
+                <div class="bg-light border rounded p-2 font-monospace small">{$requested}</div>
+
+                <div class="mt-4 d-flex flex-wrap gap-2">
+                <a class="btn btn-primary" href="{$home}">Ir a bandeja</a>
+                <a class="btn btn-outline-secondary" href="{$login}">Ir a inicio de sesión</a>
+                </div>
+
+                <p class="text-muted small mt-4 mb-0">
+                Si crees que esto es un error, verifica la URL o contacta al administrador del sistema.
+                </p>
+            </div>
+            </div>
+            <div class="text-center text-muted small mt-3">
+            ICBF Mail • Portal de gestión • {$requested}
+            </div>
+        </div>
+        </div>
+    </div>
+    </body>
+    </html>
+    HTML;
+    exit;
 } catch (\Throwable $e) {
     if (!empty($config['debug'])) {
         http_response_code(500);

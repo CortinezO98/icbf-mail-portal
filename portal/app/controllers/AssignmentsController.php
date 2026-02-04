@@ -40,11 +40,32 @@ final class AssignmentsController
             exit;
         }
 
-        // Transaction for consistency
+        $case = $this->casesRepo->findCase($caseId);
+        if (!$case) {
+            http_response_code(404);
+            echo "Case not found";
+            exit;
+        }
+
+        $fromStatusId = isset($case['status_id']) ? (int)$case['status_id'] : null;
+
+        $ip = (string)($_SERVER['REMOTE_ADDR'] ?? '');
+        $ua = (string)($_SERVER['HTTP_USER_AGENT'] ?? '');
+
         $this->pdo->beginTransaction();
         try {
             $this->casesRepo->assignToUser($caseId, $agentId, $statusAsignadoId);
-            $this->eventsRepo->insertAssigned($caseId, (int)Auth::id(), $agentId);
+
+            $this->eventsRepo->insertAssigned(
+                $caseId,
+                Auth::id(),
+                $agentId,
+                $fromStatusId,
+                $statusAsignadoId,
+                $ip,
+                $ua
+            );
+
             $this->pdo->commit();
         } catch (\Throwable $e) {
             $this->pdo->rollBack();
