@@ -1,0 +1,94 @@
+:root{
+  --brand: #4CAF50;
+  --brand-dark: #3f9c44;
+  --bg-soft: #f6f8fb;
+}
+
+/* Base */
+body{
+  background: #ffffff;
+}
+
+/* Brand helpers */
+.text-brand{ color: var(--brand) !important; }
+.bg-brand{ background: var(--brand) !important; }
+.btn-brand{
+  --bs-btn-color: #fff;
+  --bs-btn-bg: var(--brand);
+  --bs-btn-border-color: var(--brand);
+  --bs-btn-hover-color: #fff;
+  --bs-btn-hover-bg: var(--brand-dark);
+  --bs-btn-hover-border-color: var(--brand-dark);
+  --bs-btn-focus-shadow-rgb: 76,175,80;
+}
+
+/* Login page */
+.login-wrap{
+  min-height: 100vh;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background:#fff;
+}
+
+.login-col{
+  width: 100%;
+  max-width: 380px; /* similar a col-md-3 */
+}
+
+.login-logos{
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.login-logos img{
+  max-height: 80px;
+  width: auto;
+}
+
+.login-title{
+  text-align:center;
+  font-weight: 800;
+  margin-bottom: 18px;
+  letter-spacing: .5px;
+  color: var(--brand);
+}
+
+.card-login{
+  border: 0;
+  background: var(--bg-soft);
+  border-radius: 18px;
+  overflow: hidden;
+}
+
+.card-login .card-header{
+  background: var(--brand);
+  color: #fff;
+  text-align:center;
+  border-bottom: 0;
+  padding: 14px 16px;
+}
+
+.card-login .card-body{
+  padding: 22px;
+}
+
+.form-label{
+  font-weight: 600;
+}
+
+.login-footer{
+  text-align:center;
+  margin-top: 12px;
+  color: #6c757d;
+  font-size: 12px;
+}
+
+/* Nicer focus */
+.form-control:focus{
+  border-color: rgba(76,175,80,.6);
+  box-shadow: 0 0 0 .2rem rgba(76,175,80,.18);
+}
