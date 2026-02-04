@@ -24,8 +24,8 @@ def attachments_base_dir() -> Path:
 
 def resolve_attachment_path(storage_path: str) -> Path:
     """
-    ✅ Convierte el storage_path (que en DB será relativo) a path absoluto.
-    Mantiene compatibilidad con registros viejos que tengan path absoluto.
+    Convierte storage_path (relativo) a path absoluto.
+    Compatibilidad: si en DB quedó un path absoluto antiguo, lo respeta.
     """
     p = Path(storage_path)
     if p.is_absolute():
@@ -68,8 +68,9 @@ def save_attachment_bytes(filename: str, content_bytes: bytes, content_type: str
 
     digest = sha256_bytes(content_bytes)
 
+    safe_name = Path(filename).name
     rel_path = Path(digest[:2]) / digest[2:4] / f"{digest}_{safe_name}"
-    abs_path = (base / rel_path)
+    abs_path = base / rel_path
     abs_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = abs_path.with_suffix(abs_path.suffix + ".tmp")
     tmp_path.write_bytes(content_bytes)
@@ -78,7 +79,7 @@ def save_attachment_bytes(filename: str, content_bytes: bytes, content_type: str
     ct = content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
     return StoredAttachment(
-        storage_path=rel_path.as_posix(),
+        storage_path=rel_path.as_posix(), 
         sha256=digest,
         size_bytes=size_bytes,
         content_type=ct,

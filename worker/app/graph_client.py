@@ -1,12 +1,11 @@
 from __future__ import annotations
-
 import asyncio
 import logging
 from typing import Any
-
 import httpx
-
 from app.auth_graph import graph_auth
+import json
+
 
 logger = logging.getLogger("app.graph_client")
 
@@ -110,12 +109,42 @@ class GraphClient:
 
     async def list_attachments(self, mailbox_email: str, message_id: str) -> list[dict[str, Any]]:
         url = f"{GRAPH_BASE}/users/{mailbox_email}/messages/{message_id}/attachments"
-        resp = await self._request("GET", url)
-        if resp.status_code != 200:
-            logger.error("list_attachments failed: %s %s", resp.status_code, resp.text)
-            raise RuntimeError("Graph list_attachments failed")
-        data = resp.json()
-        return data.get("value", [])
+
+        last_err: Exception | None = None
+
+        for attempt in range(1, 4):
+            resp = await self._request("GET", url)
+
+            if resp.status_code != 200:
+                logger.error("list_attachments failed: %s %s", resp.status_code, resp.text)
+                raise RuntimeError("Graph list_attachments failed")
+
+            # Validación de content-type (defensa)
+            ctype = (resp.headers.get("content-type") or "").lower()
+            if "application/json" not in ctype:
+                preview = (resp.text or "")[:800]
+                logger.warning(
+                    "list_attachments unexpected content-type=%s attempt=%s len=%s preview=%r",
+                    ctype, attempt, len(resp.content or b""), preview
+                )
+                last_err = RuntimeError(f"Unexpected content-type: {ctype}")
+                await asyncio.sleep(attempt * 2)
+                continue
+
+            try:
+                data = resp.json()
+                return data.get("value", [])
+            except json.JSONDecodeError as e:
+                # Body llegó truncado/corrupto -> reintentar
+                preview = (resp.text or "")[:800]
+                logger.warning(
+                    "list_attachments JSON decode failed attempt=%s len=%s preview=%r err=%s",
+                    attempt, len(resp.content or b""), preview, e
+                )
+                last_err = e
+                await asyncio.sleep(attempt * 2)
+                continue
+        raise RuntimeError(f"Graph list_attachments JSON decode failed after retries: {last_err}")
 
     async def get_attachment(self, mailbox_email: str, message_id: str, attachment_id: str) -> dict[str, Any]:
         url = f"{GRAPH_BASE}/users/{mailbox_email}/messages/{message_id}/attachments/{attachment_id}"
