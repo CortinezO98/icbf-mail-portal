@@ -22,7 +22,7 @@ $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
   <link href="<?= htmlspecialchars(\App\Config\url('/assets/css/app.css?v=1')) ?>" rel="stylesheet">
 </head>
 
-<body class="bg-light">
+<body class="bg-light <?= $isLogin ? 'page-login' : 'page-app' ?>">
 
 <?php
 // Ocultar navbar en pantalla de login (similar a tu Django)

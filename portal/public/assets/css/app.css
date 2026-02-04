@@ -1,17 +1,21 @@
+/* =========================
+   Variables comunes
+   ========================= */
 :root{
   --brand: #4CAF50;
   --brand-dark: #3f9c44;
   --bg-soft: #f6f8fb;
+
+  --brand-soft: rgba(76,175,80,.12);
+  --border: rgba(33,37,41,.12);
+  --text-soft: #6c757d;
+  --card-radius: 16px;
 }
 
-/* Base */
-body{
-  background: #ffffff;
-}
-
-/* Brand helpers */
+/* Helpers (pueden servir en ambos) */
 .text-brand{ color: var(--brand) !important; }
 .bg-brand{ background: var(--brand) !important; }
+
 .btn-brand{
   --bs-btn-color: #fff;
   --bs-btn-bg: var(--brand);
@@ -22,8 +26,27 @@ body{
   --bs-btn-focus-shadow-rgb: 76,175,80;
 }
 
-/* Login page */
-.login-wrap{
+.btn-outline-brand{
+  --bs-btn-color: var(--brand);
+  --bs-btn-border-color: var(--brand);
+  --bs-btn-hover-color: #fff;
+  --bs-btn-hover-bg: var(--brand);
+  --bs-btn-hover-border-color: var(--brand);
+}
+
+.form-control:focus{
+  border-color: rgba(76,175,80,.6);
+  box-shadow: 0 0 0 .2rem rgba(76,175,80,.18);
+}
+
+/* =========================================================
+   LOGIN (solo aplica en el login)
+   ========================================================= */
+body.page-login{
+  background: #ffffff !important;
+}
+
+body.page-login .login-wrap{
   min-height: 100vh;
   display:flex;
   align-items:center;
@@ -31,12 +54,12 @@ body{
   background:#fff;
 }
 
-.login-col{
+body.page-login .login-col{
   width: 100%;
-  max-width: 380px; /* similar a col-md-3 */
+  max-width: 380px;
 }
 
-.login-logos{
+body.page-login .login-logos{
   display:flex;
   justify-content:center;
   align-items:center;
@@ -44,12 +67,12 @@ body{
   margin-bottom: 14px;
 }
 
-.login-logos img{
+body.page-login .login-logos img{
   max-height: 80px;
   width: auto;
 }
 
-.login-title{
+body.page-login .login-title{
   text-align:center;
   font-weight: 800;
   margin-bottom: 18px;
@@ -57,14 +80,14 @@ body{
   color: var(--brand);
 }
 
-.card-login{
+body.page-login .card-login{
   border: 0;
   background: var(--bg-soft);
   border-radius: 18px;
   overflow: hidden;
 }
 
-.card-login .card-header{
+body.page-login .card-login .card-header{
   background: var(--brand);
   color: #fff;
   text-align:center;
@@ -72,23 +95,147 @@ body{
   padding: 14px 16px;
 }
 
-.card-login .card-body{
+body.page-login .card-login .card-body{
   padding: 22px;
 }
 
-.form-label{
+body.page-login .form-label{
   font-weight: 600;
 }
 
-.login-footer{
+body.page-login .login-footer{
   text-align:center;
   margin-top: 12px;
   color: #6c757d;
   font-size: 12px;
 }
 
-/* Nicer focus */
-.form-control:focus{
-  border-color: rgba(76,175,80,.6);
-  box-shadow: 0 0 0 .2rem rgba(76,175,80,.18);
+/* =========================================================
+   PORTAL (solo aplica en el portal autenticado)
+   ========================================================= */
+body.page-app.bg-light{
+  background: #f6f8fb !important;
+}
+
+body.page-app .container{
+  max-width: 1200px;
+}
+
+/* Navbar */
+body.page-app .navbar{
+  box-shadow: 0 8px 20px rgba(0,0,0,.06);
+}
+
+body.page-app .navbar .navbar-brand{
+  letter-spacing: .2px;
+}
+
+/* Cards */
+body.page-app .card{
+  border: 1px solid var(--border);
+  border-radius: var(--card-radius);
+}
+
+body.page-app .card .card-header{
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  font-weight: 700;
+}
+
+/* Badges por estado */
+body.page-app .badge-status{
+  border: 1px solid var(--border);
+  font-weight: 700;
+  letter-spacing: .2px;
+}
+body.page-app .badge-status--nuevo{ background: rgba(13,110,253,.10); color:#0d6efd; border-color: rgba(13,110,253,.22); }
+body.page-app .badge-status--asignado{ background: rgba(255,193,7,.12); color:#b58100; border-color: rgba(255,193,7,.28); }
+body.page-app .badge-status--enproceso{ background: rgba(102,16,242,.10); color:#6610f2; border-color: rgba(102,16,242,.22); }
+body.page-app .badge-status--respondido{ background: rgba(25,135,84,.12); color:#198754; border-color: rgba(25,135,84,.22); }
+body.page-app .badge-status--cerrado{ background: rgba(108,117,125,.12); color:#6c757d; border-color: rgba(108,117,125,.22); }
+
+/* Inbox table */
+body.page-app .table thead th{
+  font-size: .85rem;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  color: #495057;
+}
+
+body.page-app .table tbody tr{
+  transition: background-color .15s ease, transform .05s ease;
+}
+body.page-app .table tbody tr:hover{
+  background: rgba(76,175,80,.06);
+}
+
+body.page-app .table a{
+  text-decoration: none;
+  font-weight: 700;
+}
+
+/* Page headers */
+body.page-app .page-title{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:12px;
+  margin-bottom: 16px;
+}
+body.page-app .page-title h3{
+  margin:0;
+  font-weight: 800;
+  letter-spacing: .2px;
+}
+
+/* Detail: message bubble */
+body.page-app .msg{
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+  background: #fff;
+}
+body.page-app .msg .meta{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  font-size: .85rem;
+  color: var(--text-soft);
+}
+body.page-app .msg .body{
+  margin-top: 10px;
+  white-space: pre-wrap;
+}
+
+/* Trazabilidad */
+body.page-app .event-item{
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+  background:#fff;
+}
+body.page-app .event-item pre{
+  background: #f6f8fb;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+}
+
+/* Empty states */
+body.page-app .empty{
+  padding: 28px 18px;
+  text-align:center;
+  color: var(--text-soft);
+}
+body.page-app .empty i{
+  font-size: 28px;
+  opacity: .65;
+}
+
+/* Responsive */
+@media (max-width: 576px){
+  body.page-app .page-title{
+    align-items:flex-start;
+    flex-direction:column;
+  }
 }
