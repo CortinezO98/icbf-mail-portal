@@ -36,7 +36,6 @@ final class AttachmentsController
             exit;
         }
 
-        // Permission: AGENTE only if assigned to them
         if (Auth::hasRole('AGENTE') && !Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
             if ((int)($case['assigned_user_id'] ?? 0) !== (int)Auth::id()) {
                 http_response_code(403);
@@ -73,7 +72,6 @@ final class AttachmentsController
 
     private function resolveStoragePath(string $storagePath): string
     {
-        // If absolute path, just realpath it
         $p = $storagePath;
 
         $isWindowsAbs = preg_match('/^[A-Za-z]:\\\\/', $p) === 1;
@@ -83,18 +81,14 @@ final class AttachmentsController
             return realpath($p) ?: '';
         }
 
-        // Otherwise treat as relative path under attachments_dir
         $base = (string)($this->config['attachments_dir'] ?? '');
         if ($base === '') {
-            // Without base dir we cannot resolve safely
             return '';
         }
 
-        // Normalize separators
         $p = str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $p);
         $candidate = $base . DIRECTORY_SEPARATOR . $p;
 
-        // realpath returns false if file doesn't exist
-        return realpath($candidate) ?: $candidate; // allow existing file even if realpath fails in some envs
+        return realpath($candidate) ?: $candidate; 
     }
 }

@@ -4,9 +4,7 @@ declare(strict_types=1);
 use App\Auth\Auth;
 use function App\Config\url;
 
-// Variables esperadas desde el controller:
-// - $cases (array)
-// - $status (string|null)  [si no existe, se deja en null]
+
 $roleIsSupervisor = Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN');
 $status = $status ?? null;
 

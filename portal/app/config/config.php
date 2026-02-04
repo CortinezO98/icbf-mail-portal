@@ -35,7 +35,7 @@ function load_config(): array
             'pass' => getenv('PORTAL_DB_PASSWORD') ?: '',
         ],
         'session_name' => getenv('PORTAL_SESSION_NAME') ?: 'ICBF_PORTAL',
-        'base_path' => $basePath, // e.g. /icbf-mail-portal/portal/public
+        'base_path' => $basePath, 
         'debug' => (int)(getenv('PORTAL_DEBUG') ?: 0) === 1,
         'csrf_key' => getenv('PORTAL_CSRF_KEY') ?: 'CHANGE_ME_CSRF_KEY',
 

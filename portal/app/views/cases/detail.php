@@ -107,7 +107,7 @@ $caseId = (int)($case['id'] ?? 0);
         </div>
       </div>
     </div>
-
+    
     <!-- Hilo de mensajes -->
     <div class="card mb-3">
       <div class="card-header d-flex justify-content-between align-items-center">
@@ -132,7 +132,6 @@ $caseId = (int)($case['id'] ?? 0);
               $when = msg_when($m);
               $body = safe_message_body($m);
 
-              // Etiqueta IN/OUT visual
               $dirBadge = $dir === 'OUT' ? 'text-bg-secondary' : 'text-bg-primary';
               $dirLabel = $dir !== '' ? $dir : 'MSG';
             ?>

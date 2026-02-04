@@ -21,7 +21,7 @@ require_once __DIR__ . '/../app/controllers/AttachmentsController.php';
 require_once __DIR__ . '/../app/middleware/require_login.php';
 require_once __DIR__ . '/../app/middleware/require_role.php';
 
-// Bootstrap session & config
+
 $config = \App\Config\load_config();
 \App\Auth\Auth::initSession($config);
 
@@ -30,7 +30,7 @@ $pdo = \App\Config\pdo();
 $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 
-// remove base path if configured (e.g. /portal/public)
+
 $basePath = rtrim($config['base_path'], '/');
 if ($basePath !== '' && str_starts_with($path, $basePath)) {
     $path = substr($path, strlen($basePath));
@@ -40,7 +40,7 @@ if ($basePath !== '' && str_starts_with($path, $basePath)) {
 // Simple router
 try {
     if ($path === '/' && $method === 'GET') {
-        // redirect based on auth
+
         if (\App\Auth\Auth::check()) {
             header('Location: ' . \App\Config\url('/cases'));
         } else {

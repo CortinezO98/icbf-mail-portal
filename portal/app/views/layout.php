@@ -3,10 +3,8 @@ use App\Auth\Auth;
 use App\Auth\Csrf;
 use function App\Config\url;
 
-// $viewPath is defined by controller render()
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 
-// Definir ANTES de usarlo
 $isLogin = str_ends_with($path, '/login') || $path === '/login';
 ?>
 <!doctype html>
@@ -16,12 +14,10 @@ $isLogin = str_ends_with($path, '/login') || $path === '/login';
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ICBF - Portal</title>
 
-  <!-- CSS (SIEMPRE en HEAD) -->
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
   <link href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css" rel="stylesheet">
 
-  <!-- App styles -->
   <link href="<?= htmlspecialchars(\App\Config\url('/assets/css/app.css?v=2')) ?>" rel="stylesheet">
 </head>
 
@@ -55,7 +51,6 @@ $isLogin = str_ends_with($path, '/login') || $path === '/login';
   <?php include $viewPath; ?>
 </main>
 
-<!-- JS al final (opcional) -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
