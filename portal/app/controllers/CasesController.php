@@ -33,20 +33,36 @@ final class CasesController
         $status = isset($_GET['status']) ? strtoupper(trim((string)$_GET['status'])) : null;
         if ($status === '') $status = null;
 
-        // AGENTE: por defecto ve solo lo asignado a él (si NO es supervisor/admin)
+        $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+        $perPage = isset($_GET['per_page']) ? max(1, min(100, (int)$_GET['per_page'])) : 20;
+
         $assignedUserId = null;
         if (Auth::hasRole('AGENTE') && !Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
             $assignedUserId = Auth::id();
         }
 
-        // Supervisor/Admin: default NUEVO si no viene filtro
         if (($status === null || $status === '') && (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN'))) {
             $status = 'NUEVO';
         }
 
-        $cases = $this->casesRepo->listInbox($status, $assignedUserId);
+        $result = $this->casesRepo->listInbox($status, $assignedUserId, $page, $perPage);
+        
+        if (isset($result['data']) && isset($result['pagination'])) {
+            $cases = $result['data'];
+            $pagination = $result['pagination'];
+        } else {
+            $cases = $result;
+            $pagination = [
+                'page' => 1,
+                'per_page' => count($cases),
+                'total_rows' => count($cases),
+                'total_pages' => 1,
+                'has_prev' => false,
+                'has_next' => false,
+                'offset' => 0
+            ];
+        }
 
-        // Contador "Sin asignar" (solo supervisor/admin)
         $unassignedCount = 0;
         if (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN')) {
             $statusNuevoId = $this->casesRepo->getStatusIdByCode('NUEVO');
@@ -57,6 +73,7 @@ final class CasesController
             'cases' => $cases,
             'status' => $status,
             'unassignedCount' => $unassignedCount,
+            'pagination' => $pagination // nuevo parámetro
         ]);
     }
 
@@ -69,7 +86,6 @@ final class CasesController
             exit;
         }
 
-        // Permisos: AGENTE solo puede ver si está asignado a él (si NO es supervisor/admin)
         if (Auth::hasRole('AGENTE') && !Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
             if ((int)($case['assigned_user_id'] ?? 0) !== (int)Auth::id()) {
                 http_response_code(403);

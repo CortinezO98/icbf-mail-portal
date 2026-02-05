@@ -9,7 +9,19 @@ final class CasesRepo
 {
     public function __construct(private PDO $pdo) {}
 
-    public function listInbox(?string $statusCode, ?int $assignedUserId, int $limit = 200): array
+    public function listInbox(?string $statusCode, ?int $assignedUserId, int $page = 1, int $perPage = 20)
+    {
+        $numArgs = func_num_args();
+        
+        if ($numArgs <= 2) {
+            $limit = func_get_arg(2) ?? 200;
+            return $this->listInboxLegacy($statusCode, $assignedUserId, $limit);
+        }
+
+        return $this->listInboxPaginated($statusCode, $assignedUserId, $page, $perPage);
+    }
+
+    private function listInboxLegacy(?string $statusCode, ?int $assignedUserId, int $limit = 200): array
     {
         $limit = max(1, min(500, $limit));
 
@@ -42,6 +54,135 @@ final class CasesRepo
         $st = $this->pdo->prepare($sql);
         $st->execute($params);
         return $st->fetchAll();
+    }
+
+    /**
+     * Versión nueva con paginación
+     */
+    private function listInboxPaginated(?string $statusCode, ?int $assignedUserId, int $page = 1, int $perPage = 20): array
+    {
+        $perPage = max(1, min(100, $perPage));
+        $offset = ($page - 1) * $perPage;
+
+        $where = [];
+        $params = [];
+
+        // Contar total de registros
+        $countSql = "SELECT COUNT(*) as total
+                     FROM cases c
+                     JOIN case_statuses cs ON cs.id = c.status_id
+                     LEFT JOIN users u ON u.id = c.assigned_user_id";
+
+        // Consulta principal
+        $sql = "SELECT
+                  c.id, c.case_number, c.subject,
+                  c.requester_email, c.requester_name,
+                  c.received_at, c.due_at, c.sla_state, c.last_activity_at,
+                  c.assigned_user_id,
+                  cs.code AS status_code, cs.name AS status_name,
+                  u.full_name AS assigned_user_name
+                FROM cases c
+                JOIN case_statuses cs ON cs.id = c.status_id
+                LEFT JOIN users u ON u.id = c.assigned_user_id";
+
+        if ($statusCode) {
+            $where[] = "cs.code = :scode";
+            $params[':scode'] = $statusCode;
+        }
+        if ($assignedUserId !== null) {
+            $where[] = "c.assigned_user_id = :uid";
+            $params[':uid'] = $assignedUserId;
+        }
+
+        $whereClause = $where ? " WHERE " . implode(" AND ", $where) : "";
+
+        // Contar total
+        $countSql .= $whereClause;
+        $stCount = $this->pdo->prepare($countSql);
+        $stCount->execute($params);
+        $totalRows = (int)($stCount->fetchColumn() ?? 0);
+        $totalPages = ceil($totalRows / $perPage);
+
+        $sql .= $whereClause;
+        $sql .= " ORDER BY c.last_activity_at DESC, c.received_at DESC 
+                  LIMIT :limit OFFSET :offset";
+
+        $params[':limit'] = $perPage;
+        $params[':offset'] = $offset;
+
+        $st = $this->pdo->prepare($sql);
+        
+        foreach ($params as $key => $value) {
+            if ($key === ':limit' || $key === ':offset') {
+                $st->bindValue($key, $value, PDO::PARAM_INT);
+            } else {
+                $st->bindValue($key, $value);
+            }
+        }
+        
+        $st->execute();
+        $rows = $st->fetchAll();
+
+        return [
+            'data' => $rows,
+            'pagination' => [
+                'page' => $page,
+                'per_page' => $perPage,
+                'total_rows' => $totalRows,
+                'total_pages' => $totalPages,
+                'has_prev' => $page > 1,
+                'has_next' => $page < $totalPages,
+                'offset' => $offset
+            ]
+        ];
+    }
+
+    public function listInboxData(?string $statusCode, ?int $assignedUserId, int $limit = 200): array
+    {
+        return $this->listInboxLegacy($statusCode, $assignedUserId, $limit);
+    }
+
+    public function getInboxPagination(?string $statusCode, ?int $assignedUserId, int $page = 1, int $perPage = 20): array
+    {
+        $perPage = max(1, min(100, $perPage));
+        $offset = ($page - 1) * $perPage;
+
+        $where = [];
+        $params = [];
+
+        // Contar total de registros
+        $countSql = "SELECT COUNT(*) as total
+                     FROM cases c
+                     JOIN case_statuses cs ON cs.id = c.status_id
+                     LEFT JOIN users u ON u.id = c.assigned_user_id";
+
+        if ($statusCode) {
+            $where[] = "cs.code = :scode";
+            $params[':scode'] = $statusCode;
+        }
+        if ($assignedUserId !== null) {
+            $where[] = "c.assigned_user_id = :uid";
+            $params[':uid'] = $assignedUserId;
+        }
+
+        $whereClause = $where ? " WHERE " . implode(" AND ", $where) : "";
+
+        // Contar total
+        $countSql .= $whereClause;
+        $stCount = $this->pdo->prepare($countSql);
+        $stCount->execute($params);
+        $totalRows = (int)($stCount->fetchColumn() ?? 0);
+        $totalPages = ceil($totalRows / $perPage);
+
+        return [
+            'page' => $page,
+            'per_page' => $perPage,
+            'total_rows' => $totalRows,
+            'total_pages' => $totalPages,
+            'has_prev' => $page > 1,
+            'has_next' => $page < $totalPages,
+            'offset' => $offset
+        ];
     }
 
     public function findCase(int $caseId): ?array
@@ -124,6 +265,4 @@ final class CasesRepo
         $st->execute([':sid' => $statusId]);
         return (int)$st->fetchColumn();
     }
-
-
 }
