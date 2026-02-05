@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     GRAPH_CLIENT_STATE: str = ""
     MAILBOX_EMAIL: str = ""
     PUBLIC_BASE_URL: str = ""
+    
 
     # Subscriptions
     AUTO_ENSURE_SUBSCRIPTION: int = 0

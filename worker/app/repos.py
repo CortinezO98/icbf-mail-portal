@@ -595,3 +595,38 @@ def reset_delta_state(db: Session, *, mailbox_id: int, folder_id: int, note: str
         last_status_code=None,
         last_error=note,
     )
+
+
+
+def get_user_email(db: Session, *, user_id: int) -> str | None:
+    row = db.execute(
+        text("SELECT email FROM users WHERE id = :uid LIMIT 1"),
+        {"uid": user_id},
+    ).fetchone()
+    if not row:
+        return None
+    email = row[0]
+    return str(email) if email else None
+
+
+def try_mark_agent_notified(db: Session, *, user_id: int, cooldown_minutes: int = 5) -> bool:
+    """
+    Anti-spam ATÓMICO:
+    Actualiza last_notify_at SOLO si ya pasó el cooldown o si es NULL.
+    Devuelve True si se permitió notificar (rowcount>0), False si está en cooldown.
+    """
+    res = db.execute(
+        text("""
+            UPDATE users
+            SET last_notify_at = NOW(6),
+                updated_at = NOW(6)
+            WHERE id = :uid
+              AND (
+                    last_notify_at IS NULL
+                 OR last_notify_at <= (NOW(6) - INTERVAL :m MINUTE)
+              )
+            LIMIT 1
+        """),
+        {"uid": user_id, "m": int(cooldown_minutes)},
+    )
+    return bool(getattr(res, "rowcount", 0) and int(res.rowcount) > 0)
