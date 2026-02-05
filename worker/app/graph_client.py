@@ -153,10 +153,29 @@ class GraphClient:
             logger.error("get_attachment failed: %s %s", resp.status_code, resp.text)
             raise RuntimeError("Graph get_attachment failed")
         return resp.json()
+    
+    
+    async def send_mail(self, mailbox_email: str, *, to_email: str, subject: str, body_html: str) -> None:
+        """
+        Envía correo usando Microsoft Graph desde el mailbox_email (remitente).
+        Requiere permisos Mail.Send en la App o Send As según el tipo de auth.
+        """
+        url = f"{GRAPH_BASE}/users/{mailbox_email}/sendMail"
 
-    # ============================
-    # Subscriptions (webhooks)
-    # ============================
+        payload = {
+            "message": {
+                "subject": subject,
+                "body": {"contentType": "HTML", "content": body_html},
+                "toRecipients": [{"emailAddress": {"address": to_email}}],
+            },
+            "saveToSentItems": "true",
+        }
+
+        resp = await self._request("POST", url, json=payload)
+        if resp.status_code not in (202, 200):
+            logger.error("send_mail failed: %s %s", resp.status_code, resp.text)
+            raise RuntimeError(f"sendMail failed status={resp.status_code} body={resp.text[:300]}")
+
 
     async def create_subscription(
         self,
@@ -242,6 +261,8 @@ class GraphClient:
             data = {"raw": resp.text}
 
         return status, data
+    
+    
 
 
 graph_client = GraphClient()
