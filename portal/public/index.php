@@ -18,6 +18,9 @@ require_once __DIR__ . '/../app/controllers/CasesController.php';
 require_once __DIR__ . '/../app/controllers/AssignmentsController.php';
 require_once __DIR__ . '/../app/controllers/AttachmentsController.php';
 require_once __DIR__ . '/../app/controllers/AutoAssignController.php';
+require_once __DIR__ . '/../app/repos/MetricsRepo.php';
+require_once __DIR__ . '/../app/controllers/DashboardController.php';
+
 
 require_once __DIR__ . '/../app/middleware/require_login.php';
 require_once __DIR__ . '/../app/middleware/require_role.php';
@@ -88,6 +91,13 @@ try {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
         (new \App\Controllers\AutoAssignController($pdo, $config))->run();
+        exit;
+    }
+    // Dashboard (Supervisor/Admin)
+    if ($path === '/dashboard' && $method === 'GET') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
+        (new \App\Controllers\DashboardController($pdo, $config))->index();
         exit;
     }
 

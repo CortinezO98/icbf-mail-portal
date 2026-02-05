@@ -48,6 +48,9 @@ $autoAssignUrl = url('/cases/auto-assign');
 
   <div class="d-flex flex-wrap gap-2">
     <?php if ($roleIsSupervisor): ?>
+      <a class="btn btn-brand btn-sm" href="<?= esc(url('/dashboard')) ?>">
+        <i class="bi bi-speedometer2 me-1"></i>Tablero
+      </a>
       <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases?status=NUEVO')) ?>">Nuevos</a>
       <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases?status=ASIGNADO')) ?>">Asignados</a>
       <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases?status=EN_PROCESO')) ?>">En proceso</a>
@@ -125,7 +128,7 @@ $autoAssignUrl = url('/cases/auto-assign');
               $statusName = (string)($c['status_name'] ?? $statusCode);
 
               $statusClass = badge_status_class($statusCode);
-              [$slaBadge, $slaLabel] = badge_sla((string)($c['sla_state'] ?? ''));
+              [$slaBadge, $slaLabel] = badge_sla((string)($c['sla_bucket'] ?? $c['sla_state'] ?? ''));
 
               $receivedAt = (string)($c['received_at'] ?? '');
               $lastActivity = (string)($c['last_activity_at'] ?? '');
