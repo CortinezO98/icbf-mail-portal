@@ -9,65 +9,95 @@ final class MetricsRepo
 {
     public function __construct(private PDO $pdo) {}
 
-    public function realtimeSummary(?int $assignedUserId = null): array
+    /**
+     * Fuente de tiempo operativa: cases.received_at (no created_at).
+     * cases tiene received_at/due_at/sla_state, y además existe case_sla_tracking para tracking rápido.
+     */
+    private function clockField(): string
     {
-        $where = [];
-        $params = [];
+        return 'c.received_at';
+    }
 
+    private function baseOpenWhere(?int $assignedUserId, array &$params): string
+    {
+        $w = [];
+        // En tu esquema case_statuses tiene is_final/pauses_sla
+        $w[] = "cs.is_final = 0"; // abierto
         if ($assignedUserId !== null) {
-            $where[] = "c.assigned_user_id = :uid";
+            $w[] = "c.assigned_user_id = :uid";
             $params[':uid'] = $assignedUserId;
         }
+        return $w ? ("WHERE " . implode(" AND ", $w)) : "";
+    }
 
+    public function realtimeSummary(?int $assignedUserId = null): array
+    {
+        $params = [];
+        $whereOpen = $this->baseOpenWhere($assignedUserId, $params);
+
+        // Semáforo desde tracking (si existe), fallback a cálculo por received_at
         $sql = "
             SELECT
-                -- Casos abiertos totales
-                SUM(CASE WHEN cs.code <> 'CERRADO' THEN 1 ELSE 0 END) AS open_total,
-                
-                -- Distribución por estado
+                COUNT(*) AS total_open,
+
+                -- Distribución por estado (solo abiertos)
                 SUM(CASE WHEN cs.code='NUEVO' THEN 1 ELSE 0 END) AS st_nuevo,
                 SUM(CASE WHEN cs.code='ASIGNADO' THEN 1 ELSE 0 END) AS st_asignado,
                 SUM(CASE WHEN cs.code='EN_PROCESO' THEN 1 ELSE 0 END) AS st_enproceso,
                 SUM(CASE WHEN cs.code='RESPONDIDO' THEN 1 ELSE 0 END) AS st_respondido,
-                SUM(CASE WHEN cs.code='CERRADO' THEN 1 ELSE 0 END) AS st_cerrado,
-                
-                -- SEMÁFORO BASADO EN DÍAS DESDE CREACIÓN (0-5 días)
-                -- VERDE: 0-1 días
-                SUM(CASE 
-                    WHEN cs.code <> 'CERRADO' 
-                    AND c.is_responded = 0
-                    AND DATEDIFF(NOW(), c.created_at) <= 1
-                    THEN 1 ELSE 0 
+
+                -- Semáforo (solo NO respondidos)
+                SUM(CASE
+                    WHEN c.is_responded = 0 AND COALESCE(cst.current_sla_state,
+                        CASE
+                            WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) <= 1 THEN 'VERDE'
+                            WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) BETWEEN 2 AND 3 THEN 'AMARILLO'
+                            ELSE 'ROJO'
+                        END
+                    ) = 'VERDE'
+                    THEN 1 ELSE 0
                 END) AS sla_verde,
-                
-                -- AMARILLO: 2-3 días
-                SUM(CASE 
-                    WHEN cs.code <> 'CERRADO'
-                    AND c.is_responded = 0
-                    AND DATEDIFF(NOW(), c.created_at) BETWEEN 2 AND 3
-                    THEN 1 ELSE 0 
+
+                SUM(CASE
+                    WHEN c.is_responded = 0 AND COALESCE(cst.current_sla_state,
+                        CASE
+                            WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) <= 1 THEN 'VERDE'
+                            WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) BETWEEN 2 AND 3 THEN 'AMARILLO'
+                            ELSE 'ROJO'
+                        END
+                    ) = 'AMARILLO'
+                    THEN 1 ELSE 0
                 END) AS sla_amarillo,
-                
-                -- ROJO: 4+ días o vencidos
-                SUM(CASE 
-                    WHEN cs.code <> 'CERRADO'
-                    AND c.is_responded = 0
-                    AND DATEDIFF(NOW(), c.created_at) >= 4
-                    THEN 1 ELSE 0 
+
+                SUM(CASE
+                    WHEN c.is_responded = 0 AND COALESCE(cst.current_sla_state,
+                        CASE
+                            WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) <= 1 THEN 'VERDE'
+                            WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) BETWEEN 2 AND 3 THEN 'AMARILLO'
+                            ELSE 'ROJO'
+                        END
+                    ) = 'ROJO'
+                    THEN 1 ELSE 0
                 END) AS sla_rojo,
-                
-                -- Tiempo promedio de respuesta (solo respondidos)
-                ROUND(AVG(CASE 
-                    WHEN c.is_responded = 1 AND c.first_response_at IS NOT NULL 
-                    THEN TIMESTAMPDIFF(HOUR, c.created_at, c.first_response_at) 
-                    ELSE NULL 
-                END), 1) as avg_response_hours
+
+                -- Respondidos (en general, no solo abiertos)
+                (SELECT COUNT(*) FROM cases c2
+                 WHERE c2.is_responded = 1
+                 " . ($assignedUserId !== null ? " AND c2.assigned_user_id = :uid " : "") . "
+                ) AS responded_total,
+
+                -- Tiempo promedio de primera respuesta (solo respondidos)
+                ROUND(AVG(CASE
+                    WHEN c.is_responded = 1 AND c.first_response_at IS NOT NULL
+                    THEN TIMESTAMPDIFF(HOUR, {$this->clockField()}, c.first_response_at)
+                    ELSE NULL
+                END), 1) AS avg_response_hours
 
             FROM cases c
             JOIN case_statuses cs ON cs.id = c.status_id
+            LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
+            {$whereOpen}
         ";
-
-        if ($where) $sql .= " WHERE " . implode(" AND ", $where);
 
         $st = $this->pdo->prepare($sql);
         $st->execute($params);
@@ -81,68 +111,68 @@ final class MetricsRepo
                 u.id AS user_id,
                 u.full_name,
                 u.email,
-                COUNT(*) AS total,
-                SUM(CASE WHEN cs.code <> 'CERRADO' THEN 1 ELSE 0 END) AS open_total,
-                
-                -- Estados por agente
+
+                COUNT(*) AS total_open,
+
                 SUM(CASE WHEN cs.code='NUEVO' THEN 1 ELSE 0 END) AS st_nuevo,
                 SUM(CASE WHEN cs.code='ASIGNADO' THEN 1 ELSE 0 END) AS st_asignado,
                 SUM(CASE WHEN cs.code='EN_PROCESO' THEN 1 ELSE 0 END) AS st_enproceso,
-                
-                -- SEMÁFORO POR AGENTE
-                -- VERDE (0-1 días)
-                SUM(CASE 
-                    WHEN cs.code <> 'CERRADO' 
-                    AND c.is_responded = 0
-                    AND DATEDIFF(NOW(), c.created_at) <= 1
-                    THEN 1 ELSE 0 
-                END) AS verde,
-                
-                -- AMARILLO (2-3 días)
-                SUM(CASE 
-                    WHEN cs.code <> 'CERRADO'
-                    AND c.is_responded = 0
-                    AND DATEDIFF(NOW(), c.created_at) BETWEEN 2 AND 3
-                    THEN 1 ELSE 0 
-                END) AS amarillo,
-                
-                -- ROJO (4+ días)
-                SUM(CASE 
-                    WHEN cs.code <> 'CERRADO'
-                    AND c.is_responded = 0
-                    AND DATEDIFF(NOW(), c.created_at) >= 4
-                    THEN 1 ELSE 0 
-                END) AS rojo,
-                
-                -- Tasa de respuesta
-                ROUND(SUM(CASE WHEN c.is_responded = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) as response_rate
+
+                SUM(CASE WHEN c.is_responded = 0 AND COALESCE(cst.current_sla_state,'VERDE') = 'VERDE' THEN 1 ELSE 0 END) AS verde,
+                SUM(CASE WHEN c.is_responded = 0 AND COALESCE(cst.current_sla_state,'VERDE') = 'AMARILLO' THEN 1 ELSE 0 END) AS amarillo,
+                SUM(CASE WHEN c.is_responded = 0 AND COALESCE(cst.current_sla_state,'VERDE') = 'ROJO' THEN 1 ELSE 0 END) AS rojo,
+
+                ROUND(
+                    SUM(CASE WHEN c.is_responded = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0),
+                    1
+                ) AS response_rate
 
             FROM cases c
             JOIN users u ON u.id = c.assigned_user_id
             JOIN case_statuses cs ON cs.id = c.status_id
+            LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
             WHERE u.is_active = 1
+              AND cs.is_final = 0
             GROUP BY u.id, u.full_name, u.email
-            ORDER BY rojo DESC, amarillo DESC, open_total DESC
+            ORDER BY rojo DESC, amarillo DESC, total_open DESC
         ";
 
         return $this->pdo->query($sql)->fetchAll() ?: [];
     }
 
-    public function updateSlaTracking(): int
+    /**
+     * Inicializa tracking para casos abiertos.
+     * - days/minutes se calculan desde received_at
+     * - sla_due_at = received_at + 5 días (SLA simplificado)
+     * - breached = NOW() > sla_due_at
+     * - pauses_sla: si el estado pausa SLA, lo dejamos en VERDE y sin breach
+     */
+    public function initializeSlaTracking(): int
     {
         $sql = "
-            UPDATE case_sla_tracking cst
-            JOIN cases c ON c.id = cst.case_id
-            SET
-                cst.days_since_creation = DATEDIFF(NOW(), c.created_at),
-                cst.current_sla_state =
-                    CASE
-                        WHEN DATEDIFF(NOW(), c.created_at) <= 1 THEN 'VERDE'
-                        WHEN DATEDIFF(NOW(), c.created_at) BETWEEN 2 AND 3 THEN 'AMARILLO'
-                        ELSE 'ROJO'
-                    END,
-                cst.last_updated = NOW(6)
-            WHERE c.status_id != (SELECT id FROM case_statuses WHERE code = 'CERRADO')
+            INSERT IGNORE INTO case_sla_tracking
+                (case_id, current_sla_state, days_since_creation, minutes_since_creation, sla_due_at, breached, last_updated, created_at)
+            SELECT
+                c.id AS case_id,
+                CASE
+                    WHEN cs.pauses_sla = 1 THEN 'VERDE'
+                    WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) <= 1 THEN 'VERDE'
+                    WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) BETWEEN 2 AND 3 THEN 'AMARILLO'
+                    ELSE 'ROJO'
+                END AS current_sla_state,
+                TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) AS days_since_creation,
+                TIMESTAMPDIFF(MINUTE, {$this->clockField()}, NOW()) AS minutes_since_creation,
+                DATE_ADD({$this->clockField()}, INTERVAL 5 DAY) AS sla_due_at,
+                CASE
+                    WHEN cs.pauses_sla = 1 THEN 0
+                    WHEN NOW() > DATE_ADD({$this->clockField()}, INTERVAL 5 DAY) THEN 1
+                    ELSE 0
+                END AS breached,
+                NOW(6) AS last_updated,
+                NOW(6) AS created_at
+            FROM cases c
+            JOIN case_statuses cs ON cs.id = c.status_id
+            WHERE cs.is_final = 0
         ";
 
         $stmt = $this->pdo->prepare($sql);
@@ -150,24 +180,31 @@ final class MetricsRepo
         return $stmt->rowCount();
     }
 
-    public function initializeSlaTracking(): int
+    public function updateSlaTracking(): int
     {
         $sql = "
-            INSERT IGNORE INTO case_sla_tracking (case_id, days_since_creation, current_sla_state)
-            SELECT 
-                c.id,
-                DATEDIFF(NOW(), c.created_at),
-                CASE
-                    WHEN DATEDIFF(NOW(), c.created_at) <= 1 THEN 'VERDE'
-                    WHEN DATEDIFF(NOW(), c.created_at) BETWEEN 2 AND 3 THEN 'AMARILLO'
-                    ELSE 'ROJO'
-                END
-            FROM cases c
-            WHERE c.status_id != (SELECT id FROM case_statuses WHERE code = 'CERRADO')
-            AND NOT EXISTS (
-                SELECT 1 FROM case_sla_tracking cst 
-                WHERE cst.case_id = c.id
-            )
+            UPDATE case_sla_tracking cst
+            JOIN cases c ON c.id = cst.case_id
+            JOIN case_statuses cs ON cs.id = c.status_id
+            SET
+                cst.minutes_since_creation = TIMESTAMPDIFF(MINUTE, {$this->clockField()}, NOW()),
+                cst.days_since_creation = TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()),
+                cst.sla_due_at = DATE_ADD({$this->clockField()}, INTERVAL 5 DAY),
+                cst.current_sla_state =
+                    CASE
+                        WHEN cs.pauses_sla = 1 THEN 'VERDE'
+                        WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) <= 1 THEN 'VERDE'
+                        WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) BETWEEN 2 AND 3 THEN 'AMARILLO'
+                        ELSE 'ROJO'
+                    END,
+                cst.breached =
+                    CASE
+                        WHEN cs.pauses_sla = 1 THEN 0
+                        WHEN NOW() > DATE_ADD({$this->clockField()}, INTERVAL 5 DAY) THEN 1
+                        ELSE 0
+                    END,
+                cst.last_updated = NOW(6)
+            WHERE cs.is_final = 0
         ";
 
         $stmt = $this->pdo->prepare($sql);
@@ -177,65 +214,87 @@ final class MetricsRepo
 
     public function getSemaforoDistribution(?int $userId = null): array
     {
-        $where = $userId ? "WHERE c.assigned_user_id = :user_id" : "";
+        // IMPORTANTÍSIMO: aquí NO metemos "WHERE ..." porque cada bloque ya tiene WHERE.
+        $andUser = $userId ? " AND c.assigned_user_id = :user_id " : "";
         $params = $userId ? [':user_id' => $userId] : [];
 
         $sql = "
             SELECT
-                'VERDE' as estado,
-                COUNT(*) as total,
-                '0-1 días desde creación' as descripcion,
-                '#10b981' as color,
-                'bi-check-circle-fill' as icono
+                'ROJO' AS estado,
+                COUNT(*) AS total,
+                '4+ días desde recibido' AS descripcion,
+                '#ef4444' AS color,
+                'bi-exclamation-octagon-fill' AS icono
             FROM cases c
             JOIN case_statuses cs ON cs.id = c.status_id
-            WHERE cs.code <> 'CERRADO'
-            AND c.is_responded = 0
-            AND DATEDIFF(NOW(), c.created_at) <= 1
-            {$where}
-            
+            LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
+            WHERE cs.is_final = 0
+              AND c.is_responded = 0
+              AND COALESCE(cst.current_sla_state,
+                    CASE
+                        WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) <= 1 THEN 'VERDE'
+                        WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) BETWEEN 2 AND 3 THEN 'AMARILLO'
+                        ELSE 'ROJO'
+                    END
+                ) = 'ROJO'
+              {$andUser}
+
             UNION ALL
-            
+
             SELECT
-                'AMARILLO' as estado,
-                COUNT(*) as total,
-                '2-3 días desde creación' as descripcion,
-                '#f59e0b' as color,
-                'bi-exclamation-triangle-fill' as icono
+                'AMARILLO' AS estado,
+                COUNT(*) AS total,
+                '2-3 días desde recibido' AS descripcion,
+                '#f59e0b' AS color,
+                'bi-exclamation-triangle-fill' AS icono
             FROM cases c
             JOIN case_statuses cs ON cs.id = c.status_id
-            WHERE cs.code <> 'CERRADO'
-            AND c.is_responded = 0
-            AND DATEDIFF(NOW(), c.created_at) BETWEEN 2 AND 3
-            {$where}
-            
+            LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
+            WHERE cs.is_final = 0
+              AND c.is_responded = 0
+              AND COALESCE(cst.current_sla_state,
+                    CASE
+                        WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) <= 1 THEN 'VERDE'
+                        WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) BETWEEN 2 AND 3 THEN 'AMARILLO'
+                        ELSE 'ROJO'
+                    END
+                ) = 'AMARILLO'
+              {$andUser}
+
             UNION ALL
-            
+
             SELECT
-                'ROJO' as estado,
-                COUNT(*) as total,
-                '4+ días desde creación' as descripcion,
-                '#ef4444' as color,
-                'bi-exclamation-octagon-fill' as icono
+                'VERDE' AS estado,
+                COUNT(*) AS total,
+                '0-1 días desde recibido' AS descripcion,
+                '#10b981' AS color,
+                'bi-check-circle-fill' AS icono
             FROM cases c
             JOIN case_statuses cs ON cs.id = c.status_id
-            WHERE cs.code <> 'CERRADO'
-            AND c.is_responded = 0
-            AND DATEDIFF(NOW(), c.created_at) >= 4
-            {$where}
-            
+            LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
+            WHERE cs.is_final = 0
+              AND c.is_responded = 0
+              AND COALESCE(cst.current_sla_state,
+                    CASE
+                        WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) <= 1 THEN 'VERDE'
+                        WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) BETWEEN 2 AND 3 THEN 'AMARILLO'
+                        ELSE 'ROJO'
+                    END
+                ) = 'VERDE'
+              {$andUser}
+
             UNION ALL
-            
+
             SELECT
-                'RESPONDIDOS' as estado,
-                COUNT(*) as total,
-                'Casos ya contestados' as descripcion,
-                '#3b82f6' as color,
-                'bi-chat-square-text-fill' as icono
+                'RESPONDIDOS' AS estado,
+                COUNT(*) AS total,
+                'Casos ya contestados' AS descripcion,
+                '#3b82f6' AS color,
+                'bi-chat-square-text-fill' AS icono
             FROM cases c
             WHERE c.is_responded = 1
-            {$where}
-            
+              " . ($userId ? " AND c.assigned_user_id = :user_id " : "") . "
+
             ORDER BY FIELD(estado, 'ROJO', 'AMARILLO', 'VERDE', 'RESPONDIDOS')
         ";
 
@@ -246,15 +305,12 @@ final class MetricsRepo
 
     public function getCasesBySemaforo(string $semaforo, ?int $userId = null, int $limit = 20): array
     {
-        $where = $userId ? "AND c.assigned_user_id = :user_id" : "";
-        $params = [
-            ':semaforo' => $semaforo,
-            ':limit' => $limit
-        ];
-        
-        if ($userId) {
-            $params[':user_id'] = $userId;
+        $semaforo = strtoupper(trim($semaforo));
+        if (!in_array($semaforo, ['VERDE','AMARILLO','ROJO'], true)) {
+            return [];
         }
+
+        $andUser = $userId ? " AND c.assigned_user_id = :user_id " : "";
 
         $sql = "
             SELECT
@@ -263,108 +319,77 @@ final class MetricsRepo
                 c.subject,
                 c.requester_name,
                 c.requester_email,
-                cs.name as status_name,
-                cs.code as status_code,
-                u.full_name as assigned_to,
-                c.created_at,
-                DATEDIFF(NOW(), c.created_at) as dias_desde_creacion,
-                CASE
-                    WHEN DATEDIFF(NOW(), c.created_at) <= 1 THEN 'VERDE'
-                    WHEN DATEDIFF(NOW(), c.created_at) BETWEEN 2 AND 3 THEN 'AMARILLO'
-                    ELSE 'ROJO'
-                END as semaforo_actual
+                cs.name AS status_name,
+                cs.code AS status_code,
+                u.full_name AS assigned_to,
+                c.received_at,
+                c.assigned_at,
+                c.first_response_at,
+                COALESCE(cst.days_since_creation, TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW())) AS dias_desde_recibido,
+                COALESCE(cst.minutes_since_creation, TIMESTAMPDIFF(MINUTE, {$this->clockField()}, NOW())) AS minutos_desde_recibido,
+                COALESCE(cst.current_sla_state,
+                    CASE
+                        WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) <= 1 THEN 'VERDE'
+                        WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) BETWEEN 2 AND 3 THEN 'AMARILLO'
+                        ELSE 'ROJO'
+                    END
+                ) AS semaforo_actual,
+                COALESCE(cst.breached, 0) AS breached,
+                cst.sla_due_at
+
             FROM cases c
             JOIN case_statuses cs ON cs.id = c.status_id
             LEFT JOIN users u ON u.id = c.assigned_user_id
-            WHERE cs.code <> 'CERRADO'
-            AND c.is_responded = 0
-            AND (
-                CASE
-                    WHEN DATEDIFF(NOW(), c.created_at) <= 1 THEN 'VERDE'
-                    WHEN DATEDIFF(NOW(), c.created_at) BETWEEN 2 AND 3 THEN 'AMARILLO'
-                    ELSE 'ROJO'
-                END
-            ) = :semaforo
-            {$where}
-            ORDER BY c.created_at ASC
+            LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
+
+            WHERE cs.is_final = 0
+              AND c.is_responded = 0
+              AND COALESCE(cst.current_sla_state,
+                    CASE
+                        WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) <= 1 THEN 'VERDE'
+                        WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) BETWEEN 2 AND 3 THEN 'AMARILLO'
+                        ELSE 'ROJO'
+                    END
+                ) = :semaforo
+              {$andUser}
+
+            ORDER BY c.received_at ASC
             LIMIT :limit
         ";
 
         $stmt = $this->pdo->prepare($sql);
-        
-        // Enlazar parámetros uno por uno para especificar el tipo de :limit
         $stmt->bindValue(':semaforo', $semaforo);
-        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT); // ← ¡IMPORTANTE!
-        
+        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+
         if ($userId) {
             $stmt->bindValue(':user_id', $userId, PDO::PARAM_INT);
         }
-        
+
         $stmt->execute();
-        return $stmt->fetchAll() ?: [];
-    }
-
-    public function generateSemaforoReport(?int $userId = null): array
-    {
-        $where = $userId ? "AND c.assigned_user_id = :user_id" : "";
-        $params = $userId ? [':user_id' => $userId] : [];
-
-        $sql = "
-            SELECT
-                c.case_number,
-                c.subject,
-                c.requester_name,
-                c.requester_email,
-                cs.name as estado,
-                u.full_name as asignado_a,
-                c.created_at,
-                DATEDIFF(NOW(), c.created_at) as dias_transcurridos,
-                CASE
-                    WHEN c.is_responded = 1 THEN 'RESPONDIDO'
-                    WHEN DATEDIFF(NOW(), c.created_at) <= 1 THEN 'VERDE'
-                    WHEN DATEDIFF(NOW(), c.created_at) BETWEEN 2 AND 3 THEN 'AMARILLO'
-                    ELSE 'ROJO'
-                END as semaforo,
-                TIMESTAMPDIFF(HOUR, c.created_at, COALESCE(c.first_response_at, NOW())) as horas_transcurridas
-            FROM cases c
-            JOIN case_statuses cs ON cs.id = c.status_id
-            LEFT JOIN users u ON u.id = c.assigned_user_id
-            WHERE 1=1 {$where}
-            ORDER BY 
-                CASE
-                    WHEN DATEDIFF(NOW(), c.created_at) <= 1 THEN 1
-                    WHEN DATEDIFF(NOW(), c.created_at) BETWEEN 2 AND 3 THEN 2
-                    ELSE 3
-                END ASC,
-                c.created_at DESC
-        ";
-
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
         return $stmt->fetchAll() ?: [];
     }
 
     public function getWeeklyTrends(?int $userId = null): array
     {
-        $where = $userId ? "AND c.assigned_user_id = :user_id" : "";
+        $andUser = $userId ? " AND c.assigned_user_id = :user_id " : "";
         $params = $userId ? [':user_id' => $userId] : [];
 
         $sql = "
             SELECT
-                DATE(c.created_at) as fecha,
-                COUNT(*) as total_casos,
-                SUM(CASE WHEN c.is_responded = 1 THEN 1 ELSE 0 END) as respondidos,
+                DATE(c.received_at) AS fecha,
+                COUNT(*) AS total_casos,
+                SUM(CASE WHEN c.is_responded = 1 THEN 1 ELSE 0 END) AS respondidos,
                 ROUND(AVG(
-                    CASE 
-                        WHEN c.is_responded = 1 AND c.first_response_at IS NOT NULL 
-                        THEN TIMESTAMPDIFF(HOUR, c.created_at, c.first_response_at)
-                        ELSE NULL 
+                    CASE
+                        WHEN c.is_responded = 1 AND c.first_response_at IS NOT NULL
+                        THEN TIMESTAMPDIFF(HOUR, c.received_at, c.first_response_at)
+                        ELSE NULL
                     END
-                ), 1) as tiempo_promedio_respuesta
+                ), 1) AS tiempo_promedio_respuesta
             FROM cases c
-            WHERE c.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-            {$where}
-            GROUP BY DATE(c.created_at)
+            WHERE c.received_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+            {$andUser}
+            GROUP BY DATE(c.received_at)
             ORDER BY fecha ASC
         ";
 
@@ -375,16 +400,15 @@ final class MetricsRepo
 
     public function getExecutiveReport(): array
     {
-        // Reporte ejecutivo para administradores
         $sql = "
             SELECT
-                -- Resumen general
-                (SELECT COUNT(*) FROM cases) as total_casos,
-                (SELECT COUNT(*) FROM cases WHERE status_id IN 
-                    (SELECT id FROM case_statuses WHERE code NOT IN ('CERRADO', 'RESPONDIDO'))) as abiertos,
-                (SELECT COUNT(*) FROM cases WHERE is_responded = 1) as respondidos,
-                
-                -- Por agente (top 5)
+                (SELECT COUNT(*) FROM cases) AS total_casos,
+                (SELECT COUNT(*) FROM cases c
+                  JOIN case_statuses cs ON cs.id = c.status_id
+                 WHERE cs.is_final = 0
+                ) AS abiertos,
+                (SELECT COUNT(*) FROM cases WHERE is_responded = 1) AS respondidos,
+
                 (SELECT JSON_ARRAYAGG(
                     JSON_OBJECT(
                         'agente', u.full_name,
@@ -398,311 +422,75 @@ final class MetricsRepo
                 WHERE u.is_active = 1
                 GROUP BY u.id
                 ORDER BY COUNT(*) DESC
-                LIMIT 5) as top_agentes_json,
-                
-                -- Semáforo actual
+                LIMIT 5) AS top_agentes_json,
+
                 (SELECT COUNT(*) FROM cases c
-                WHERE c.is_responded = 0
-                AND DATEDIFF(NOW(), c.created_at) <= 1) as verde,
+                 JOIN case_statuses cs ON cs.id = c.status_id
+                 LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
+                 WHERE cs.is_final = 0
+                   AND c.is_responded = 0
+                   AND COALESCE(cst.current_sla_state,'VERDE') = 'VERDE'
+                ) AS verde,
+
                 (SELECT COUNT(*) FROM cases c
-                WHERE c.is_responded = 0
-                AND DATEDIFF(NOW(), c.created_at) BETWEEN 2 AND 3) as amarillo,
+                 JOIN case_statuses cs ON cs.id = c.status_id
+                 LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
+                 WHERE cs.is_final = 0
+                   AND c.is_responded = 0
+                   AND COALESCE(cst.current_sla_state,'VERDE') = 'AMARILLO'
+                ) AS amarillo,
+
                 (SELECT COUNT(*) FROM cases c
-                WHERE c.is_responded = 0
-                AND DATEDIFF(NOW(), c.created_at) >= 4) as rojo,
-                
-                -- Tiempos
-                ROUND(AVG(CASE 
-                    WHEN c.is_responded = 1 AND c.first_response_at IS NOT NULL 
-                    THEN TIMESTAMPDIFF(HOUR, c.created_at, c.first_response_at) 
-                    ELSE NULL 
-                END), 1) as tiempo_promedio_horas
+                 JOIN case_statuses cs ON cs.id = c.status_id
+                 LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
+                 WHERE cs.is_final = 0
+                   AND c.is_responded = 0
+                   AND COALESCE(cst.current_sla_state,'VERDE') = 'ROJO'
+                ) AS rojo,
+
+                ROUND(AVG(CASE
+                    WHEN c.is_responded = 1 AND c.first_response_at IS NOT NULL
+                    THEN TIMESTAMPDIFF(HOUR, c.received_at, c.first_response_at)
+                    ELSE NULL
+                END), 1) AS tiempo_promedio_horas
             FROM cases c
         ";
 
         $result = $this->pdo->query($sql)->fetch();
-        
-        if (!$result) {
-            return [];
-        }
-        
-        // Parsear JSON si existe
+        if (!$result) return [];
+
         if (!empty($result['top_agentes_json'])) {
-            $result['top_agentes'] = json_decode($result['top_agentes_json'], true) ?: [];
+            $result['top_agentes'] = json_decode((string)$result['top_agentes_json'], true) ?: [];
         } else {
             $result['top_agentes'] = [];
         }
-        
         unset($result['top_agentes_json']);
-        
+
         return $result;
     }
 
-    // Método auxiliar para reporte
     public function getDailyMetrics(): array
     {
         $sql = "
             SELECT
-                DATE(c.created_at) as fecha,
-                COUNT(*) as total,
-                SUM(CASE WHEN c.is_responded = 1 THEN 1 ELSE 0 END) as respondidos,
-                SUM(CASE WHEN c.is_responded = 0 THEN 1 ELSE 0 END) as pendientes,
+                DATE(c.received_at) AS fecha,
+                COUNT(*) AS total,
+                SUM(CASE WHEN c.is_responded = 1 THEN 1 ELSE 0 END) AS respondidos,
+                SUM(CASE WHEN c.is_responded = 0 THEN 1 ELSE 0 END) AS pendientes,
                 ROUND(AVG(
-                    CASE 
-                        WHEN c.is_responded = 1 AND c.first_response_at IS NOT NULL 
-                        THEN TIMESTAMPDIFF(HOUR, c.created_at, c.first_response_at)
-                        ELSE NULL 
+                    CASE
+                        WHEN c.is_responded = 1 AND c.first_response_at IS NOT NULL
+                        THEN TIMESTAMPDIFF(HOUR, c.received_at, c.first_response_at)
+                        ELSE NULL
                     END
-                ), 1) as tiempo_promedio
+                ), 1) AS tiempo_promedio
             FROM cases c
-            WHERE c.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-            GROUP BY DATE(c.created_at)
+            WHERE c.received_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+            GROUP BY DATE(c.received_at)
             ORDER BY fecha DESC
             LIMIT 10
         ";
 
         return $this->pdo->query($sql)->fetchAll() ?: [];
     }
-
-
-
-// REPORTERÍA Y EXPORTACIÓN
-
-    public function generateReport(array $params): array
-    {
-        $where = [];
-        $queryParams = [];
-        
-        // Filtro por fecha
-        if (!empty($params['start_date'])) {
-            $where[] = "c.created_at >= :start_date";
-            $queryParams[':start_date'] = $params['start_date'] . ' 00:00:00';
-        }
-        
-        if (!empty($params['end_date'])) {
-            $where[] = "c.created_at <= :end_date";
-            $queryParams[':end_date'] = $params['end_date'] . ' 23:59:59';
-        }
-        
-        // Filtro por estado
-        if (!empty($params['status'])) {
-            $where[] = "cs.code = :status";
-            $queryParams[':status'] = $params['status'];
-        }
-        
-        // Filtro por agente
-        if (!empty($params['agent_id']) && $params['agent_id'] > 0) {
-            $where[] = "c.assigned_user_id = :agent_id";
-            $queryParams[':agent_id'] = $params['agent_id'];
-        }
-        
-        // Filtro por semáforo
-        if (!empty($params['semaforo'])) {
-            $semaforo = strtoupper($params['semaforo']);
-            $semaforoWhere = "";
-            
-            switch ($semaforo) {
-                case 'VERDE':
-                    $semaforoWhere = "DATEDIFF(NOW(), c.created_at) <= 1";
-                    break;
-                case 'AMARILLO':
-                    $semaforoWhere = "DATEDIFF(NOW(), c.created_at) BETWEEN 2 AND 3";
-                    break;
-                case 'ROJO':
-                    $semaforoWhere = "DATEDIFF(NOW(), c.created_at) >= 4";
-                    break;
-            }
-            
-            if ($semaforoWhere) {
-                $where[] = $semaforoWhere;
-                $where[] = "c.is_responded = 0";
-            }
-        }
-        
-        $whereClause = $where ? "WHERE " . implode(" AND ", $where) : "";
-        
-        $sql = "
-            SELECT
-                c.id,
-                c.case_number,
-                c.subject,
-                c.requester_email,
-                c.requester_name,
-                c.created_at,
-                c.assigned_at,
-                c.first_response_at,
-                c.is_responded,
-                cs.code as status_code,
-                cs.name as status_name,
-                u.full_name as assigned_to,
-                u.email as assigned_email,
-                DATEDIFF(NOW(), c.created_at) as dias_desde_creacion,
-                CASE
-                    WHEN c.is_responded = 1 THEN 'RESPONDIDO'
-                    WHEN DATEDIFF(NOW(), c.created_at) <= 1 THEN 'VERDE'
-                    WHEN DATEDIFF(NOW(), c.created_at) BETWEEN 2 AND 3 THEN 'AMARILLO'
-                    ELSE 'ROJO'
-                END as semaforo,
-                CASE 
-                    WHEN c.is_responded = 1 AND c.first_response_at IS NOT NULL 
-                    THEN TIMESTAMPDIFF(HOUR, c.created_at, c.first_response_at)
-                    ELSE NULL 
-                END as horas_respuesta
-            FROM cases c
-            JOIN case_statuses cs ON cs.id = c.status_id
-            LEFT JOIN users u ON u.id = c.assigned_user_id
-            {$whereClause}
-            ORDER BY c.created_at DESC
-            LIMIT 1000
-        ";
-        
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($queryParams);
-        
-        return $stmt->fetchAll() ?: [];
-    }
-
-    public function getAgentsForReport(): array
-    {
-        $sql = "
-            SELECT u.id, u.full_name, u.email
-            FROM users u
-            JOIN user_roles ur ON ur.user_id = u.id
-            JOIN roles r ON r.id = ur.role_id AND r.code = 'AGENTE'
-            WHERE u.is_active = 1
-            ORDER BY u.full_name
-        ";
-        
-        return $this->pdo->query($sql)->fetchAll() ?: [];
-    }
-
-    public function getReportSummary(array $params): array
-    {
-        $data = $this->generateReport($params);
-        
-        if (empty($data)) {
-            return [
-                'total_cases' => 0,
-                'responded' => 0,
-                'pending' => 0,
-                'avg_response_hours' => 0,
-                'by_status' => [],
-                'by_semaforo' => []
-            ];
-        }
-        
-        $summary = [
-            'total_cases' => count($data),
-            'responded' => 0,
-            'pending' => 0,
-            'avg_response_hours' => 0,
-            'by_status' => [],
-            'by_semaforo' => []
-        ];
-        
-        $totalResponseHours = 0;
-        $responseCount = 0;
-        
-        foreach ($data as $row) {
-            if ($row['is_responded']) {
-                $summary['responded']++;
-                if ($row['horas_respuesta'] !== null) {
-                    $totalResponseHours += $row['horas_respuesta'];
-                    $responseCount++;
-                }
-            } else {
-                $summary['pending']++;
-            }
-            
-            // Agrupar por estado
-            $status = $row['status_code'];
-            if (!isset($summary['by_status'][$status])) {
-                $summary['by_status'][$status] = [
-                    'name' => $row['status_name'],
-                    'count' => 0
-                ];
-            }
-            $summary['by_status'][$status]['count']++;
-            
-            // Agrupar por semáforo
-            $semaforo = $row['semaforo'];
-            if (!isset($summary['by_semaforo'][$semaforo])) {
-                $summary['by_semaforo'][$semaforo] = [
-                    'count' => 0,
-                    'color' => $this->getSemaforoColor($semaforo)
-                ];
-            }
-            $summary['by_semaforo'][$semaforo]['count']++;
-        }
-        
-        $summary['avg_response_hours'] = $responseCount > 0 
-            ? round($totalResponseHours / $responseCount, 1) 
-            : 0;
-        
-        return $summary;
-    }
-
-    private function getSemaforoColor(string $semaforo): string
-    {
-        return match($semaforo) {
-            'VERDE' => 'success',
-            'AMARILLO' => 'warning',
-            'ROJO' => 'danger',
-            'RESPONDIDO' => 'primary',
-            default => 'secondary'
-        };
-    }
-
-    public function saveGeneratedReport(string $reportType, string $filePath, ?int $generatedBy = null): int
-    {
-        $sql = "
-            INSERT INTO generated_reports 
-            (report_type, report_date, file_path, generated_by, created_at)
-            VALUES (:type, CURDATE(), :path, :generated_by, NOW(6))
-        ";
-        
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute([
-            ':type' => $reportType,
-            ':path' => $filePath,
-            ':generated_by' => $generatedBy
-        ]);
-        
-        return (int)$this->pdo->lastInsertId();
-    }
-
-    public function incrementReportDownload(int $reportId): void
-    {
-        $sql = "
-            UPDATE generated_reports 
-            SET download_count = download_count + 1,
-                updated_at = NOW(6)
-            WHERE id = :id
-        ";
-        
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute([':id' => $reportId]);
-    }
-
-    public function getRecentReports(int $limit = 10): array
-    {
-        $sql = "
-            SELECT 
-                r.*,
-                u.full_name as generated_by_name
-            FROM generated_reports r
-            LEFT JOIN users u ON u.id = r.generated_by
-            ORDER BY r.created_at DESC
-            LIMIT :limit
-        ";
-        
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
-        $stmt->execute();
-        
-        return $stmt->fetchAll() ?: [];
-    }   
-
-
-
 }

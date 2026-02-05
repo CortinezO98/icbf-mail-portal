@@ -1,4 +1,5 @@
 <?php
+// File: portal/app/repos/ReportsRepo.php
 declare(strict_types=1);
 
 namespace App\Repos;
@@ -11,10 +12,9 @@ final class ReportsRepo
 
     public function dashboard(string $startDate, string $endDate, ?int $mailboxId = null): array
     {
-        // Tu fuente de verdad para rangos operativos es cases.received_at:contentReference[oaicite:15]{index=15}
         $whereMailbox = $mailboxId ? " AND c.mailbox_id = :mb " : "";
 
-        // KPIs principales (abiertos/cerrados/semáforo)
+        // KPIs principales
         $sql = "
             SELECT
               COUNT(*) AS total_cases,
@@ -31,6 +31,7 @@ final class ReportsRepo
             WHERE DATE(c.received_at) BETWEEN :s AND :e
             $whereMailbox
         ";
+
         $st = $this->pdo->prepare($sql);
         $st->bindValue(':s', $startDate);
         $st->bindValue(':e', $endDate);
@@ -47,15 +48,15 @@ final class ReportsRepo
             GROUP BY DATE(c.received_at)
             ORDER BY day ASC
         ";
+
         $st = $this->pdo->prepare($sqlDaily);
         $st->bindValue(':s', $startDate);
         $st->bindValue(':e', $endDate);
         if ($mailboxId) $st->bindValue(':mb', $mailboxId, PDO::PARAM_INT);
         $st->execute();
-        $daily = $st->fetchAll();
+        $daily = $st->fetchAll() ?: [];
 
-        // “Gaps” de adjuntos: messages.has_attachments=1 pero no existen filas en attachments
-        // (sirve para detectar fallas de sync del worker)
+        // Gaps de adjuntos
         $sqlMissing = "
             SELECT COUNT(*) AS missing_attachments
             FROM (
@@ -69,7 +70,7 @@ final class ReportsRepo
             ) x
         ";
         $st = $this->pdo->prepare($sqlMissing);
-        $st->execute([':s'=>$startDate, ':e'=>$endDate]);
+        $st->execute([':s' => $startDate, ':e' => $endDate]);
         $missing = (int)($st->fetchColumn() ?: 0);
 
         return [
@@ -81,7 +82,6 @@ final class ReportsRepo
 
     public function agentsMetrics(string $startDate, string $endDate): array
     {
-        // Cache pro: agent_daily_metrics ya existe e indexada:contentReference[oaicite:16]{index=16}
         $sql = "
             SELECT
               u.id AS agent_id,
@@ -97,16 +97,16 @@ final class ReportsRepo
             GROUP BY u.id, u.full_name
             ORDER BY cases_overdue DESC, cases_assigned DESC
         ";
+
         $st = $this->pdo->prepare($sql);
-        $st->execute([':s'=>$startDate, ':e'=>$endDate]);
-        return $st->fetchAll();
+        $st->execute([':s' => $startDate, ':e' => $endDate]);
+        return $st->fetchAll() ?: [];
     }
 
     public function exportSlaDataset(string $startDate, string $endDate, ?int $mailboxId = null): array
     {
         $whereMailbox = $mailboxId ? " AND c.mailbox_id = :mb " : "";
 
-        // Dataset alineado a cases.* reales:contentReference[oaicite:17]{index=17}
         $sql = "
             SELECT
               c.id AS case_id,
@@ -140,57 +140,104 @@ final class ReportsRepo
             $whereMailbox
             ORDER BY c.received_at DESC
         ";
+
         $st = $this->pdo->prepare($sql);
         $st->bindValue(':s', $startDate);
         $st->bindValue(':e', $endDate);
         if ($mailboxId) $st->bindValue(':mb', $mailboxId, PDO::PARAM_INT);
         $st->execute();
-        return $st->fetchAll();
+        return $st->fetchAll() ?: [];
     }
 
-    public function insertGeneratedReport(int $userId, string $reportType, string $filePath, array $params, string $periodStart, string $periodEnd): void
-    {
-        // generated_reports tiene params/params_hash/period_start/end en tu DDL:contentReference[oaicite:18]{index=18}
+    /**
+     * ✅ DDL real: generated_reports NO tiene updated_at / created_by
+     * ✅ SÍ tiene: generated_by, status, error_message, row_count, finished_at
+     */
+    public function insertGeneratedReport(
+        int $userId,
+        string $reportType,
+        string $filePath,
+        array $params,
+        string $periodStart,
+        string $periodEnd,
+        string $status = 'READY',
+        ?string $errorMessage = null,
+        ?int $rowCount = null,
+        ?string $finishedAt = null
+    ): void {
         $paramsJson = json_encode($params, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         $hash = hash('sha256', $paramsJson ?: '');
 
+        // Si lo generas en request (sin cola), típicamente queda READY y finaliza ya.
+        if ($finishedAt === null) {
+            if ($status === 'READY' || $status === 'FAILED') {
+                // DATETIME(6) => usamos NOW(6) en SQL para consistencia (dejamos null aquí)
+                $finishedAt = null;
+            }
+        }
+
         $sql = "
           INSERT INTO generated_reports
-            (report_type, report_date, file_path, download_count, generated_by, created_at, params, params_hash, period_start, period_end)
+            (report_type, report_date, file_path, download_count, generated_by, created_at, params, params_hash, period_start, period_end, status, error_message, row_count, finished_at)
           VALUES
-            (:rt, CURDATE(), :fp, 0, :uid, NOW(6), :pj, :ph, :ps, :pe)
+            (:rt, CURDATE(), :fp, 0, :uid, NOW(6), :pj, :ph, :ps, :pe, :st, :em, :rc,
+             CASE
+                WHEN :fa IS NOT NULL THEN :fa
+                WHEN :st IN ('READY','FAILED') THEN NOW(6)
+                ELSE NULL
+             END
+            )
         ";
+
         $st = $this->pdo->prepare($sql);
         $st->execute([
-            ':rt'=>$reportType,
-            ':fp'=>$filePath,
-            ':uid'=>$userId,
-            ':pj'=>$paramsJson,
-            ':ph'=>$hash,
-            ':ps'=>$periodStart,
-            ':pe'=>$periodEnd,
+            ':rt' => $reportType,
+            ':fp' => $filePath,
+            ':uid' => $userId,
+            ':pj' => $paramsJson,
+            ':ph' => $hash,
+            ':ps' => $periodStart,
+            ':pe' => $periodEnd,
+            ':st' => strtoupper($status),
+            ':em' => $errorMessage,
+            ':rc' => $rowCount,
+            ':fa' => $finishedAt,
         ]);
     }
 
     public function getReportById(int $id): ?array
     {
-        $st = $this->pdo->prepare("SELECT * FROM generated_reports WHERE id = :id LIMIT 1");
-        $st->execute([':id'=>$id]);
+        // ✅ compat: devolvemos created_by como alias (si algún controller/vista lo usa)
+        $sql = "
+            SELECT
+                gr.*,
+                gr.generated_by AS created_by
+            FROM generated_reports gr
+            WHERE gr.id = :id
+            LIMIT 1
+        ";
+        $st = $this->pdo->prepare($sql);
+        $st->execute([':id' => $id]);
         $r = $st->fetch();
         return $r ?: null;
     }
 
     public function incrementDownloadCount(int $id): void
     {
-        $st = $this->pdo->prepare("UPDATE generated_reports SET download_count = download_count + 1 WHERE id = :id");
-        $st->execute([':id'=>$id]);
+        // ✅ Tu tabla NO tiene updated_at
+        $sql = "
+            UPDATE generated_reports
+            SET download_count = download_count + 1
+            WHERE id = :id
+        ";
+        $st = $this->pdo->prepare($sql);
+        $st->execute([':id' => $id]);
     }
-
 
     public function detailedDailyMetrics(string $startDate, string $endDate, ?int $mailboxId = null): array
     {
         $whereMailbox = $mailboxId ? " AND c.mailbox_id = :mb " : "";
-        
+
         $sql = "
             SELECT 
                 DATE(c.received_at) AS day,
@@ -207,13 +254,57 @@ final class ReportsRepo
             GROUP BY DATE(c.received_at)
             ORDER BY day ASC
         ";
-        
+
         $st = $this->pdo->prepare($sql);
         $st->bindValue(':s', $startDate);
         $st->bindValue(':e', $endDate);
         if ($mailboxId) $st->bindValue(':mb', $mailboxId, PDO::PARAM_INT);
         $st->execute();
-        
-        return $st->fetchAll();
+
+        return $st->fetchAll() ?: [];
+    }
+
+    public function recentExports(int $page = 1, int $pageSize = 20): array
+    {
+        $page = max(1, $page);
+        $pageSize = max(1, min($pageSize, 100));
+        $offset = ($page - 1) * $pageSize;
+
+        // ✅ NO usamos gr.updated_at (no existe)
+        // ✅ devolvemos NULL AS updated_at para compatibilidad si alguna vista lo imprime
+        $sql = "
+            SELECT
+                gr.id,
+                gr.report_type,
+                gr.report_date,
+                gr.file_path,
+                gr.download_count,
+
+                gr.generated_by,
+                u.full_name AS generated_by_name,
+
+                gr.created_at,
+                gr.status,
+                gr.error_message,
+                gr.row_count,
+                gr.finished_at,
+
+                -- compat: nombres viejos
+                gr.generated_by AS created_by,
+                u.full_name AS created_by_name,
+                NULL AS updated_at
+
+            FROM generated_reports gr
+            LEFT JOIN users u ON u.id = gr.generated_by
+            ORDER BY gr.created_at DESC
+            LIMIT :limit OFFSET :offset
+        ";
+
+        $st = $this->pdo->prepare($sql);
+        $st->bindValue(':limit', $pageSize, PDO::PARAM_INT);
+        $st->bindValue(':offset', $offset, PDO::PARAM_INT);
+        $st->execute();
+
+        return $st->fetchAll() ?: [];
     }
 }
