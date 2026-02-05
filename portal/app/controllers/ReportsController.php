@@ -4,232 +4,151 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use PDO;
+
 use App\Auth\Auth;
-use App\Auth\Csrf;
-use App\Repos\MetricsRepo;
-use App\Repos\UsersRepo;
+use App\Repos\ReportsRepo;
+use App\Services\ReportExportService;
 
 use function App\Config\url;
 
 final class ReportsController
 {
-    private MetricsRepo $metrics;
-    private UsersRepo $usersRepo;
+    private ReportsRepo $repo;
+    private ReportExportService $exporter;
 
     public function __construct(private PDO $pdo, private array $config)
     {
-        $this->metrics = new MetricsRepo($pdo);
-        $this->usersRepo = new UsersRepo($pdo);
+        $this->repo = new ReportsRepo($pdo);
+        $this->exporter = new ReportExportService();
     }
 
-    public function index(): void
+    public function dashboard(): void
     {
-        if (!Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
-            http_response_code(403);
-            echo "Acceso denegado";
-            exit;
-        }
+        $end = $this->safeDate($_GET['end'] ?? date('Y-m-d')) ?? date('Y-m-d');
+        $start = $this->safeDate($_GET['start'] ?? date('Y-m-d', strtotime('-6 days'))) ?? date('Y-m-d', strtotime('-6 days'));
+        $mailboxId = isset($_GET['mailbox_id']) && $_GET['mailbox_id'] !== '' ? (int)$_GET['mailbox_id'] : null;
 
-        $agents = $this->metrics->getAgentsForReport();
-        $recentReports = $this->metrics->getRecentReports(5);
-        
-        $this->render('reports/index.php', [
+        $data = $this->repo->dashboard($start, $end, $mailboxId);
+        $agents = $this->repo->agentsMetrics($start, $end);
+
+        $this->render('reports/dashboard.php', [
+            'start' => $start,
+            'end' => $end,
+            'mailbox_id' => $mailboxId,
+            'kpis' => $data['kpis'],
+            'daily' => $data['daily'],
+            'missing_attachments' => $data['missing_attachments'],
             'agents' => $agents,
-            'recentReports' => $recentReports,
-            'csrfToken' => Csrf::token()
         ]);
     }
 
-    public function generate(): void
+    public function export(): void
     {
-        if (!Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
-            http_response_code(403);
-            echo "Acceso denegado";
+        // GET /reports/export?type=sla&start=YYYY-MM-DD&end=YYYY-MM-DD&format=csv|xlsx&mailbox_id=#
+        $type = strtolower(trim((string)($_GET['type'] ?? 'sla')));
+        $format = strtolower(trim((string)($_GET['format'] ?? 'xlsx')));
+
+        $end = $this->safeDate($_GET['end'] ?? date('Y-m-d')) ?? date('Y-m-d');
+        $start = $this->safeDate($_GET['start'] ?? date('Y-m-d', strtotime('-6 days'))) ?? date('Y-m-d', strtotime('-6 days'));
+        $mailboxId = isset($_GET['mailbox_id']) && $_GET['mailbox_id'] !== '' ? (int)$_GET['mailbox_id'] : null;
+
+        if (!in_array($type, ['sla'], true)) {
+            http_response_code(400);
+            echo "Tipo de export no soportado";
             exit;
         }
 
-        Csrf::validate($_POST['_csrf'] ?? null);
+        $rows = $this->repo->exportSlaDataset($start, $end, $mailboxId);
 
-        $params = [
-            'start_date' => trim($_POST['start_date'] ?? ''),
-            'end_date'   => trim($_POST['end_date'] ?? ''),
-            'status'     => trim($_POST['status'] ?? ''),
-            'agent_id'   => !empty($_POST['agent_id']) ? (int)$_POST['agent_id'] : null,
-            'semaforo'   => trim($_POST['semaforo'] ?? ''),
-            'format'     => strtolower(trim($_POST['format'] ?? 'html'))
-        ];
+        // Guardar el archivo en portal/storage/reports y registrar en generated_reports
+        $reportsDir = dirname(__DIR__, 2) . '/storage/reports';
+        if (!is_dir($reportsDir)) mkdir($reportsDir, 0777, true);
 
-        $data = $this->metrics->generateReport($params);
-        $summary = $this->metrics->getReportSummary($params);
-        
-        if ($params['format'] === 'csv') {
-            $this->exportCSV($data, $params);
-        } elseif ($params['format'] === 'excel') {
-            $this->exportExcel($data, $params);
-        } else {
-            $this->render('reports/results.php', [
-                'data' => $data,
-                'summary' => $summary,
-                'params' => $params,
-                'agents' => $this->metrics->getAgentsForReport()
-            ]);
+        $baseName = "reporte_{$type}_{$start}_{$end}";
+        if ($mailboxId) $baseName .= "_mb{$mailboxId}";
+
+        // Intentar XLSX, si no hay lib -> CSV
+        $fileId = null;
+
+        if ($format === 'xlsx') {
+            // Si hay PhpSpreadsheet, lo servimos directo. Pero también lo guardamos en disco.
+            $autoload = dirname(__DIR__, 2) . '/vendor/autoload.php';
+            if (file_exists($autoload)) {
+                require_once $autoload;
+            }
+            if (class_exists(\PhpOffice\PhpSpreadsheet\Spreadsheet::class)) {
+                $path = $reportsDir . '/' . $baseName . '_' . date('Ymd_His') . '.xlsx';
+                $this->saveXlsx($path, $rows);
+
+                $userId = (int)(Auth::user()['id'] ?? 0);
+                $params = ['type'=>$type,'start'=>$start,'end'=>$end,'mailbox_id'=>$mailboxId,'format'=>'xlsx'];
+                $this->repo->insertGeneratedReport($userId, 'excel_'.$type, $path, $params, $start, $end);
+
+                header('Location: ' . url('/reports/download?id=' . $this->lastInsertIdSafe()));
+                exit;
+            }
+            // fallback
+            $format = 'csv';
         }
+
+        // CSV guardado
+        $path = $reportsDir . '/' . $baseName . '_' . date('Ymd_His') . '.csv';
+        $this->saveCsv($path, $rows);
+
+        $userId = (int)(Auth::user()['id'] ?? 0);
+        $params = ['type'=>$type,'start'=>$start,'end'=>$end,'mailbox_id'=>$mailboxId,'format'=>'csv'];
+        $this->repo->insertGeneratedReport($userId, 'csv_'.$type, $path, $params, $start, $end);
+
+        header('Location: ' . url('/reports/download?id=' . $this->lastInsertIdSafe()));
+        exit;
     }
 
-    public function download(int $reportId): void
+    public function download(): void
     {
-        if (!Auth::check()) {
-            http_response_code(403);
-            echo "Acceso denegado";
+        $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+        if ($id <= 0) {
+            http_response_code(400);
+            echo "ID inválido";
             exit;
         }
 
-        $sql = "SELECT file_path, report_type FROM generated_reports WHERE id = :id LIMIT 1";
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute([':id' => $reportId]);
-        $report = $stmt->fetch();
-
-        if (!$report || !file_exists($report['file_path'])) {
+        $r = $this->repo->getReportById($id);
+        if (!$r) {
             http_response_code(404);
             echo "Reporte no encontrado";
             exit;
         }
 
-        $this->metrics->incrementReportDownload($reportId);
+        $this->repo->incrementDownloadCount($id);
 
-        header('Content-Type: application/octet-stream');
-        header('Content-Disposition: attachment; filename="reporte_' . $reportId . '_' . date('Y-m-d') . '.' . pathinfo($report['file_path'], PATHINFO_EXTENSION) . '"');
-        header('Content-Length: ' . filesize($report['file_path']));
-        
-        readfile($report['file_path']);
+        $filePath = (string)($r['file_path'] ?? '');
+        if ($filePath === '' || !file_exists($filePath)) {
+            http_response_code(404);
+            echo "Archivo no encontrado en disco";
+            exit;
+        }
+
+        $filename = basename($filePath);
+        $contentType = str_ends_with($filename, '.xlsx')
+            ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            : 'text/csv';
+
+        header('Content-Type: ' . $contentType);
+        header('Content-Disposition: attachment; filename="' . rawurlencode($filename) . '"');
+        header('Content-Length: ' . (string)filesize($filePath));
+        header('X-Content-Type-Options: nosniff');
+
+        readfile($filePath);
         exit;
     }
 
-    private function exportCSV(array $data, array $params): void
+    private function safeDate(string $value): ?string
     {
-        $filename = 'reporte_' . date('Y-m-d_His') . '.csv';
-        $filepath = sys_get_temp_dir() . '/' . $filename;
-        
-        $fp = fopen($filepath, 'w');
-        
-        // Encabezados
-        fputcsv($fp, [
-            'Número de Caso',
-            'Asunto',
-            'Solicitante',
-            'Email Solicitante',
-            'Estado',
-            'Asignado a',
-            'Fecha Creación',
-            'Fecha Asignación',
-            'Fecha Respuesta',
-            'Días desde Creación',
-            'Semáforo',
-            'Horas Respuesta',
-            'Respondido'
-        ], ';');
-        
-        // Datos
-        foreach ($data as $row) {
-            fputcsv($fp, [
-                $row['case_number'] ?? '',
-                $row['subject'] ?? '',
-                $row['requester_name'] ?? '',
-                $row['requester_email'] ?? '',
-                $row['status_name'] ?? '',
-                $row['assigned_to'] ?? '',
-                $row['created_at'] ?? '',
-                $row['assigned_at'] ?? '',
-                $row['first_response_at'] ?? '',
-                $row['dias_desde_creacion'] ?? 0,
-                $row['semaforo'] ?? '',
-                $row['horas_respuesta'] ?? '',
-                $row['is_responded'] ? 'Sí' : 'No'
-            ], ';');
-        }
-        
-        fclose($fp);
-        
-        $reportId = $this->metrics->saveGeneratedReport('CSV', $filepath, Auth::id());
-        
-        header('Content-Type: text/csv; charset=utf-8');
-        header('Content-Disposition: attachment; filename="' . $filename . '"');
-        header('Content-Length: ' . filesize($filepath));
-        
-        readfile($filepath);
-        
-        // Limpiar archivo temporal después de 5 minutos
-        register_shutdown_function(function() use ($filepath) {
-            sleep(300);
-            if (file_exists($filepath)) {
-                unlink($filepath);
-            }
-        });
-        
-        exit;
-    }
-
-    private function exportExcel(array $data, array $params): void
-    {
-        // Para Excel simple, generamos HTML con tabla que Excel puede abrir
-        $filename = 'reporte_' . date('Y-m-d_His') . '.xls';
-        
-        header('Content-Type: application/vnd.ms-excel');
-        header('Content-Disposition: attachment; filename="' . $filename . '"');
-        
-        echo '<html><head>';
-        echo '<meta charset="UTF-8">';
-        echo '<style>td { border: 1px solid #ccc; padding: 5px; }</style>';
-        echo '</head><body>';
-        echo '<h2>Reporte de Casos - ' . date('d/m/Y H:i:s') . '</h2>';
-        
-        if ($params['start_date'] || $params['end_date']) {
-            echo '<p><strong>Período:</strong> ';
-            echo $params['start_date'] ? 'Desde ' . $params['start_date'] : '';
-            echo $params['end_date'] ? ' hasta ' . $params['end_date'] : '';
-            echo '</p>';
-        }
-        
-        echo '<table border="1">';
-        echo '<tr style="background-color: #f0f0f0; font-weight: bold;">';
-        echo '<td># Caso</td><td>Asunto</td><td>Solicitante</td><td>Email</td>';
-        echo '<td>Estado</td><td>Asignado a</td><td>Fecha Creación</td>';
-        echo '<td>Semáforo</td><td>Días</td><td>Respondido</td>';
-        echo '</tr>';
-        
-        foreach ($data as $row) {
-            echo '<tr>';
-            echo '<td>' . htmlspecialchars($row['case_number'] ?? '') . '</td>';
-            echo '<td>' . htmlspecialchars($row['subject'] ?? '') . '</td>';
-            echo '<td>' . htmlspecialchars($row['requester_name'] ?? '') . '</td>';
-            echo '<td>' . htmlspecialchars($row['requester_email'] ?? '') . '</td>';
-            echo '<td>' . htmlspecialchars($row['status_name'] ?? '') . '</td>';
-            echo '<td>' . htmlspecialchars($row['assigned_to'] ?? 'Sin asignar') . '</td>';
-            echo '<td>' . ($row['created_at'] ? date('d/m/Y H:i', strtotime($row['created_at'])) : '') . '</td>';
-            
-            $semaforo = $row['semaforo'] ?? '';
-            $color = match($semaforo) {
-                'VERDE' => '#10b981',
-                'AMARILLO' => '#f59e0b',
-                'ROJO' => '#ef4444',
-                'RESPONDIDO' => '#3b82f6',
-                default => '#6b7280'
-            };
-            
-            echo '<td style="color: ' . $color . '; font-weight: bold;">' . $semaforo . '</td>';
-            echo '<td>' . ($row['dias_desde_creacion'] ?? 0) . '</td>';
-            echo '<td>' . ($row['is_responded'] ? 'Sí' : 'No') . '</td>';
-            echo '</tr>';
-        }
-        
-        echo '</table>';
-        echo '</body></html>';
-        
-        $tempFile = sys_get_temp_dir() . '/' . $filename;
-        file_put_contents($tempFile, ob_get_contents());
-        $this->metrics->saveGeneratedReport('Excel', $tempFile, Auth::id());
-        
-        exit;
+        $value = trim($value);
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) return null;
+        $ts = strtotime($value);
+        if ($ts === false) return null;
+        return date('Y-m-d', $ts);
     }
 
     private function render(string $view, array $params = []): void
@@ -237,5 +156,67 @@ final class ReportsController
         extract($params, EXTR_SKIP);
         $viewPath = dirname(__DIR__) . '/views/' . $view;
         include dirname(__DIR__) . '/views/layout.php';
+    }
+
+    private function saveCsv(string $path, array $rows): void
+    {
+        $f = fopen($path, 'wb');
+        if (!$f) throw new \RuntimeException("No se pudo crear archivo: {$path}");
+        if (empty($rows)) {
+            fputcsv($f, ['sin_datos']);
+            fclose($f);
+            return;
+        }
+        fputcsv($f, array_keys($rows[0]));
+        foreach ($rows as $r) {
+            foreach ($r as $k => $v) {
+                if (is_array($v) || is_object($v)) {
+                    $r[$k] = json_encode($v, JSON_UNESCAPED_UNICODE);
+                }
+            }
+            fputcsv($f, array_values($r));
+        }
+        fclose($f);
+    }
+
+    private function saveXlsx(string $path, array $rows): void
+    {
+        $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+        $sheet = $spreadsheet->getActiveSheet();
+        $sheet->setTitle('SLA');
+
+        if (empty($rows)) {
+            $sheet->setCellValue('A1', 'sin_datos');
+        } else {
+            $headers = array_keys($rows[0]);
+            $col = 1;
+            foreach ($headers as $h) {
+                $sheet->setCellValueByColumnAndRow($col, 1, (string)$h);
+                $col++;
+            }
+            $rowIdx = 2;
+            foreach ($rows as $r) {
+                $col = 1;
+                foreach ($headers as $h) {
+                    $v = $r[$h] ?? '';
+                    if (is_array($v) || is_object($v)) {
+                        $v = json_encode($v, JSON_UNESCAPED_UNICODE);
+                    }
+                    $sheet->setCellValueByColumnAndRow($col, $rowIdx, (string)$v);
+                    $col++;
+                }
+                $rowIdx++;
+            }
+        }
+
+        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+        $writer->save($path);
+    }
+
+    private function lastInsertIdSafe(): int
+    {
+        // InsertGeneratedReport usa el mismo PDO, por eso podemos leer el lastInsertId
+        $id = (int)$this->pdo->lastInsertId();
+        return $id > 0 ? $id : 0;
     }
 }

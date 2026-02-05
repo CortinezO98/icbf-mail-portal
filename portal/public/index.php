@@ -12,14 +12,17 @@ require_once __DIR__ . '/../app/repos/CasesRepo.php';
 require_once __DIR__ . '/../app/repos/MessagesRepo.php';
 require_once __DIR__ . '/../app/repos/AttachmentsRepo.php';
 require_once __DIR__ . '/../app/repos/EventsRepo.php';
+require_once __DIR__ . '/../app/repos/MetricsRepo.php';
+require_once __DIR__ . '/../app/repos/ReportsRepo.php';
 
 require_once __DIR__ . '/../app/controllers/AuthController.php';
 require_once __DIR__ . '/../app/controllers/CasesController.php';
 require_once __DIR__ . '/../app/controllers/AssignmentsController.php';
 require_once __DIR__ . '/../app/controllers/AttachmentsController.php';
 require_once __DIR__ . '/../app/controllers/AutoAssignController.php';
-require_once __DIR__ . '/../app/repos/MetricsRepo.php';
 require_once __DIR__ . '/../app/controllers/DashboardController.php';
+require_once __DIR__ . '/../app/services/ReportExportService.php';
+require_once __DIR__ . '/../app/controllers/ReportsController.php';
 
 
 require_once __DIR__ . '/../app/middleware/require_login.php';
@@ -102,6 +105,22 @@ try {
     }
 
 
+
+
+
+    if ($path === '/reports' && $method === 'GET') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
+        (new \App\Controllers\ReportsController($pdo, $config))->dashboard();
+        exit;
+    }
+
+    if ($path === '/reports/export' && $method === 'GET') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
+        (new \App\Controllers\ReportsController($pdo, $config))->export();
+        exit;
+    }
 
 
 
