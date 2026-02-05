@@ -35,6 +35,118 @@ def get_status_id_by_code(db: Session, code: str) -> int:
     return int(row[0])
 
 
+def pick_least_loaded_agent(db: Session) -> int | None:
+    """
+    Retorna user_id del agente con menor carga activa.
+    Carga activa = casos asignados con status IN ('ASIGNADO','EN_PROCESO').
+
+    Elegibles:
+      - users.is_active = 1  (usuario vigente, NO es conectado)
+      - users.assign_enabled = 1
+      - roles.code = 'AGENTE' (via user_roles)
+
+    Desempate:
+      - last_assigned_at más antiguo (NULL primero)
+      - u.id asc
+    """
+    row = db.execute(
+        text("""
+            SELECT u.id
+            FROM users u
+            JOIN user_roles ur ON ur.user_id = u.id
+            JOIN roles r ON r.id = ur.role_id AND r.code = 'AGENTE'
+            LEFT JOIN cases c
+              ON c.assigned_user_id = u.id
+            LEFT JOIN case_statuses cs
+              ON cs.id = c.status_id
+             AND cs.code IN ('ASIGNADO','EN_PROCESO')
+            WHERE u.is_active = 1
+              AND u.assign_enabled = 1
+            GROUP BY u.id
+            ORDER BY COUNT(c.id) ASC,
+                     COALESCE(u.last_assigned_at, '1970-01-01') ASC,
+                     u.id ASC
+            LIMIT 1
+        """)
+    ).fetchone()
+
+    return int(row[0]) if row else None
+
+
+def auto_assign_case(db: Session, *, case_id: int) -> int | None:
+    """
+    Asigna case_id a un agente balanceado (least-open-cases).
+    Idempotente: si ya está asignado, devuelve el assigned_user_id actual.
+
+    Actualiza:
+      - cases.assigned_user_id
+      - cases.status_id = ASIGNADO
+      - cases.assigned_at
+      - cases.last_activity_at
+
+    También:
+      - users.last_assigned_at
+      - case_events: ASSIGNED mode=auto (source WORKER)
+    """
+    # Si ya estaba asignado, no lo reasignamos aquí
+    row = db.execute(
+        text("SELECT assigned_user_id, status_id FROM cases WHERE id = :cid LIMIT 1"),
+        {"cid": case_id},
+    ).fetchone()
+    if not row:
+        return None
+
+    if row[0] is not None:
+        return int(row[0])
+
+    agent_id = pick_least_loaded_agent(db)
+    if agent_id is None:
+        return None
+
+    status_asignado_id = get_status_id_by_code(db, "ASIGNADO")
+
+    # Update del caso
+    db.execute(
+        text("""
+            UPDATE cases
+            SET assigned_user_id = :uid,
+                status_id = :sid,
+                assigned_at = NOW(6),
+                last_activity_at = NOW(6),
+                updated_at = NOW(6)
+            WHERE id = :cid
+            LIMIT 1
+        """),
+        {"uid": agent_id, "sid": status_asignado_id, "cid": case_id},
+    )
+
+    # Marcar último asignado (para desempate)
+    db.execute(
+        text("""
+            UPDATE users
+            SET last_assigned_at = NOW(6),
+                updated_at = NOW(6)
+            WHERE id = :uid
+            LIMIT 1
+        """),
+        {"uid": agent_id},
+    )
+
+    # Evento de trazabilidad (auto)
+    insert_case_event(
+        db,
+        case_id=case_id,
+        actor_user_id=None,
+        source="WORKER",
+        event_type="ASSIGNED",
+        from_status_id=None,
+        to_status_id=status_asignado_id,
+        details={"mode": "auto", "assigned_user_id": agent_id},
+    )
+
+    return agent_id
+
+
 def next_case_number(db: Session) -> str:
     year = datetime.utcnow().year
     db.execute(text("INSERT IGNORE INTO case_sequences (year, last_value, updated_at) VALUES (:y, 0, NOW(6))"), {"y": year})

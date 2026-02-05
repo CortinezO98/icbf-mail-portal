@@ -192,8 +192,6 @@ async def process_notifications_async(payload_or_list: dict[str, Any] | list[dic
 
 async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
     mb = settings.MAILBOX_EMAIL
-
-    # 1) Pull full message from Graph
     msg = await graph_client.get_message(mb, message_id)
 
     provider_message_id = str(msg.get("id") or message_id)
@@ -213,7 +211,6 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
     internet_message_id = msg.get("internetMessageId")
     conversation_id = msg.get("conversationId")
 
-    # ✅ Cambio PROD: In-Reply-To sale de headers (internetMessageHeaders)
     internet_headers = msg.get("internetMessageHeaders") or []
     in_reply_to = _header_value(internet_headers, "In-Reply-To")
 
@@ -226,29 +223,27 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
 
     has_attachments = 1 if msg.get("hasAttachments") else 0
 
-    # 2) Persistencia (transacción corta y SIN awaits)
     case_id: int | None = None
     message_pk_existing: int | None = None
     should_process_attachments_even_if_dedupe = False
     event_type: str = "CASE_CREATED"
 
+    assigned_agent_id: int | None = None
+
     with get_db_session() as db:
-        # ✅ Dedupe duro por provider_message_id
         existing = _get_existing_message_row(db, mailbox_id=mailbox_id, provider_message_id=provider_message_id)
         if existing:
             message_pk_existing, case_id_existing, has_att_db = existing
             logger.info("Dedupe hit message_id=%s case_id=%s", provider_message_id, case_id_existing)
 
-            # Si el mensaje indica adjuntos y no hay adjuntos guardados, intentamos recuperarlos
             if has_att_db or has_attachments:
                 if _attachments_count(db, message_pk=message_pk_existing) == 0:
                     should_process_attachments_even_if_dedupe = True
                     logger.warning("Attachments missing in DB for message_id=%s -> will fetch now", provider_message_id)
 
-            # Si fue dedupe, no creamos nada nuevo
             case_id = case_id_existing
+
         else:
-            # Reusar caso por conversationId (hilo)
             if conversation_id:
                 case_id = _find_case_by_conversation(db, mailbox_id=mailbox_id, conversation_id=str(conversation_id))
 
@@ -305,7 +300,24 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
                 },
             )
 
-    # 3) Attachments fuera de la transacción
+            if event_type == "CASE_CREATED":
+                assigned_agent_id = repos.auto_assign_case(db, case_id=case_id)
+                if assigned_agent_id:
+                    logger.info("Auto-assigned case_id=%s to agent_id=%s", case_id, assigned_agent_id)
+                else:
+                    logger.warning("No eligible agents found for auto-assign case_id=%s", case_id)
+
+                    repos.insert_case_event(
+                        db,
+                        case_id=case_id,
+                        actor_user_id=None,
+                        source="WORKER",
+                        event_type="AUTO_ASSIGN_SKIPPED",
+                        from_status_id=None,
+                        to_status_id=None,
+                        details={"reason": "no_eligible_agents"},
+                    )
+
     if (has_attachments or should_process_attachments_even_if_dedupe) and mailbox_id is not None:
         await _process_attachments(
             mailbox_id=mailbox_id,
@@ -313,6 +325,8 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
             mailbox_email=mb,
             message_id=message_id,
         )
+
+
 
 
 async def _process_attachments(*, mailbox_id: int, provider_message_id: str, mailbox_email: str, message_id: str) -> None:
