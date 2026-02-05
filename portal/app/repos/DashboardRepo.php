@@ -95,7 +95,7 @@ final class DashboardRepo
                 COUNT(c.id) as total_cases,
                 SUM(CASE WHEN c.is_responded = 1 THEN 1 ELSE 0 END) as responded,
                 ROUND(SUM(CASE WHEN c.is_responded = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(c.id), 1) as response_rate,
-                AVG(TIMESTAMPDIFF(HOUR, c.created_at, COALESCE(c.responded_at, NOW()))) as avg_response_hours
+                AVG(TIMESTAMPDIFF(HOUR, c.created_at, COALESCE(c.first_response_at, NOW()))) as avg_response_hours
             FROM cases c
             JOIN users u ON u.id = c.assigned_user_id
             WHERE u.is_active = 1
@@ -142,7 +142,7 @@ final class DashboardRepo
                 COUNT(*) as total,
                 SUM(CASE WHEN c.is_responded = 1 THEN 1 ELSE 0 END) as responded,
                 SUM(CASE WHEN c.is_responded = 0 AND c.due_at IS NOT NULL AND NOW() > c.due_at THEN 1 ELSE 0 END) as overdue,
-                ROUND(AVG(TIMESTAMPDIFF(HOUR, c.created_at, COALESCE(c.responded_at, NOW()))), 1) as avg_hours
+                ROUND(AVG(TIMESTAMPDIFF(HOUR, c.created_at, COALESCE(c.first_response_at, NOW()))), 1) as avg_hours
             FROM cases c
             LEFT JOIN categories cat ON cat.id = c.category_id
             WHERE 1=1 {$where}

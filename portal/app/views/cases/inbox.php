@@ -51,6 +51,9 @@ $autoAssignUrl = url('/cases/auto-assign');
       <a class="btn btn-brand btn-sm" href="<?= esc(url('/dashboard')) ?>">
         <i class="bi bi-speedometer2 me-1"></i>Tablero
       </a>
+      <a class="nav-link" href="<?= htmlspecialchars(url('/reports')) ?>">
+          <i class="bi bi-file-earmark-bar-graph me-1"></i>Reportes
+      </a>      
       <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases?status=NUEVO')) ?>">Nuevos</a>
       <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases?status=ASIGNADO')) ?>">Asignados</a>
       <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases?status=EN_PROCESO')) ?>">En proceso</a>

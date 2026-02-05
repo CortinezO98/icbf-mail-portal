@@ -101,6 +101,39 @@ try {
         exit;
     }
 
+
+
+
+
+
+    // Reports routes (Supervisor/Admin only)
+    if ($path === '/reports' && $method === 'GET') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
+        (new \App\Controllers\ReportsController($pdo, $config))->index();
+        exit;
+    }
+    if ($path === '/reports/generate' && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
+        (new \App\Controllers\ReportsController($pdo, $config))->generate();
+        exit;
+    }
+    if (preg_match('#^/reports/download/(\d+)$#', $path, $m) && $method === 'GET') {
+        \App\Middleware\require_login();
+        $reportId = (int)$m[1];
+        (new \App\Controllers\ReportsController($pdo, $config))->download($reportId);
+        exit;
+    }
+
+
+
+
+
+
+
+
+
     // Attachments download
     if (preg_match('#^/attachments/(\d+)/download$#', $path, $m) && $method === 'GET') {
         \App\Middleware\require_login();

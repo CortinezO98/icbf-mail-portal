@@ -95,5 +95,5 @@ final class DashboardController
         include dirname(__DIR__) . '/views/layout.php';
     }
 
-    // Resto del código se mantiene igual...
+
 }
