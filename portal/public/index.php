@@ -17,10 +17,10 @@ require_once __DIR__ . '/../app/controllers/AuthController.php';
 require_once __DIR__ . '/../app/controllers/CasesController.php';
 require_once __DIR__ . '/../app/controllers/AssignmentsController.php';
 require_once __DIR__ . '/../app/controllers/AttachmentsController.php';
+require_once __DIR__ . '/../app/controllers/AutoAssignController.php';
 
 require_once __DIR__ . '/../app/middleware/require_login.php';
 require_once __DIR__ . '/../app/middleware/require_role.php';
-
 
 $config = \App\Config\load_config();
 \App\Auth\Auth::initSession($config);
@@ -29,7 +29,6 @@ $pdo = \App\Config\pdo();
 
 $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
-
 
 $basePath = rtrim($config['base_path'], '/');
 if ($basePath !== '' && str_starts_with($path, $basePath)) {
@@ -82,6 +81,13 @@ try {
         \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
         $caseId = (int)$m[1];
         (new \App\Controllers\AssignmentsController($pdo, $config))->assign($caseId);
+        exit;
+    }
+    // Auto-assign cases (Supervisor/Admin)
+    if ($path === '/cases/auto-assign' && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
+        (new \App\Controllers\AutoAssignController($pdo, $config))->run();
         exit;
     }
 
@@ -147,6 +153,7 @@ try {
     </html>
     HTML;
     exit;
+
 } catch (\Throwable $e) {
     if (!empty($config['debug'])) {
         http_response_code(500);

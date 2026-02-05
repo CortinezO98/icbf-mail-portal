@@ -31,8 +31,9 @@ final class CasesController
     public function inbox(): void
     {
         $status = isset($_GET['status']) ? strtoupper(trim((string)$_GET['status'])) : null;
+        if ($status === '') $status = null;
 
-        // AGENTE: por defecto ve solo lo asignado a él
+        // AGENTE: por defecto ve solo lo asignado a él (si NO es supervisor/admin)
         $assignedUserId = null;
         if (Auth::hasRole('AGENTE') && !Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
             $assignedUserId = Auth::id();
@@ -45,9 +46,17 @@ final class CasesController
 
         $cases = $this->casesRepo->listInbox($status, $assignedUserId);
 
+        // Contador "Sin asignar" (solo supervisor/admin)
+        $unassignedCount = 0;
+        if (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN')) {
+            $statusNuevoId = $this->casesRepo->getStatusIdByCode('NUEVO');
+            $unassignedCount = $statusNuevoId ? $this->casesRepo->countUnassignedByStatus($statusNuevoId) : 0;
+        }
+
         $this->render('cases/inbox.php', [
             'cases' => $cases,
             'status' => $status,
+            'unassignedCount' => $unassignedCount,
         ]);
     }
 
@@ -60,7 +69,7 @@ final class CasesController
             exit;
         }
 
-        // Permisos: AGENTE solo puede ver si está asignado
+        // Permisos: AGENTE solo puede ver si está asignado a él (si NO es supervisor/admin)
         if (Auth::hasRole('AGENTE') && !Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
             if ((int)($case['assigned_user_id'] ?? 0) !== (int)Auth::id()) {
                 http_response_code(403);

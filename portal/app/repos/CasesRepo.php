@@ -81,4 +81,49 @@ final class CasesRepo
         $st = $this->pdo->prepare($sql);
         $st->execute([':aid' => $agentId, ':sid' => $statusId, ':cid' => $caseId]);
     }
+
+    public function listPendingUnassignedIds(int $statusNuevoId, int $limit = 200): array
+    {
+        $limit = max(1, min(500, $limit));
+
+        $sql = "SELECT id
+                FROM cases
+                WHERE assigned_user_id IS NULL
+                AND status_id = :nuevo
+                ORDER BY received_at ASC
+                LIMIT {$limit}";
+        $st = $this->pdo->prepare($sql);
+        $st->execute([':nuevo' => $statusNuevoId]);
+        return array_map('intval', $st->fetchAll(PDO::FETCH_COLUMN));
+    }
+
+    public function assignToUserIfUnassigned(int $caseId, int $agentId, int $statusAsignadoId): bool
+    {
+        $sql = "UPDATE cases
+                SET assigned_user_id = :aid,
+                    status_id = :sid,
+                    assigned_at = NOW(6),
+                    last_activity_at = NOW(6),
+                    updated_at = NOW(6)
+                WHERE id = :cid
+                AND assigned_user_id IS NULL
+                LIMIT 1";
+        $st = $this->pdo->prepare($sql);
+        $st->execute([':aid' => $agentId, ':sid' => $statusAsignadoId, ':cid' => $caseId]);
+        return $st->rowCount() > 0;
+    }
+
+    public function countUnassignedByStatus(int $statusId): int
+    {
+        $st = $this->pdo->prepare("
+            SELECT COUNT(*)
+            FROM cases
+            WHERE assigned_user_id IS NULL
+            AND status_id = :sid
+        ");
+        $st->execute([':sid' => $statusId]);
+        return (int)$st->fetchColumn();
+    }
+
+
 }

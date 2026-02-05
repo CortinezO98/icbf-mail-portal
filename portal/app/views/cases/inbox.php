@@ -2,8 +2,8 @@
 declare(strict_types=1);
 
 use App\Auth\Auth;
+use App\Auth\Csrf;
 use function App\Config\url;
-
 
 $roleIsSupervisor = Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN');
 $status = $status ?? null;
@@ -32,6 +32,9 @@ function badge_sla(string $sla): array {
     default => ['text-bg-secondary', $sla !== '' ? $sla : '—'],
   };
 }
+
+$csrfToken = Csrf::token();
+$autoAssignUrl = url('/cases/auto-assign');
 ?>
 
 <div class="page-title">
@@ -45,28 +48,43 @@ function badge_sla(string $sla): array {
 
   <div class="d-flex flex-wrap gap-2">
     <?php if ($roleIsSupervisor): ?>
-      <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases?status=NUEVO')) ?>">
-        Nuevos
-      </a>
-      <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases?status=ASIGNADO')) ?>">
-        Asignados
-      </a>
-      <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases?status=EN_PROCESO')) ?>">
-        En proceso
-      </a>
-      <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases?status=RESPONDIDO')) ?>">
-        Respondidos
-      </a>
-      <a class="btn btn-outline-secondary btn-sm" href="<?= esc(url('/cases?status=CERRADO')) ?>">
-        Cerrados
-      </a>
+      <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases?status=NUEVO')) ?>">Nuevos</a>
+      <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases?status=ASIGNADO')) ?>">Asignados</a>
+      <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases?status=EN_PROCESO')) ?>">En proceso</a>
+      <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases?status=RESPONDIDO')) ?>">Respondidos</a>
+      <a class="btn btn-outline-secondary btn-sm" href="<?= esc(url('/cases?status=CERRADO')) ?>">Cerrados</a>
     <?php else: ?>
-      <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases')) ?>">
-        Mis casos
-      </a>
+      <a class="btn btn-outline-brand btn-sm" href="<?= esc(url('/cases')) ?>">Mis casos</a>
     <?php endif; ?>
   </div>
 </div>
+
+<?php if ($roleIsSupervisor): ?>
+  <div class="card mb-3">
+    <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <div>
+        <div class="fw-bold">Sin asignar</div>
+        <div class="text-muted small">
+          Casos <strong>NUEVO</strong> sin agente asignado
+        </div>
+      </div>
+
+      <div class="d-flex align-items-center gap-2">
+        <span class="badge text-bg-secondary" id="unassignedCount">
+          <?= (int)($unassignedCount ?? 0) ?>
+        </span>
+
+        <button type="button"
+                class="btn btn-brand btn-sm"
+                id="btnAutoAssign"
+                data-url="<?= esc($autoAssignUrl) ?>"
+                data-csrf="<?= esc($csrfToken) ?>">
+          <i class="bi bi-lightning-charge me-1"></i>Auto-asignar
+        </button>
+      </div>
+    </div>
+  </div>
+<?php endif; ?>
 
 <div class="card">
   <div class="table-responsive">
@@ -107,11 +125,14 @@ function badge_sla(string $sla): array {
               $statusName = (string)($c['status_name'] ?? $statusCode);
 
               $statusClass = badge_status_class($statusCode);
-
               [$slaBadge, $slaLabel] = badge_sla((string)($c['sla_state'] ?? ''));
 
               $receivedAt = (string)($c['received_at'] ?? '');
               $lastActivity = (string)($c['last_activity_at'] ?? '');
+
+              // ✅ Para que esto funcione, tu SELECT en CasesRepo::listInbox()
+              // debe incluir: c.assigned_user_id
+              $assignedUserId = $c['assigned_user_id'] ?? null;
             ?>
             <tr>
               <td>
@@ -122,7 +143,7 @@ function badge_sla(string $sla): array {
 
               <td>
                 <div class="fw-semibold"><?= esc($subject) ?></div>
-                <?php if (!empty($c['assigned_user_id']) && $roleIsSupervisor): ?>
+                <?php if (!empty($assignedUserId) && $roleIsSupervisor): ?>
                   <div class="text-muted small">
                     <i class="bi bi-person-check me-1"></i>
                     Asignado
@@ -147,13 +168,8 @@ function badge_sla(string $sla): array {
                 </span>
               </td>
 
-              <td class="text-nowrap">
-                <?= esc($receivedAt) ?>
-              </td>
-
-              <td class="text-nowrap">
-                <?= esc($lastActivity) ?>
-              </td>
+              <td class="text-nowrap"><?= esc($receivedAt) ?></td>
+              <td class="text-nowrap"><?= esc($lastActivity) ?></td>
             </tr>
           <?php endforeach; ?>
         <?php endif; ?>
@@ -161,3 +177,117 @@ function badge_sla(string $sla): array {
     </table>
   </div>
 </div>
+
+<!-- SweetAlert2 (CDN)
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script> -->
+
+<script>
+(function () {
+  const btn = document.getElementById('btnAutoAssign');
+  if (!btn) return;
+
+  btn.addEventListener('click', async function () {
+    const url = btn.dataset.url;
+    const csrf = btn.dataset.csrf;
+
+    const confirmResult = await Swal.fire({
+      title: '¿Auto-asignar casos pendientes?',
+      text: 'Se repartirán los casos NUEVOS a los agentes según menor carga.',
+      icon: 'question',
+      showCancelButton: true,
+      confirmButtonText: 'Sí, auto-asignar',
+      cancelButtonText: 'Cancelar'
+    });
+
+    if (!confirmResult.isConfirmed) return;
+
+    btn.disabled = true;
+
+    try {
+      const form = new FormData();
+      form.append('_csrf', csrf);
+
+      const resp = await fetch(url, {
+        method: 'POST',
+        body: form,
+        headers: { 'X-Requested-With': 'fetch' }
+      });
+
+      const data = await resp.json().catch(() => ({}));
+
+      // Manejo por HTTP status / ok
+      if (!resp.ok || !data.ok) {
+        // Caso CSRF típico (419)
+        if (resp.status === 419 || data.code === 'CSRF') {
+          await Swal.fire({
+            title: 'Sesión expirada',
+            text: 'Tu sesión o token CSRF expiró. Recarga la página e inténtalo de nuevo.',
+            icon: 'warning'
+          });
+          return;
+        }
+
+        await Swal.fire({
+          title: 'Error',
+          text: (data && (data.message || data.error)) ? (data.message || data.error) : 'No se pudo completar la operación.',
+          icon: 'error'
+        });
+        return;
+      }
+
+      const assigned = Number(data.assigned || 0);
+      const skipped  = Number(data.skipped || 0);
+
+      // ✅ casos solicitados:
+      if (data.code === 'ASSIGNED') {
+        await Swal.fire({
+          title: 'Auto-asignación completada',
+          html: `
+            <div class="text-start">
+              <div><b>Asignados:</b> ${assigned}</div>
+              <div><b>Omitidos:</b> ${skipped}</div>
+            </div>
+          `,
+          icon: 'success'
+        });
+        window.location.reload();
+        return;
+      }
+
+      if (data.code === 'NO_PENDING') {
+        await Swal.fire({
+          title: 'Sin pendientes',
+          text: 'No hay casos NUEVOS para asignar en este momento.',
+          icon: 'info'
+        });
+        return;
+      }
+
+      if (data.code === 'NO_AGENTS') {
+        await Swal.fire({
+          title: 'Sin agentes registrados/habilitados',
+          text: 'No hay agentes elegibles para asignación. Verifica que existan usuarios con rol AGENTE y estén habilitados.',
+          icon: 'warning'
+        });
+        return;
+      }
+
+      // fallback
+      await Swal.fire({
+        title: 'Proceso finalizado',
+        text: data.message || 'Operación terminada.',
+        icon: 'info'
+      });
+
+    } catch (e) {
+      await Swal.fire({
+        title: 'Error',
+        text: 'Fallo inesperado (red o servidor).',
+        icon: 'error'
+      });
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
+</script>
