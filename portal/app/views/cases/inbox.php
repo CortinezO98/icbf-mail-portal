@@ -16,24 +16,6 @@ $pagination = $pagination ?? [
     'has_next' => false
 ];
 
-function esc($v): string {
-    return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
-}
-
-function formatDate($date): string {
-    if (empty($date)) return '—';
-    $timestamp = strtotime($date);
-    $today = strtotime('today');
-    $yesterday = strtotime('yesterday');
-    
-    if ($timestamp >= $today) {
-        return 'Hoy, ' . date('H:i', $timestamp);
-    } elseif ($timestamp >= $yesterday) {
-        return 'Ayer, ' . date('H:i', $timestamp);
-    } else {
-        return date('d/m/Y', $timestamp);
-    }
-}
 
 function badge_status_class(string $code): string {
     return match (strtoupper($code)) {

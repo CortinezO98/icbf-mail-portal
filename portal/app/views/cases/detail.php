@@ -7,9 +7,7 @@ use function App\Config\url;
 
 $isSupervisor = Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN');
 
-function esc($v): string {
-  return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
-}
+
 
 function safe_message_body(array $m): string {
   $txt = (string)($m['body_text'] ?? '');

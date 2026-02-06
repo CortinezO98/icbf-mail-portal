@@ -14,6 +14,7 @@ require_once __DIR__ . '/../app/repos/AttachmentsRepo.php';
 require_once __DIR__ . '/../app/repos/EventsRepo.php';
 require_once __DIR__ . '/../app/repos/MetricsRepo.php';
 require_once __DIR__ . '/../app/repos/ReportsRepo.php';
+require_once __DIR__ . '/../app/repos/UsersAdminRepo.php';
 
 require_once __DIR__ . '/../app/controllers/AuthController.php';
 require_once __DIR__ . '/../app/controllers/CasesController.php';
@@ -23,6 +24,7 @@ require_once __DIR__ . '/../app/controllers/AutoAssignController.php';
 require_once __DIR__ . '/../app/controllers/DashboardController.php';
 require_once __DIR__ . '/../app/services/ReportExportService.php';
 require_once __DIR__ . '/../app/controllers/ReportsController.php';
+require_once __DIR__ . '/../app/controllers/UsersAdminController.php';
 
 
 require_once __DIR__ . '/../app/middleware/require_login.php';
@@ -36,7 +38,7 @@ $pdo = \App\Config\pdo();
 $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 
-$basePath = rtrim($config['base_path'], '/');
+$basePath = rtrim((string)($config['base_path'] ?? ''), '/');
 if ($basePath !== '' && str_starts_with($path, $basePath)) {
     $path = substr($path, strlen($basePath));
     if ($path === '') $path = '/';
@@ -45,7 +47,6 @@ if ($basePath !== '' && str_starts_with($path, $basePath)) {
 // Simple router
 try {
     if ($path === '/' && $method === 'GET') {
-
         if (\App\Auth\Auth::check()) {
             header('Location: ' . \App\Config\url('/cases'));
         } else {
@@ -89,6 +90,7 @@ try {
         (new \App\Controllers\AssignmentsController($pdo, $config))->assign($caseId);
         exit;
     }
+
     // Auto-assign cases (Supervisor/Admin)
     if ($path === '/cases/auto-assign' && $method === 'POST') {
         \App\Middleware\require_login();
@@ -96,18 +98,26 @@ try {
         (new \App\Controllers\AutoAssignController($pdo, $config))->run();
         exit;
     }
+
     // Dashboard (Supervisor/Admin)
     if ($path === '/dashboard' && $method === 'GET') {
         \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR', 'AGENT']);
         (new \App\Controllers\DashboardController($pdo, $config))->index();
         exit;
     }
 
+    // Dashboard Semáforo (Supervisor/Admin)
+    // /dashboard/semaforo/verde | /dashboard/semaforo/amarillo | /dashboard/semaforo/rojo
+    if (preg_match('#^/dashboard/semaforo/(verde|amarillo|rojo)$#i', $path, $m) && $method === 'GET') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
+        $estado = strtolower($m[1]);
+        (new \App\Controllers\DashboardController($pdo, $config))->semaforo($estado);
+        exit;
+    }
 
-
-
-
+    // Reports (Supervisor/Admin)
     if ($path === '/reports' && $method === 'GET') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
@@ -122,36 +132,13 @@ try {
         exit;
     }
 
-
-
-
-    // Reports routes (Supervisor/Admin only)
-    if ($path === '/reports' && $method === 'GET') {
+    // Descarga por querystring: /reports/download?id=123
+    if ($path === '/reports/download' && $method === 'GET') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
-        (new \App\Controllers\ReportsController($pdo, $config))->index();
+        (new \App\Controllers\ReportsController($pdo, $config))->download();
         exit;
     }
-    if ($path === '/reports/generate' && $method === 'POST') {
-        \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
-        (new \App\Controllers\ReportsController($pdo, $config))->generate();
-        exit;
-    }
-    if (preg_match('#^/reports/download/(\d+)$#', $path, $m) && $method === 'GET') {
-        \App\Middleware\require_login();
-        $reportId = (int)$m[1];
-        (new \App\Controllers\ReportsController($pdo, $config))->download($reportId);
-        exit;
-    }
-
-
-
-
-
-
-
-
 
     // Attachments download
     if (preg_match('#^/attachments/(\d+)/download$#', $path, $m) && $method === 'GET') {
@@ -161,6 +148,84 @@ try {
         exit;
     }
 
+
+    // Users admin (ADMIN only)
+    if ($path === '/admin/users' && $method === 'GET') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN']);
+        (new \App\Controllers\UsersAdminController($pdo, $config))->index();
+        exit;
+    }
+
+    if ($path === '/admin/users/create' && $method === 'GET') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN']);
+        (new \App\Controllers\UsersAdminController($pdo, $config))->showCreate();
+        exit;
+    }
+
+    if ($path === '/admin/users/create' && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN']);
+        (new \App\Controllers\UsersAdminController($pdo, $config))->create();
+        exit;
+    }
+
+    if (preg_match('#^/admin/users/edit/(\d+)$#', $path, $m) && $method === 'GET') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN']);
+        $userId = (int)$m[1];
+        (new \App\Controllers\UsersAdminController($pdo, $config))->showEdit($userId);
+        exit;
+    }
+
+    if (preg_match('#^/admin/users/edit/(\d+)$#', $path, $m) && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN']);
+        $userId = (int)$m[1];
+        (new \App\Controllers\UsersAdminController($pdo, $config))->update($userId);
+        exit;
+    }
+
+    if (preg_match('#^/admin/users/toggle-active/(\d+)$#', $path, $m) && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN']);
+        $userId = (int)$m[1];
+        (new \App\Controllers\UsersAdminController($pdo, $config))->toggleActive($userId);
+        exit;
+    }
+
+    if (preg_match('#^/admin/users/delete/(\d+)$#', $path, $m) && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN']);
+        $userId = (int)$m[1];
+        (new \App\Controllers\UsersAdminController($pdo, $config))->delete($userId);
+        exit;
+    }
+
+    if ($path === '/admin/users/import' && $method === 'GET') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN']);
+        (new \App\Controllers\UsersAdminController($pdo, $config))->showImport();
+        exit;
+    }
+
+    if ($path === '/admin/users/import' && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN']);
+        (new \App\Controllers\UsersAdminController($pdo, $config))->importExcel();
+        exit;
+    }
+
+    if ($path === '/admin/users/export-template' && $method === 'GET') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN']);
+        (new \App\Controllers\UsersAdminController($pdo, $config))->exportTemplate();
+        exit;
+    }
+
+
+    // 404
     http_response_code(404);
     $title = "404 | Recurso no encontrado";
     $requested = htmlspecialchars($path, ENT_QUOTES, 'UTF-8');

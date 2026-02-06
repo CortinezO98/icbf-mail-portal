@@ -16,32 +16,85 @@ final class DashboardController
     {
         $this->metrics = new MetricsRepo($pdo);
 
-        // Inicializar tracking SLA si es necesario
+        // Inicializar tracking SLA si es necesario (lock global, no por sesión)
         $this->initializeSlaSystem();
     }
 
     private function initializeSlaSystem(): void
     {
-        // Solo ejecutar una vez al día por sesión (sin romper)
-        $lastInit = $_SESSION['_sla_last_init'] ?? 0;
-
-        if (!is_int($lastInit)) {
-            $lastInit = 0;
+        // ✅ Lock global por archivo (evita depender de sesión)
+        // Ruta: portal/storage/locks/sla_init.lock
+        $locksDir = dirname(__DIR__, 2) . '/storage/locks';
+        if (!is_dir($locksDir)) {
+            @mkdir($locksDir, 0777, true);
         }
 
-        if (time() - $lastInit > 86400) { // 24 horas
+        $lockFile = $locksDir . '/sla_init.lock';
+
+        $lastInit = 0;
+        if (is_file($lockFile)) {
+            $raw = @file_get_contents($lockFile);
+            if ($raw !== false) {
+                $lastInit = (int)trim($raw);
+            }
+        }
+
+        // Solo ejecutar una vez cada 24h
+        if (time() - $lastInit <= 86400) {
+            return;
+        }
+
+        // Intento de lock con fopen+flock (best effort)
+        $fp = @fopen($lockFile, 'c+');
+        if (!$fp) {
+            // fallback: no bloqueamos el portal, solo salimos
+            return;
+        }
+
+        try {
+            // lock exclusivo no bloqueante
+            if (!@flock($fp, LOCK_EX | LOCK_NB)) {
+                fclose($fp);
+                return;
+            }
+
+            // Releer estando bloqueado
+            @rewind($fp);
+            $raw2 = @stream_get_contents($fp);
+            $lastInit2 = (int)trim((string)$raw2);
+
+            if (time() - $lastInit2 <= 86400) {
+                @flock($fp, LOCK_UN);
+                fclose($fp);
+                return;
+            }
+
             try {
                 $initialized = $this->metrics->initializeSlaTracking();
-                $updated = $this->metrics->updateSlaTracking();
+                $updated     = $this->metrics->updateSlaTracking();
 
-                $_SESSION['_sla_last_init'] = time();
+                // Persistir timestamp
+                @ftruncate($fp, 0);
+                @rewind($fp);
+                @fwrite($fp, (string)time());
 
                 if (($initialized ?? 0) > 0 || ($updated ?? 0) > 0) {
                     error_log("SLA System: Initialized {$initialized}, Updated {$updated} cases");
                 }
             } catch (\Throwable $e) {
                 error_log("SLA System Error: " . $e->getMessage());
+                // igual actualizamos lock para no spamear cada request si hay un error permanente
+                @ftruncate($fp, 0);
+                @rewind($fp);
+                @fwrite($fp, (string)time());
             }
+
+            @flock($fp, LOCK_UN);
+            fclose($fp);
+        } catch (\Throwable $e) {
+            // No romper portal
+            try { @flock($fp, LOCK_UN); } catch (\Throwable) {}
+            try { fclose($fp); } catch (\Throwable) {}
         }
     }
 
@@ -55,11 +108,9 @@ final class DashboardController
 
         // Métricas principales
         $summary = $this->metrics->realtimeSummary($uid);
-        if (!is_array($summary)) {
-            $summary = [];
-        }
+        if (!is_array($summary)) $summary = [];
 
-        // (Opcional) Ajuste UX: texto del semáforo (para views pro)
+        // UX: textos del semáforo (para tu view)
         $summary['semaforo_hint'] = $summary['semaforo_hint']
             ?? 'El semáforo se calcula automáticamente según la política de ANS (SLA) configurada.';
 
@@ -70,42 +121,24 @@ final class DashboardController
                 'ROJO' => 'Prioridad alta / riesgo de incumplimiento',
             ];
 
-        // Distribución del semáforo (si la usas en el view o futuro)
         $semaforoDistribution = $this->metrics->getSemaforoDistribution($uid);
-        if (!is_array($semaforoDistribution)) {
-            $semaforoDistribution = [];
-        }
+        if (!is_array($semaforoDistribution)) $semaforoDistribution = [];
 
-        // Casos críticos / por vencer
         $criticalCases = $this->metrics->getCasesBySemaforo('ROJO', $uid, 15);
-        if (!is_array($criticalCases)) {
-            $criticalCases = [];
-        }
+        if (!is_array($criticalCases)) $criticalCases = [];
 
         $warningCases = $this->metrics->getCasesBySemaforo('AMARILLO', $uid, 10);
-        if (!is_array($warningCases)) {
-            $warningCases = [];
-        }
+        if (!is_array($warningCases)) $warningCases = [];
 
-        // Tendencias semanales
         $weeklyTrends = $this->metrics->getWeeklyTrends($uid);
-        if (!is_array($weeklyTrends)) {
-            $weeklyTrends = [];
-        }
+        if (!is_array($weeklyTrends)) $weeklyTrends = [];
 
-        // Productividad por agente (solo supervisor/admin)
         $byAgent = $isSupervisor ? $this->metrics->realtimeByAgent() : [];
-        if (!is_array($byAgent)) {
-            $byAgent = [];
-        }
+        if (!is_array($byAgent)) $byAgent = [];
 
-        // Reporte ejecutivo (solo Admin)
         $executiveReport = $isAdmin ? $this->metrics->getExecutiveReport() : [];
-        if (!is_array($executiveReport)) {
-            $executiveReport = [];
-        }
+        if (!is_array($executiveReport)) $executiveReport = [];
 
-        // Render
         $this->render('dashboard/index.php', [
             'summary' => $summary,
             'semaforoDistribution' => $semaforoDistribution,
@@ -124,7 +157,6 @@ final class DashboardController
 
         $estado = strtolower(trim($estado));
         $valid = ['verde', 'amarillo', 'rojo'];
-
         if (!in_array($estado, $valid, true)) {
             http_response_code(404);
             echo "Estado no válido";
@@ -133,9 +165,7 @@ final class DashboardController
 
         $estadoUpper = strtoupper($estado);
         $cases = $this->metrics->getCasesBySemaforo($estadoUpper, $uid, 50);
-        if (!is_array($cases)) {
-            $cases = [];
-        }
+        if (!is_array($cases)) $cases = [];
 
         $this->render('dashboard/semaforo.php', [
             'estado' => $estadoUpper,

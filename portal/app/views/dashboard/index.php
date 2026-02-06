@@ -4,9 +4,9 @@ declare(strict_types=1);
 use App\Auth\Auth;
 use function App\Config\url;
 
+
 function n($v): int { return (int)($v ?? 0); }
 function f($v): float { return (float)($v ?? 0); }
-function esc($v): string { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 function dt($v): string {
     if (!$v) return '—';
     $ts = strtotime((string)$v);
