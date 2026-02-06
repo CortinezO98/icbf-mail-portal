@@ -360,6 +360,219 @@ final class UsersAdminController
         }
     }
 
+    public function import(): void
+    {
+        Csrf::validate($_POST['_csrf'] ?? null);
+        
+        if (!isset($_FILES['excel_file']) || $_FILES['excel_file']['error'] !== UPLOAD_ERR_OK) {
+            $this->flash('error', 'Por favor selecciona un archivo válido.');
+            $this->redirect('/admin/users/import');
+        }
+        
+        $file = $_FILES['excel_file']['tmp_name'];
+        $originalName = $_FILES['excel_file']['name'];
+        $extension = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+        
+        // Validar extensión
+        if (!in_array($extension, ['xlsx', 'xls', 'csv'])) {
+            $this->flash('error', 'Formato de archivo no soportado. Use .xlsx, .xls o .csv');
+            $this->redirect('/admin/users/import');
+        }
+        
+        try {
+            // Cargar archivo según extensión
+            if ($extension === 'csv') {
+                $reader = new \PhpOffice\PhpSpreadsheet\Reader\Csv();
+            } else {
+                $reader = \PhpOffice\PhpSpreadsheet\IOFactory::createReaderForFile($file);
+            }
+            
+            $spreadsheet = $reader->load($file);
+            $worksheet = $spreadsheet->getActiveSheet();
+            $rows = $worksheet->toArray();
+            
+            if (count($rows) <= 1) {
+                $this->flash('error', 'El archivo debe contener al menos una fila de datos (excluyendo encabezados)');
+                $this->redirect('/admin/users/import');
+            }
+            
+            // Procesar filas
+            $usersToImport = [];
+            $headers = array_map('trim', $rows[0]);
+            
+            // Mapear nombres de columnas esperados
+            $columnMapping = [
+                'documento' => 'document',
+                'document' => 'document',
+                'usuario' => 'username',
+                'username' => 'username',
+                'email' => 'email',
+                'correo' => 'email',
+                'nombre' => 'full_name',
+                'nombre completo' => 'full_name',
+                'full_name' => 'full_name',
+                'roles' => 'roles',
+                'rol' => 'roles',
+                'activo' => 'is_active',
+                'is_active' => 'is_active',
+                'asignable' => 'assign_enabled',
+                'assign_enabled' => 'assign_enabled'
+            ];
+            
+            // Normalizar headers
+            $normalizedHeaders = [];
+            foreach ($headers as $header) {
+                $lower = strtolower($header);
+                $normalizedHeaders[$header] = $columnMapping[$lower] ?? $lower;
+            }
+            
+            // Procesar cada fila
+            $successCount = 0;
+            $errorCount = 0;
+            $errors = [];
+            
+            for ($i = 1; $i < count($rows); $i++) {
+                $rowData = [];
+                $row = $rows[$i];
+                
+                // Construir array asociativo con los nombres normalizados
+                foreach ($normalizedHeaders as $index => $field) {
+                    if (isset($row[$index])) {
+                        $rowData[$field] = trim((string)$row[$index]);
+                    }
+                }
+                
+                // Validar datos mínimos
+                if (empty($rowData['username']) || empty($rowData['email']) || empty($rowData['full_name'])) {
+                    $errors[] = "Fila {$i}: Faltan campos obligatorios (username, email, full_name)";
+                    $errorCount++;
+                    continue;
+                }
+                
+                // Validar email
+                if (!filter_var($rowData['email'], FILTER_VALIDATE_EMAIL)) {
+                    $errors[] = "Fila {$i}: Email inválido: {$rowData['email']}";
+                    $errorCount++;
+                    continue;
+                }
+                
+                // Procesar roles
+                if (!empty($rowData['roles'])) {
+                    $roleCodes = array_map('trim', explode(',', $rowData['roles']));
+                    $roleIds = $this->mapRoleCodesToIds($roleCodes);
+                    $rowData['role_ids'] = $roleIds;
+                } else {
+                    $rowData['role_ids'] = []; // Default rol AGENTE si no se especifica
+                }
+                
+                // Valores por defecto
+                $rowData['is_active'] = isset($rowData['is_active']) 
+                    ? (strtolower($rowData['is_active']) === 'si' || $rowData['is_active'] === '1' || $rowData['is_active'] === 'true' ? 1 : 0)
+                    : 1;
+                
+                $rowData['assign_enabled'] = isset($rowData['assign_enabled'])
+                    ? (strtolower($rowData['assign_enabled']) === 'si' || $rowData['assign_enabled'] === '1' || $rowData['assign_enabled'] === 'true' ? 1 : 0)
+                    : 1;
+                
+                // Verificar duplicados (opcional, según checkbox)
+                $skipDuplicates = isset($_POST['skip_duplicates']) && $_POST['skip_duplicates'] === 'on';
+                
+                if ($skipDuplicates) {
+                    $existing = $this->repo->findByUsername($rowData['username']) 
+                             ?? $this->repo->findByEmail($rowData['email']);
+                    
+                    if ($existing) {
+                        $errors[] = "Fila {$i}: Usuario duplicado (omitiendo): {$rowData['username']}";
+                        continue;
+                    }
+                }
+                
+                // Generar password temporal si no se proporciona
+                if (empty($rowData['password'])) {
+                    $rowData['password'] = $this->generateTemporaryPassword();
+                }
+                
+                // Crear usuario
+                try {
+                    $hash = password_hash($rowData['password'], PASSWORD_DEFAULT);
+                    
+                    $userId = $this->repo->createUser(
+                        $rowData['document'] ?? '',
+                        $rowData['username'],
+                        $rowData['email'],
+                        $rowData['full_name'],
+                        $hash,
+                        (int)$rowData['is_active'],
+                        (int)$rowData['assign_enabled']
+                    );
+                    
+                    // Asignar roles
+                    if (!empty($rowData['role_ids'])) {
+                        $this->repo->setUserRoles($userId, $rowData['role_ids']);
+                    }
+                    
+                    $successCount++;
+                    
+                    // Enviar email de bienvenida (opcional)
+                    if (isset($_POST['send_welcome_email']) && $_POST['send_welcome_email'] === 'on') {
+                        $this->sendWelcomeEmail($rowData['email'], $rowData['username'], $rowData['password']);
+                    }
+                    
+                } catch (\Exception $e) {
+                    $errors[] = "Fila {$i}: " . $e->getMessage();
+                    $errorCount++;
+                }
+            }
+            
+            // Preparar mensaje de resultado
+            $message = "Importación completada: <strong>{$successCount}</strong> usuarios creados exitosamente.";
+            
+            if ($errorCount > 0) {
+                $message .= " <strong>{$errorCount}</strong> errores encontrados.";
+            }
+            
+            if (!empty($errors)) {
+                $_SESSION['_import_errors'] = array_slice($errors, 0, 10); // Guardar primeros 10 errores
+                $message .= ' <a href="#" data-bs-toggle="modal" data-bs-target="#importErrorsModal">Ver errores</a>';
+            }
+            
+            $this->flash('success', $message);
+            $this->redirect('/admin/users');
+            
+        } catch (\Exception $e) {
+            $this->flash('error', 'Error en importación: ' . $e->getMessage());
+            $this->redirect('/admin/users/import');
+        }
+    }
+
+    private function sendWelcomeEmail(string $email, string $username, string $password): bool
+    {
+        // Configurar según tu sistema de correo
+        $subject = 'Bienvenido al Sistema ICBF Mail';
+        $message = "
+            <html>
+            <body>
+                <h2>Bienvenido al Sistema de Gestión de Correo ICBF</h2>
+                <p>Tu cuenta ha sido creada exitosamente.</p>
+                <div style='background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 15px 0;'>
+                    <strong>Usuario:</strong> {$username}<br>
+                    <strong>Contraseña temporal:</strong> {$password}<br>
+                    <strong>Acceso:</strong> " . \App\Config\url('/login') . "
+                </div>
+                <p><em>Por seguridad, cambia tu contraseña en tu primer acceso.</em></p>
+                <p>Saludos,<br>Equipo ICBF</p>
+            </body>
+            </html>
+        ";
+        
+        // Cabeceras para email HTML
+        $headers = "MIME-Version: 1.0\r\n";
+        $headers .= "Content-Type: text/html; charset=UTF-8\r\n";
+        $headers .= "From: ICBF Mail <noreply@icbf.gov.co>\r\n";
+        
+        return mail($email, $subject, $message, $headers);
+    }
+
     public function exportTemplate(): void
     {
         $spreadsheet = new Spreadsheet();
@@ -402,6 +615,110 @@ final class UsersAdminController
         $writer = new Xlsx($spreadsheet);
         $writer->save('php://output');
         exit;
+    }
+
+    public function exportExcel(): void
+    {
+        try {
+            // Verificar que la clase Spreadsheet exista
+            if (!class_exists(\PhpOffice\PhpSpreadsheet\Spreadsheet::class)) {
+                throw new \Exception('PhpSpreadsheet no está instalado');
+            }
+            
+            $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+            $sheet = $spreadsheet->getActiveSheet();
+            $sheet->setTitle('Usuarios');
+            
+            // Encabezados
+            $headers = [
+                'ID', 'Documento', 'Usuario', 'Email', 'Nombre Completo',
+                'Roles', 'Activo', 'Asignable', 'Último Login', 'Creado'
+            ];
+            $sheet->fromArray($headers, null, 'A1');
+            
+            // Obtener todos los usuarios
+            $allUsers = $this->getAllUsersForExport();
+            
+            // Datos
+            $row = 2;
+            foreach ($allUsers as $user) {
+                $sheet->setCellValue('A' . $row, $user['id']);
+                $sheet->setCellValue('B' . $row, $user['document'] ?? '');
+                $sheet->setCellValue('C' . $row, $user['username']);
+                $sheet->setCellValue('D' . $row, $user['email']);
+                $sheet->setCellValue('E' . $row, $user['full_name']);
+                $sheet->setCellValue('F' . $row, $user['roles'] ?? '');
+                $sheet->setCellValue('G' . $row, $user['is_active'] == 1 ? 'Sí' : 'No');
+                $sheet->setCellValue('H' . $row, $user['assign_enabled'] == 1 ? 'Sí' : 'No');
+                $sheet->setCellValue('I' . $row, $user['last_login_at'] ?? 'Nunca');
+                $sheet->setCellValue('J' . $row, $user['created_at']);
+                $row++;
+            }
+            
+            // Auto tamaño columnas
+            foreach (range('A', 'J') as $col) {
+                $sheet->getColumnDimension($col)->setAutoSize(true);
+            }
+            
+            // Estilos para encabezados
+            $headerStyle = [
+                'font' => ['bold' => true],
+                'fill' => [
+                    'fillType' => \PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID,
+                    'startColor' => ['rgb' => 'E6E6FA']
+                ],
+                'alignment' => ['horizontal' => 'center']
+            ];
+            $sheet->getStyle('A1:J1')->applyFromArray($headerStyle);
+            
+            // Formato de fechas
+            $sheet->getStyle('I:J')->getNumberFormat()->setFormatCode('yyyy-mm-dd hh:mm');
+            
+            // Enviar archivo
+            $filename = 'usuarios_icbf_' . date('Ymd_His') . '.xlsx';
+            
+            header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            header('Content-Disposition: attachment;filename="' . $filename . '"');
+            header('Cache-Control: max-age=0');
+            header('Pragma: no-cache');
+            
+            $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+            $writer->save('php://output');
+            exit;
+            
+        } catch (\Exception $e) {
+            $this->flash('error', 'Error al exportar: ' . $e->getMessage());
+            $this->redirect('/admin/users');
+        }
+    }
+
+    /**
+     * Obtener todos los usuarios para exportación
+     */
+    private function getAllUsersForExport(): array
+    {
+        $sql = "
+            SELECT
+                u.id,
+                u.document,
+                u.username,
+                u.email,
+                u.full_name,
+                u.is_active,
+                u.assign_enabled,
+                u.last_login_at,
+                u.created_at,
+                GROUP_CONCAT(DISTINCT r.code ORDER BY r.code SEPARATOR ', ') AS roles
+            FROM users u
+            LEFT JOIN user_roles ur ON ur.user_id = u.id
+            LEFT JOIN roles r ON r.id = ur.role_id
+            GROUP BY u.id
+            ORDER BY u.id DESC
+        ";
+        
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute();
+        return $stmt->fetchAll(\PDO::FETCH_ASSOC) ?: [];
     }
 
     private function validateUserData(array $data, ?int $excludeUserId = null): array

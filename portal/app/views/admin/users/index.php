@@ -454,6 +454,44 @@ $hasNext = $pagination['hasNext'] ?? false;
     </div>
 </div>
 
+<!-- Modal para errores de importación -->
+<div class="modal fade" id="importErrorsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="bi bi-exclamation-triangle text-warning me-2"></i>
+                    Errores de Importación
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <?php if (!empty($_SESSION['_import_errors'])): ?>
+                    <div class="alert alert-warning">
+                        <p>Se encontraron los siguientes errores durante la importación:</p>
+                    </div>
+                    <ul class="list-group">
+                        <?php foreach ($_SESSION['_import_errors'] as $error): ?>
+                            <li class="list-group-item list-group-item-danger">
+                                <i class="bi bi-x-circle me-2"></i><?= esc($error) ?>
+                            </li>
+                        <?php endforeach; ?>
+                    </ul>
+                    <?php unset($_SESSION['_import_errors']); ?>
+                <?php else: ?>
+                    <div class="text-center py-4">
+                        <i class="bi bi-check-circle display-4 text-success mb-3"></i>
+                        <h5>No hay errores para mostrar</h5>
+                    </div>
+                <?php endif; ?>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 // Confirmación mejorada para acciones
 document.addEventListener('DOMContentLoaded', function() {
@@ -480,6 +518,13 @@ document.addEventListener('DOMContentLoaded', function() {
     if (searchInput) {
         searchInput.focus();
         searchInput.select();
+    }
+    
+    // Mostrar modal de errores automáticamente si hay errores
+    const errorsModal = document.getElementById('importErrorsModal');
+    if (errorsModal) {
+        const modal = new bootstrap.Modal(errorsModal);
+        modal.show();
     }
 });
 </script>

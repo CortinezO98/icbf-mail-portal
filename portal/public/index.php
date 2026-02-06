@@ -26,7 +26,6 @@ require_once __DIR__ . '/../app/services/ReportExportService.php';
 require_once __DIR__ . '/../app/controllers/ReportsController.php';
 require_once __DIR__ . '/../app/controllers/UsersAdminController.php';
 
-
 require_once __DIR__ . '/../app/middleware/require_login.php';
 require_once __DIR__ . '/../app/middleware/require_role.php';
 
@@ -148,8 +147,11 @@ try {
         exit;
     }
 
+    // ============================================
+    // NUEVAS RUTAS DE ADMINISTRACIÓN DE USUARIOS
+    // ============================================
 
-    // Users admin (ADMIN only)
+    // Users admin (ADMIN only) - Lista
     if ($path === '/admin/users' && $method === 'GET') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN']);
@@ -157,6 +159,7 @@ try {
         exit;
     }
 
+    // Crear usuario - Formulario
     if ($path === '/admin/users/create' && $method === 'GET') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN']);
@@ -164,6 +167,7 @@ try {
         exit;
     }
 
+    // Crear usuario - Procesar
     if ($path === '/admin/users/create' && $method === 'POST') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN']);
@@ -171,6 +175,7 @@ try {
         exit;
     }
 
+    // Editar usuario - Formulario
     if (preg_match('#^/admin/users/edit/(\d+)$#', $path, $m) && $method === 'GET') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN']);
@@ -179,6 +184,7 @@ try {
         exit;
     }
 
+    // Editar usuario - Procesar
     if (preg_match('#^/admin/users/edit/(\d+)$#', $path, $m) && $method === 'POST') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN']);
@@ -187,6 +193,7 @@ try {
         exit;
     }
 
+    // Activar/Desactivar usuario
     if (preg_match('#^/admin/users/toggle-active/(\d+)$#', $path, $m) && $method === 'POST') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN']);
@@ -195,6 +202,7 @@ try {
         exit;
     }
 
+    // Eliminar usuario
     if (preg_match('#^/admin/users/delete/(\d+)$#', $path, $m) && $method === 'POST') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN']);
@@ -203,6 +211,7 @@ try {
         exit;
     }
 
+    // Importar usuarios - Formulario
     if ($path === '/admin/users/import' && $method === 'GET') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN']);
@@ -210,13 +219,22 @@ try {
         exit;
     }
 
+    // Importar usuarios - Procesar (usando el nuevo método import() si existe)
     if ($path === '/admin/users/import' && $method === 'POST') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN']);
-        (new \App\Controllers\UsersAdminController($pdo, $config))->importExcel();
+        $controller = new \App\Controllers\UsersAdminController($pdo, $config);
+        
+        // Intentar usar el nuevo método import(), si no existe usar importExcel()
+        if (method_exists($controller, 'import')) {
+            $controller->import();
+        } else {
+            $controller->importExcel();
+        }
         exit;
     }
 
+    // Exportar plantilla Excel
     if ($path === '/admin/users/export-template' && $method === 'GET') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN']);
@@ -224,6 +242,23 @@ try {
         exit;
     }
 
+    // Exportar usuarios a Excel (NUEVA RUTA)
+    if ($path === '/admin/users/export' && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN']);
+        $controller = new \App\Controllers\UsersAdminController($pdo, $config);
+        
+        // Verificar si el método exportExcel() existe
+        if (method_exists($controller, 'exportExcel')) {
+            $controller->exportExcel();
+        } else {
+            // Si no existe, redirigir con mensaje de error
+            $_SESSION['_flash'] = ['type' => 'error', 'message' => 'Función de exportación no disponible'];
+            header('Location: ' . \App\Config\url('/admin/users'));
+            exit;
+        }
+        exit;
+    }
 
     // 404
     http_response_code(404);

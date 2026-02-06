@@ -79,6 +79,30 @@ final class UsersAdminRepo
         return $st->fetchAll() ?: [];
     }
 
+    public function getAllUsersForExport(): array
+    {
+        $sql = "
+            SELECT
+                u.id,
+                u.document,
+                u.username,
+                u.email,
+                u.full_name,
+                u.is_active,
+                u.assign_enabled,
+                u.last_login_at,
+                u.created_at,
+                GROUP_CONCAT(DISTINCT r.code ORDER BY r.code SEPARATOR ', ') AS roles
+            FROM users u
+            LEFT JOIN user_roles ur ON ur.user_id = u.id
+            LEFT JOIN roles r ON r.id = ur.role_id
+            GROUP BY u.id
+            ORDER BY u.id DESC
+        ";
+        
+        return $this->pdo->query($sql)->fetchAll() ?: [];
+    }
+
     /**
      * Cuenta total de usuarios para paginación
      */

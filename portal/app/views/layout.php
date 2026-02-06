@@ -147,12 +147,27 @@ if (Auth::check()) {
                     </li>
 
                     <?php if (Auth::hasRole('ADMIN')): ?>
-                      <li class="nav-item">
-                        <a class="nav-link <?= is_active_prefix($path, '/admin/users') ? 'active' : '' ?>"
-                          href="<?= esc(url('/admin/users')) ?>">
-                          <i class="bi bi-people me-1"></i>Usuarios
+                    <li class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle <?= is_active_prefix($path, '/admin') ? 'active' : '' ?>" 
+                          href="#" 
+                          role="button" 
+                          data-bs-toggle="dropdown" 
+                          aria-expanded="false">
+                            <i class="bi bi-gear me-1"></i>Administración
                         </a>
-                      </li>
+                        <ul class="dropdown-menu">
+                            <li><a class="dropdown-item <?= $path === '/admin/users' ? 'active' : '' ?>" 
+                                  href="<?= esc(url('/admin/users')) ?>">
+                                <i class="bi bi-people me-2"></i>Usuarios
+                            </a></li>
+                            <li><a class="dropdown-item" href="#">
+                                <i class="bi bi-shield-check me-2"></i>Roles y Permisos
+                            </a></li>
+                            <li><a class="dropdown-item" href="#">
+                                <i class="bi bi-sliders me-2"></i>Configuración
+                            </a></li>
+                        </ul>
+                    </li>
                     <?php endif; ?>
 
 
