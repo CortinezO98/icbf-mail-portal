@@ -1,4 +1,6 @@
 <?php
+// portal/app/routes/admin_users.php - VERSIÓN MEJORADA
+
 declare(strict_types=1);
 
 use App\Controllers\UsersAdminController;
@@ -16,6 +18,7 @@ $routes = [
         '/admin/users/create' => fn() => $controller->showCreate(),
         '/admin/users/edit/(\d+)' => fn($id) => $controller->showEdit((int)$id),
         '/admin/users/import' => fn() => $controller->showImport(),
+        '/admin/users/import-confirm' => fn() => $controller->showImportConfirm(),
         '/admin/users/export-template' => fn() => $controller->exportTemplate(),
         '/admin/users/export' => fn() => $controller->exportExcel(),
     ],
@@ -25,6 +28,7 @@ $routes = [
         '/admin/users/toggle-active/(\d+)' => fn($id) => $controller->toggleActive((int)$id),
         '/admin/users/delete/(\d+)' => fn($id) => $controller->delete((int)$id),
         '/admin/users/import' => fn() => $controller->import(),
+        '/admin/users/send-welcome-emails' => fn() => $controller->sendWelcomeEmails(),
     ]
 ];
 
@@ -40,6 +44,5 @@ foreach ($routes[$method] ?? [] as $pattern => $handler) {
     }
 }
 
-// Si no encuentra ruta
 http_response_code(404);
 echo "Página no encontrada";

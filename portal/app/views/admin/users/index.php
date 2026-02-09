@@ -494,37 +494,68 @@ $hasNext = $pagination['hasNext'] ?? false;
 
 <script>
 // Confirmación mejorada para acciones
-document.addEventListener('DOMContentLoaded', function() {
-    const confirmModal = new bootstrap.Modal(document.getElementById('confirmModal'));
+if (window.location.hash === '#password-generated') {
+    const userId = new URLSearchParams(window.location.search).get('user_id');
+    const storedPassword = sessionStorage.getItem('generated_password_' + userId);
     
-    // Configurar confirmaciones
-    document.querySelectorAll('[data-confirm]').forEach(button => {
-        button.addEventListener('click', function(e) {
-            e.preventDefault();
-            
-            const message = this.getAttribute('data-confirm');
-            const form = this.closest('form');
-            
-            if (form) {
-                document.getElementById('confirmMessage').textContent = message;
-                document.getElementById('confirmForm').action = form.action;
-                confirmModal.show();
+    if (storedPassword) {
+        Swal.fire({
+            title: 'Contraseña Generada',
+            html: `La contraseña temporal es: <code>${storedPassword}</code><br><br>
+                  <small>Guarda esta contraseña de manera segura.</small>`,
+            icon: 'info',
+            confirmButtonText: 'Copiar al Portapapeles',
+            showCancelButton: true,
+            cancelButtonText: 'Cerrar'
+        }).then((result) => {
+            if (result.isConfirmed) {
+                navigator.clipboard.writeText(storedPassword);
+                Swal.fire('Copiado!', 'Contraseña copiada al portapapeles.', 'success');
             }
+            sessionStorage.removeItem('generated_password_' + userId);
+        });
+    }
+}
+
+// Confirmación mejorada para eliminación
+document.addEventListener('DOMContentLoaded', function() {
+    // Confirmación con SweetAlert
+    document.querySelectorAll('form[data-confirm]').forEach(form => {
+        form.addEventListener('submit', function(e) {
+            e.preventDefault();
+            const message = this.getAttribute('data-confirm');
+            const form = this;
+            
+            Swal.fire({
+                title: '¿Estás seguro?',
+                text: message,
+                icon: 'warning',
+                showCancelButton: true,
+                confirmButtonColor: '#d33',
+                cancelButtonColor: '#3085d6',
+                confirmButtonText: 'Sí, continuar',
+                cancelButtonText: 'Cancelar'
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    form.submit();
+                }
+            });
         });
     });
     
     // Auto-focus en búsqueda
     const searchInput = document.querySelector('input[name="search"]');
-    if (searchInput) {
+    if (searchInput && !searchInput.value) {
         searchInput.focus();
-        searchInput.select();
     }
     
-    // Mostrar modal de errores automáticamente si hay errores
-    const errorsModal = document.getElementById('importErrorsModal');
-    if (errorsModal) {
-        const modal = new bootstrap.Modal(errorsModal);
-        modal.show();
-    }
+    // Filtro rápido por rol
+    document.querySelectorAll('[data-filter-role]').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const roleId = this.getAttribute('data-filter-role');
+            document.querySelector('select[name="role_id"]').value = roleId;
+            document.querySelector('form[method="get"]').submit();
+        });
+    });
 });
 </script>
