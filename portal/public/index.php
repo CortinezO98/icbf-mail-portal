@@ -15,6 +15,7 @@ require_once __DIR__ . '/../app/repos/EventsRepo.php';
 require_once __DIR__ . '/../app/repos/MetricsRepo.php';
 require_once __DIR__ . '/../app/repos/ReportsRepo.php';
 require_once __DIR__ . '/../app/repos/UsersAdminRepo.php';
+require_once __DIR__ . '/../app/repos/CaseEventsRepo.php';
 
 require_once __DIR__ . '/../app/controllers/AuthController.php';
 require_once __DIR__ . '/../app/controllers/CasesController.php';
@@ -78,6 +79,24 @@ try {
         \App\Middleware\require_login();
         $caseId = (int)$m[1];
         (new \App\Controllers\CasesController($pdo, $config))->detail($caseId);
+        exit;
+    }
+
+    // Escalar caso
+    if (preg_match('#^/cases/(\d+)/escalate$#', $path, $m) && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE']);
+        $caseId = (int)$m[1];
+        (new \App\Controllers\CasesController($pdo, $config))->escalate($caseId);
+        exit;
+    }
+
+    // Cerrar caso
+    if (preg_match('#^/cases/(\d+)/close$#', $path, $m) && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE']);
+        $caseId = (int)$m[1];
+        (new \App\Controllers\CasesController($pdo, $config))->close($caseId);
         exit;
     }
 

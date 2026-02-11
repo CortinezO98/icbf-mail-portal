@@ -7,7 +7,10 @@ use function App\Config\url;
 
 $isSupervisor = Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN');
 
-
+// Vars seguras por si algún include no las manda
+$case   = $case ?? [];
+$flash  = $flash ?? null;
+$_csrf  = $_csrf ?? '';
 
 function safe_message_body(array $m): string {
   $txt = (string)($m['body_text'] ?? '');
@@ -44,14 +47,33 @@ function badge_sla(string $sla): array {
   };
 }
 
-$statusCode = strtoupper((string)($case['status_code'] ?? ''));
-$statusName = (string)($case['status_name'] ?? $statusCode);
+$statusCode  = strtoupper((string)($case['status_code'] ?? ''));
+$statusName  = (string)($case['status_name'] ?? $statusCode);
 $statusClass = badge_status_class($statusCode);
 
 [$slaBadge, $slaLabel] = badge_sla((string)($case['sla_state'] ?? ''));
 
 $caseId = (int)($case['id'] ?? 0);
 ?>
+
+<?php if ($flash): ?>
+  <?php
+    $type = (string)($flash['type'] ?? 'info');
+    $msg  = (string)($flash['message'] ?? '');
+
+    $cls = match ($type) {
+      'success' => 'alert-success',
+      'error'   => 'alert-danger',
+      'warning' => 'alert-warning',
+      default   => 'alert-info'
+    };
+  ?>
+  <div class="alert <?= esc($cls) ?> alert-dismissible fade show" role="alert">
+    <?= nl2br(esc($msg)) ?>
+    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+  </div>
+<?php endif; ?>
+
 <div class="page-title">
   <div>
     <h3 class="m-0"><?= esc($case['case_number'] ?? '') ?></h3>
@@ -105,7 +127,7 @@ $caseId = (int)($case['id'] ?? 0);
         </div>
       </div>
     </div>
-    
+
     <!-- Hilo de mensajes -->
     <div class="card mb-3">
       <div class="card-header d-flex justify-content-between align-items-center">
@@ -125,7 +147,7 @@ $caseId = (int)($case['id'] ?? 0);
         <?php else: ?>
           <?php foreach ($messages as $m): ?>
             <?php
-              $dir = strtoupper((string)($m['direction'] ?? ''));
+              $dir  = strtoupper((string)($m['direction'] ?? ''));
               $from = (string)($m['from_email'] ?? '');
               $when = msg_when($m);
               $body = safe_message_body($m);
@@ -168,9 +190,9 @@ $caseId = (int)($case['id'] ?? 0);
             <?php foreach ($attachments as $a): ?>
               <?php
                 $filename = (string)($a['filename'] ?? '');
-                $ctype = (string)($a['content_type'] ?? '');
-                $size = (string)($a['size_bytes'] ?? '');
-                $attId = (int)($a['id'] ?? 0);
+                $ctype    = (string)($a['content_type'] ?? '');
+                $size     = (string)($a['size_bytes'] ?? '');
+                $attId    = (int)($a['id'] ?? 0);
               ?>
               <div class="list-group-item d-flex justify-content-between align-items-center flex-wrap gap-2">
                 <div>
@@ -195,6 +217,66 @@ $caseId = (int)($case['id'] ?? 0);
   <!-- Sidebar -->
   <div class="col-lg-4">
 
+    <!-- ✅ NUEVO: Acciones del caso (Escalar / Cerrar) -->
+    <div class="card shadow-sm mb-3">
+      <div class="card-header fw-semibold">
+        Acciones del caso
+      </div>
+      <div class="card-body">
+        <!-- ESCALAR -->
+        <form method="POST" action="<?= esc(url('/cases/' . $caseId . '/escalate')) ?>" class="mb-3">
+          <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
+
+          <label class="form-label">
+            Observación de escalamiento <span class="text-danger">*</span>
+          </label>
+          <textarea
+            name="escalated_note"
+            class="form-control"
+            rows="3"
+            required
+            maxlength="2000"
+            placeholder="Describe por qué se escala y a qué instancia..."></textarea>
+
+          <button class="btn btn-warning w-100 mt-2" type="submit">
+            <i class="bi bi-arrow-up-right-circle me-1"></i>Escalar
+          </button>
+        </form>
+
+        <hr>
+
+        <!-- CERRAR -->
+        <form method="POST" action="<?= esc(url('/cases/' . $caseId . '/close')) ?>">
+          <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
+
+          <label class="form-label">
+            Observación de cierre <span class="text-danger">*</span>
+          </label>
+          <textarea
+            name="closed_note"
+            class="form-control"
+            rows="3"
+            required
+            maxlength="4000"
+            placeholder="Qué se hizo, respuesta final, evidencia..."></textarea>
+
+          <label class="form-label mt-2">
+            Radicado <span class="text-danger">*</span>
+          </label>
+          <input
+            name="closed_ticket"
+            class="form-control"
+            required
+            maxlength="50"
+            placeholder="Ej: 123456 o ICBF-2026-000123">
+
+          <button class="btn btn-success w-100 mt-3" type="submit">
+            <i class="bi bi-check2-circle me-1"></i>Cerrar caso
+          </button>
+        </form>
+      </div>
+    </div>
+
     <?php if ($isSupervisor): ?>
       <div class="card mb-3">
         <div class="card-header">Asignar caso</div>
@@ -208,7 +290,7 @@ $caseId = (int)($case['id'] ?? 0);
                 <option value="">Seleccione...</option>
                 <?php foreach ($agents as $ag): ?>
                   <?php
-                    $agId = (int)($ag['id'] ?? 0);
+                    $agId   = (int)($ag['id'] ?? 0);
                     $agName = (string)($ag['full_name'] ?? '');
                     $agUser = (string)($ag['username'] ?? '');
                   ?>
@@ -244,9 +326,9 @@ $caseId = (int)($case['id'] ?? 0);
           <?php foreach ($events as $e): ?>
             <?php
               $created = (string)($e['created_at'] ?? '');
-              $type = (string)($e['event_type'] ?? '');
-              $source = (string)($e['source'] ?? '');
-              $actor = (string)($e['actor_name'] ?? '—');
+              $type    = (string)($e['event_type'] ?? '');
+              $source  = (string)($e['source'] ?? '');
+              $actor   = (string)($e['actor_name'] ?? '—');
               $details = (string)($e['details_json'] ?? '');
             ?>
             <div class="event-item mb-2">

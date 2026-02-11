@@ -5,19 +5,24 @@ namespace App\Controllers;
 
 use PDO;
 use App\Auth\Auth;
+use App\Auth\Csrf;
 use App\Repos\CasesRepo;
 use App\Repos\MessagesRepo;
 use App\Repos\AttachmentsRepo;
 use App\Repos\EventsRepo;
 use App\Repos\UsersRepo;
+use App\Repos\CaseEventsRepo;
+
+use function App\Config\url;
 
 final class CasesController
 {
     private CasesRepo $casesRepo;
     private MessagesRepo $messagesRepo;
     private AttachmentsRepo $attachmentsRepo;
-    private EventsRepo $eventsRepo;
+    private EventsRepo $eventsRepo; // se mantiene (no se rompe nada)
     private UsersRepo $usersRepo;
+    private CaseEventsRepo $caseEventsRepo; // nuevo
 
     public function __construct(private PDO $pdo, private array $config)
     {
@@ -26,6 +31,7 @@ final class CasesController
         $this->attachmentsRepo = new AttachmentsRepo($pdo);
         $this->eventsRepo = new EventsRepo($pdo);
         $this->usersRepo = new UsersRepo($pdo);
+        $this->caseEventsRepo = new CaseEventsRepo($pdo);
     }
 
     public function inbox(): void
@@ -46,7 +52,7 @@ final class CasesController
         }
 
         $result = $this->casesRepo->listInbox($status, $assignedUserId, $page, $perPage);
-        
+
         if (isset($result['data']) && isset($result['pagination'])) {
             $cases = $result['data'];
             $pagination = $result['pagination'];
@@ -69,11 +75,15 @@ final class CasesController
             $unassignedCount = $statusNuevoId ? $this->casesRepo->countUnassignedByStatus($statusNuevoId) : 0;
         }
 
+        $flash = $_SESSION['_flash'] ?? null;
+        unset($_SESSION['_flash']);
+
         $this->render('cases/inbox.php', [
             'cases' => $cases,
             'status' => $status,
             'unassignedCount' => $unassignedCount,
-            'pagination' => $pagination // nuevo parámetro
+            'pagination' => $pagination,
+            'flash' => $flash,
         ]);
     }
 
@@ -86,6 +96,7 @@ final class CasesController
             exit;
         }
 
+        // Object-level auth (AGENTE solo ve/actúa lo suyo)
         if (Auth::hasRole('AGENTE') && !Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
             if ((int)($case['assigned_user_id'] ?? 0) !== (int)Auth::id()) {
                 http_response_code(403);
@@ -103,13 +114,158 @@ final class CasesController
             $agents = $this->usersRepo->listAgents();
         }
 
+        $flash = $_SESSION['_flash'] ?? null;
+        unset($_SESSION['_flash']);
+
         $this->render('cases/detail.php', [
             'case' => $case,
             'messages' => $messages,
             'attachments' => $attachments,
             'events' => $events,
             'agents' => $agents,
+            'flash' => $flash,
+            '_csrf' => Csrf::token(),
         ]);
+    }
+
+    /**
+     * POST /cases/{id}/escalate
+     */
+    public function escalate(int $caseId): void
+    {
+        // ✅ CSRF (mantener patrón del proyecto)
+        Csrf::validate($_POST['_csrf'] ?? null);
+
+        if (!Auth::check()) {
+            http_response_code(401);
+            echo "Unauthorized";
+            exit;
+        }
+
+        $case = $this->casesRepo->findCase($caseId);
+        if (!$case) {
+            $this->flash('error', 'Caso no encontrado.');
+            $this->redirect('/cases');
+        }
+
+        // ✅ AGENTE solo puede operar casos asignados a él
+        if (Auth::hasRole('AGENTE') && !Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
+            if ((int)($case['assigned_user_id'] ?? 0) !== (int)Auth::id()) {
+                http_response_code(403);
+                echo "Forbidden";
+                exit;
+            }
+        }
+
+        $note = trim((string)($_POST['escalated_note'] ?? ''));
+
+        try {
+            $this->pdo->beginTransaction();
+
+            $fromStatusId = (int)($case['status_id'] ?? 0);
+
+            // ✅ usa ESCALATED interno
+            $toStatusId = $this->casesRepo->escalate($caseId, (int)Auth::id(), $note);
+
+            // ✅ Evento en case_events (pro)
+            $this->caseEventsRepo->addStatusChange(
+                $caseId,
+                (int)Auth::id(),
+                'PORTAL',
+                $_SERVER['REMOTE_ADDR'] ?? null,
+                $_SERVER['HTTP_USER_AGENT'] ?? null,
+                'ESCALATED',
+                $fromStatusId ?: null,
+                $toStatusId ?: null,
+                ['note' => $note]
+            );
+
+            $this->pdo->commit();
+
+            $this->flash('success', 'Caso escalado correctamente.');
+            $this->redirect('/cases/' . $caseId);
+
+        } catch (\Throwable $e) {
+            if ($this->pdo->inTransaction()) $this->pdo->rollBack();
+            $this->flash('error', 'No se pudo escalar: ' . $e->getMessage());
+            $this->redirect('/cases/' . $caseId);
+        }
+    }
+
+    /**
+     * POST /cases/{id}/close
+     */
+    public function close(int $caseId): void
+    {
+        // ✅ CSRF
+        Csrf::validate($_POST['_csrf'] ?? null);
+
+        if (!Auth::check()) {
+            http_response_code(401);
+            echo "Unauthorized";
+            exit;
+        }
+
+        $case = $this->casesRepo->findCase($caseId);
+        if (!$case) {
+            $this->flash('error', 'Caso no encontrado.');
+            $this->redirect('/cases');
+        }
+
+        // ✅ AGENTE solo puede operar casos asignados a él
+        if (Auth::hasRole('AGENTE') && !Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
+            if ((int)($case['assigned_user_id'] ?? 0) !== (int)Auth::id()) {
+                http_response_code(403);
+                echo "Forbidden";
+                exit;
+            }
+        }
+
+        $note = trim((string)($_POST['closed_note'] ?? ''));
+        $ticket = trim((string)($_POST['closed_ticket'] ?? ''));
+
+        try {
+            $this->pdo->beginTransaction();
+
+            $fromStatusId = (int)($case['status_id'] ?? 0);
+
+            // ✅ AQUÍ está el ajuste mínimo: tu BD usa CERRADO
+            $toStatusId = $this->casesRepo->close($caseId, (int)Auth::id(), $note, $ticket, 'CERRADO');
+
+            // ✅ Evento en case_events
+            $this->caseEventsRepo->addStatusChange(
+                $caseId,
+                (int)Auth::id(),
+                'PORTAL',
+                $_SERVER['REMOTE_ADDR'] ?? null,
+                $_SERVER['HTTP_USER_AGENT'] ?? null,
+                'CLOSED',
+                $fromStatusId ?: null,
+                $toStatusId ?: null,
+                ['note' => $note, 'ticket' => $ticket]
+            );
+
+            $this->pdo->commit();
+
+            $this->flash('success', 'Caso cerrado correctamente.');
+            $this->redirect('/cases/' . $caseId);
+
+        } catch (\Throwable $e) {
+            if ($this->pdo->inTransaction()) $this->pdo->rollBack();
+            $this->flash('error', 'No se pudo cerrar: ' . $e->getMessage());
+            $this->redirect('/cases/' . $caseId);
+        }
+    }
+
+    private function flash(string $type, string $message): void
+    {
+        $_SESSION['_flash'] = ['type' => $type, 'message' => $message];
+    }
+
+    private function redirect(string $path): void
+    {
+        header('Location: ' . url($path));
+        exit;
     }
 
     private function render(string $view, array $params = []): void
