@@ -38,8 +38,7 @@ final class CaseActionsController
 
     public function escalate(int $caseId): void
     {
-        Csrf::validateOrFail($_POST['csrf'] ?? '');
-
+        Csrf::validate($_POST['_csrf'] ?? null);
         $note = (string)($_POST['escalated_note'] ?? '');
         $uid  = (int)Auth::id();
 

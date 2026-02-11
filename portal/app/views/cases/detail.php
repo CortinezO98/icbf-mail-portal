@@ -7,9 +7,9 @@ use function App\Config\url;
 
 $isSupervisor = Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN');
 
-// Vars seguras por si algún include no las manda
+// Vars seguras
 $case   = $case ?? [];
-$flash  = $flash ?? null;
+$flash  = $flash ?? null; // ya no se usa aquí (lo maneja layout)
 $_csrf  = $_csrf ?? '';
 
 function safe_message_body(array $m): string {
@@ -31,6 +31,7 @@ function badge_status_class(string $code): string {
     'NUEVO' => 'badge-status--nuevo',
     'ASIGNADO' => 'badge-status--asignado',
     'EN_PROCESO' => 'badge-status--enproceso',
+    'ESCALATED', 'ESCALADO' => 'badge-status--escalated',
     'RESPONDIDO' => 'badge-status--respondido',
     'CERRADO' => 'badge-status--cerrado',
     default => '',
@@ -54,21 +55,27 @@ $statusClass = badge_status_class($statusCode);
 [$slaBadge, $slaLabel] = badge_sla((string)($case['sla_state'] ?? ''));
 
 $caseId = (int)($case['id'] ?? 0);
+
+$isAssignedAgent = Auth::check()
+  && Auth::hasRole('AGENTE')
+  && !Auth::hasRole('SUPERVISOR')
+  && !Auth::hasRole('ADMIN')
+  && ((int)($case['assigned_user_id'] ?? 0) === (int)Auth::id());
+
+// En general, si eres el asignado (incluye supervisor/admin cuando se autoasignan casos)
+$isCaseOwner = Auth::check() && ((int)($case['assigned_user_id'] ?? 0) === (int)Auth::id());
+
+// Para este flujo: acciones “métricas” SOLO para el AGENTE asignado
+$canAgentFlowActions = $isAssignedAgent;
+
+// Ayudas UI por estado
+$showStart      = $canAgentFlowActions && $statusCode === 'ASIGNADO';
+$showInProc     = $canAgentFlowActions && $statusCode === 'EN_PROCESO';
+$showEscFinish  = $canAgentFlowActions && $statusCode === 'ESCALATED';
+$showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
+
+// Nota: CERRADO => sin acciones
 ?>
-
-<?php if ($flash): ?>
-  <?php
-    $type = (string)($flash['type'] ?? 'info');
-    $msg  = (string)($flash['message'] ?? '');
-
-    $cls = match ($type) {
-      'success' => 'alert-success',
-      'error'   => 'alert-danger',
-      'warning' => 'alert-warning',
-      default   => 'alert-info'
-    };
-  ?>
-<?php endif; ?>
 
 <div class="page-title">
   <div>
@@ -213,66 +220,143 @@ $caseId = (int)($case['id'] ?? 0);
   <!-- Sidebar -->
   <div class="col-lg-4">
 
-    <!-- ✅ NUEVO: Acciones del caso (Escalar / Cerrar) -->
-    <div class="card shadow-sm mb-3">
-      <div class="card-header fw-semibold">
-        Acciones del caso
+    <!-- ========================================= -->
+    <!-- ACCIONES DEL CASO (SOLO AGENTE ASIGNADO)   -->
+    <!-- ========================================= -->
+    <?php if ($canAgentFlowActions): ?>
+      <div class="card shadow-sm mb-3">
+        <div class="card-header fw-semibold">
+          Acciones del caso
+        </div>
+
+        <div class="card-body">
+          <?php if ($showStart): ?>
+            <!-- INICIAR GESTIÓN -->
+            <form method="POST" action="<?= esc(url('/cases/' . $caseId . '/start')) ?>">
+              <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
+              <button class="btn btn-success w-100"
+                      type="submit"
+                      data-confirm="true"
+                      data-confirm-title="Iniciar gestión"
+                      data-confirm-text="Se marcará el inicio de gestión para métricas ANS. ¿Continuar?">
+                <i class="bi bi-play-circle me-1"></i>Iniciar gestión
+              </button>
+              <div class="form-text mt-2">
+                Este botón habilita el flujo de gestión (escalar / finalizar) y registra la métrica.
+              </div>
+            </form>
+          <?php endif; ?>
+
+          <?php if ($showInProc): ?>
+            <!-- ESCALAR -->
+            <form method="POST" action="<?= esc(url('/cases/' . $caseId . '/escalate')) ?>" class="mb-3">
+              <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
+
+              <label class="form-label">
+                Observación de escalamiento <span class="text-danger">*</span>
+              </label>
+              <textarea
+                name="escalated_note"
+                class="form-control"
+                rows="3"
+                required
+                maxlength="2000"
+                placeholder="Qué necesitas, a quién escalas y por qué..."></textarea>
+
+              <button class="btn btn-warning w-100 mt-2"
+                      type="submit"
+                      data-confirm="true"
+                      data-confirm-title="Escalar"
+                      data-confirm-text="Se registrará el escalamiento en la trazabilidad. ¿Continuar?">
+                <i class="bi bi-arrow-up-right-circle me-1"></i>Escalar
+              </button>
+            </form>
+
+            <hr>
+
+            <!-- FINALIZAR GESTIÓN -->
+            <form method="POST" action="<?= esc(url('/cases/' . $caseId . '/finish')) ?>">
+              <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
+              <button class="btn btn-primary w-100"
+                      type="submit"
+                      data-confirm="true"
+                      data-confirm-title="Finalizar gestión"
+                      data-confirm-text="Se marcará el caso como RESPONDIDO. ¿Continuar?">
+                <i class="bi bi-check2-circle me-1"></i>Finalizar gestión
+              </button>
+              <div class="form-text mt-2">
+                Al finalizar, el caso pasa a RESPONDIDO y se registra la métrica de primera respuesta.
+              </div>
+            </form>
+          <?php endif; ?>
+
+          <?php if ($showEscFinish): ?>
+            <!-- FINALIZAR ESCALAMIENTO -->
+            <form method="POST" action="<?= esc(url('/cases/' . $caseId . '/finish-escalation')) ?>">
+              <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
+
+              <button class="btn btn-primary w-100"
+                      type="submit"
+                      data-confirm="true"
+                      data-confirm-title="Finalizar escalamiento"
+                      data-confirm-text="El caso volverá a EN_PROCESO para continuar la gestión. ¿Continuar?">
+                <i class="bi bi-arrow-counterclockwise me-1"></i>Finalizar escalamiento
+              </button>
+
+              <div class="form-text mt-2">
+                Finaliza el estado ESCALATED y devuelve el caso a EN_PROCESO para continuar con la gestión.
+              </div>
+            </form>
+          <?php endif; ?>
+
+          <?php if ($showClose): ?>
+            <!-- CERRAR (solo cuando está RESPONDIDO) -->
+            <form method="POST" action="<?= esc(url('/cases/' . $caseId . '/close')) ?>">
+              <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
+
+              <label class="form-label">
+                Radicado <span class="text-danger">*</span>
+              </label>
+              <input
+                name="closed_ticket"
+                class="form-control"
+                required
+                maxlength="60"
+                placeholder="Ej: 123456 o ICBF-2026-000123">
+
+              <label class="form-label mt-2">
+                Observación de cierre <span class="text-danger">*</span>
+              </label>
+              <textarea
+                name="closed_note"
+                class="form-control"
+                rows="3"
+                required
+                maxlength="4000"
+                placeholder="Qué se hizo, respuesta final, evidencia..."></textarea>
+
+              <button class="btn btn-danger w-100 mt-3"
+                      type="submit"
+                      data-confirm="true"
+                      data-confirm-title="Cerrar caso"
+                      data-confirm-text="El caso quedará en estado CERRADO. ¿Continuar?">
+                <i class="bi bi-lock-fill me-1"></i>Cerrar caso
+              </button>
+            </form>
+          <?php endif; ?>
+
+          <?php if (!$showStart && !$showInProc && !$showEscFinish && !$showClose): ?>
+            <div class="text-muted small">
+              No hay acciones disponibles para tu perfil en el estado actual.
+            </div>
+          <?php endif; ?>
+        </div>
       </div>
-      <div class="card-body">
-        <!-- ESCALAR -->
-        <form method="POST" action="<?= esc(url('/cases/' . $caseId . '/escalate')) ?>" class="mb-3">
-          <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
+    <?php endif; ?>
 
-          <label class="form-label">
-            Observación de escalamiento <span class="text-danger">*</span>
-          </label>
-          <textarea
-            name="escalated_note"
-            class="form-control"
-            rows="3"
-            required
-            maxlength="2000"
-            placeholder="Describe por qué se escala y a qué instancia..."></textarea>
-
-          <button class="btn btn-warning w-100 mt-2" type="submit">
-            <i class="bi bi-arrow-up-right-circle me-1"></i>Escalar
-          </button>
-        </form>
-
-        <hr>
-
-        <!-- CERRAR -->
-        <form method="POST" action="<?= esc(url('/cases/' . $caseId . '/close')) ?>">
-          <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
-
-          <label class="form-label">
-            Observación de cierre <span class="text-danger">*</span>
-          </label>
-          <textarea
-            name="closed_note"
-            class="form-control"
-            rows="3"
-            required
-            maxlength="4000"
-            placeholder="Qué se hizo, respuesta final, evidencia..."></textarea>
-
-          <label class="form-label mt-2">
-            Radicado <span class="text-danger">*</span>
-          </label>
-          <input
-            name="closed_ticket"
-            class="form-control"
-            required
-            maxlength="50"
-            placeholder="Ej: 123456 o ICBF-2026-000123">
-
-          <button class="btn btn-success w-100 mt-3" type="submit">
-            <i class="bi bi-check2-circle me-1"></i>Cerrar caso
-          </button>
-        </form>
-      </div>
-    </div>
-
+    <!-- ========================================= -->
+    <!-- ASIGNAR CASO (SOLO SUPERVISOR/ADMIN)      -->
+    <!-- ========================================= -->
     <?php if ($isSupervisor): ?>
       <div class="card mb-3">
         <div class="card-header">Asignar caso</div>

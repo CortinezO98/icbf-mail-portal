@@ -82,19 +82,52 @@ try {
         exit;
     }
 
+    // ============================================================
+    // ✅ NUEVAS RUTAS: START / FINISH (métricas por estados)
+    // ============================================================
+
+    // START: ASIGNADO -> EN_PROCESO
+    if (preg_match('#^/cases/(\d+)/start$#', $path, $m) && $method === 'POST') {
+        \App\Middleware\require_login();
+        // Agente puede iniciar gestión (y también admin/supervisor si quieres permitir soporte)
+        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE','AGENT']);
+        $caseId = (int)$m[1];
+        (new \App\Controllers\CasesController($pdo, $config))->start($caseId);
+        exit;
+    }
+
+    // FINISH: EN_PROCESO -> RESPONDIDO
+    if (preg_match('#^/cases/(\d+)/finish$#', $path, $m) && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE','AGENT']);
+        $caseId = (int)$m[1];
+        (new \App\Controllers\CasesController($pdo, $config))->finish($caseId);
+        exit;
+    }
+
     // Escalar caso
     if (preg_match('#^/cases/(\d+)/escalate$#', $path, $m) && $method === 'POST') {
         \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE']);
+        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE','AGENT']);
         $caseId = (int)$m[1];
         (new \App\Controllers\CasesController($pdo, $config))->escalate($caseId);
         exit;
     }
 
+    // FINALIZAR ESCALAMIENTO: ESCALATED -> EN_PROCESO
+    if (preg_match('#^/cases/(\d+)/finish-escalation$#', $path, $m) && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE','AGENT']);
+        $caseId = (int)$m[1];
+        (new \App\Controllers\CasesController($pdo, $config))->finishEscalation($caseId);
+        exit;
+    }
+
+
     // Cerrar caso
     if (preg_match('#^/cases/(\d+)/close$#', $path, $m) && $method === 'POST') {
         \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE']);
+        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE','AGENT']);
         $caseId = (int)$m[1];
         (new \App\Controllers\CasesController($pdo, $config))->close($caseId);
         exit;
@@ -117,19 +150,19 @@ try {
         exit;
     }
 
-    // Dashboard (Supervisor/Admin)
+    // Dashboard (Supervisor/Admin/Agente)
     if ($path === '/dashboard' && $method === 'GET') {
         \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR', 'AGENTE']);
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR', 'AGENTE', 'AGENT']);
         (new \App\Controllers\DashboardController($pdo, $config))->index();
         exit;
     }
 
-    // Dashboard Semáforo (Supervisor/Admin)
+    // Dashboard Semáforo (Supervisor/Admin/Agente)
     // /dashboard/semaforo/verde | /dashboard/semaforo/amarillo | /dashboard/semaforo/rojo
     if (preg_match('#^/dashboard/semaforo/(verde|amarillo|rojo)$#i', $path, $m) && $method === 'GET') {
         \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR', 'AGENTE']);
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR', 'AGENTE', 'AGENT']);
         $estado = strtolower($m[1]);
         (new \App\Controllers\DashboardController($pdo, $config))->semaforo($estado);
         exit;
@@ -238,13 +271,12 @@ try {
         exit;
     }
 
-    // Importar usuarios - Procesar (usando el nuevo método import() si existe)
+    // Importar usuarios - Procesar
     if ($path === '/admin/users/import' && $method === 'POST') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN']);
         $controller = new \App\Controllers\UsersAdminController($pdo, $config);
-        
-        // Intentar usar el nuevo método import(), si no existe usar importExcel()
+
         if (method_exists($controller, 'import')) {
             $controller->import();
         } else {
@@ -261,17 +293,15 @@ try {
         exit;
     }
 
-    // Exportar usuarios a Excel (NUEVA RUTA)
+    // Exportar usuarios a Excel
     if ($path === '/admin/users/export' && $method === 'POST') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN']);
         $controller = new \App\Controllers\UsersAdminController($pdo, $config);
-        
-        // Verificar si el método exportExcel() existe
+
         if (method_exists($controller, 'exportExcel')) {
             $controller->exportExcel();
         } else {
-            // Si no existe, redirigir con mensaje de error
             $_SESSION['_flash'] = ['type' => 'error', 'message' => 'Función de exportación no disponible'];
             header('Location: ' . \App\Config\url('/admin/users'));
             exit;

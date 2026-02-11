@@ -13,16 +13,20 @@ final class CasesRepo
      * Compatibilidad:
      * - Si se llama con 3 args o menos, usa el modo legacy (limit).
      * - Si se llama con 4 args, usa paginación.
+     *
+     * Nota: se mantiene la firma original para NO romper controllers/vistas existentes.
      */
     public function listInbox(?string $statusCode, ?int $assignedUserId, int $page = 1, int $perPage = 20)
     {
         $numArgs = func_num_args();
 
+        // Legacy: listInbox($status, $assignedUserId, $limit)
         if ($numArgs <= 2) {
             $limit = func_get_arg(2) ?? 200;
-            return $this->listInboxLegacy($statusCode, $assignedUserId, $limit);
+            return $this->listInboxLegacy($statusCode, $assignedUserId, (int)$limit);
         }
 
+        // Nuevo: listInbox($status, $assignedUserId, $page, $perPage)
         return $this->listInboxPaginated($statusCode, $assignedUserId, $page, $perPage);
     }
 
@@ -52,7 +56,9 @@ final class CasesRepo
             $params[':uid'] = $assignedUserId;
         }
 
-        if ($where) $sql .= " WHERE " . implode(" AND ", $where);
+        if ($where) {
+            $sql .= " WHERE " . implode(" AND ", $where);
+        }
 
         $sql .= " ORDER BY c.last_activity_at DESC, c.received_at DESC LIMIT {$limit}";
 
@@ -62,7 +68,8 @@ final class CasesRepo
     }
 
     /**
-     * Versión nueva con paginación
+     * Versión nueva con paginación.
+     * Devuelve ['data'=>..., 'pagination'=>...]
      */
     private function listInboxPaginated(?string $statusCode, ?int $assignedUserId, int $page = 1, int $perPage = 20): array
     {
@@ -73,13 +80,11 @@ final class CasesRepo
         $where = [];
         $params = [];
 
-        // Contar total de registros
         $countSql = "SELECT COUNT(*) as total
                      FROM cases c
                      JOIN case_statuses cs ON cs.id = c.status_id
                      LEFT JOIN users u ON u.id = c.assigned_user_id";
 
-        // Consulta principal
         $sql = "SELECT
                   c.id, c.case_number, c.subject,
                   c.requester_email, c.requester_name,
@@ -102,7 +107,7 @@ final class CasesRepo
 
         $whereClause = $where ? " WHERE " . implode(" AND ", $where) : "";
 
-        // Contar total
+        // Count total
         $countSql .= $whereClause;
         $stCount = $this->pdo->prepare($countSql);
         $stCount->execute($params);
@@ -121,11 +126,9 @@ final class CasesRepo
 
         $st = $this->pdo->prepare($sql);
 
-        // bind filters
         foreach ($params as $key => $value) {
             $st->bindValue($key, $value);
         }
-        // bind limit/offset
         $st->bindValue(':limit', $perPage, PDO::PARAM_INT);
         $st->bindValue(':offset', $offset, PDO::PARAM_INT);
 
@@ -217,7 +220,7 @@ final class CasesRepo
     }
 
     /**
-     * ✅ Se mantiene para NO romper: devuelve null si no existe.
+     * Mantener para no romper: devuelve null si no existe.
      */
     public function getStatusIdByCode(string $code): ?int
     {
@@ -228,8 +231,7 @@ final class CasesRepo
     }
 
     /**
-     * ✅ Nuevo (estricto): lanza excepción si no existe.
-     * Úsalo en flujos críticos como cerrar/escalar.
+     * Estricto: lanza excepción si no existe.
      */
     public function requireStatusIdByCode(string $code): int
     {
@@ -241,7 +243,7 @@ final class CasesRepo
     }
 
     /**
-     * ✅ Nuevo: carga el caso con lock (concurrencia segura).
+     * Carga caso con lock (requiere transacción activa para que el lock tenga sentido).
      */
     public function findCaseForUpdate(int $caseId): array
     {
@@ -255,13 +257,15 @@ final class CasesRepo
         ");
         $st->execute([':id' => $caseId]);
         $row = $st->fetch(PDO::FETCH_ASSOC);
-        if (!$row) throw new \RuntimeException("Caso no encontrado");
+        if (!$row) {
+            throw new \RuntimeException("Caso no encontrado");
+        }
         return $row;
     }
 
     /**
-     * ✅ Nuevo: escalar con observación obligatoria.
-     * Requiere que exista status code ESCALATED.
+     * Escalar: EN_PROCESO -> ESCALATED (observación obligatoria)
+     * Transacción incluida para que FOR UPDATE sea efectivo y el update sea atómico.
      */
     public function escalate(int $caseId, int $actorUserId, string $note): int
     {
@@ -270,37 +274,50 @@ final class CasesRepo
             throw new \InvalidArgumentException("Observación de escalamiento obligatoria");
         }
 
-        $case = $this->findCaseForUpdate($caseId);
-        if ((int)($case['is_final'] ?? 0) === 1) {
-            throw new \RuntimeException("Caso finalizado");
+        $this->pdo->beginTransaction();
+        try {
+            $case = $this->findCaseForUpdate($caseId);
+
+            if ((int)($case['is_final'] ?? 0) === 1) {
+                throw new \RuntimeException("Caso finalizado");
+            }
+            if (($case['status_code'] ?? '') !== 'EN_PROCESO') {
+                throw new \RuntimeException("Solo se puede escalar cuando el caso está EN_PROCESO");
+            }
+
+            $toStatusId = $this->requireStatusIdByCode('ESCALATED');
+
+            $st = $this->pdo->prepare("
+                UPDATE cases
+                SET
+                  status_id = :to_status,
+                  escalated_at = NOW(6),
+                  escalated_by_user_id = :uid,
+                  escalated_note = :note,
+                  last_activity_at = NOW(6),
+                  updated_at = NOW(6)
+                WHERE id = :id
+                LIMIT 1
+            ");
+            $st->execute([
+                ':to_status' => $toStatusId,
+                ':uid' => $actorUserId,
+                ':note' => $note,
+                ':id' => $caseId,
+            ]);
+
+            $this->pdo->commit();
+            return $toStatusId;
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
         }
-
-        $toStatusId = $this->requireStatusIdByCode('ESCALATED');
-
-        $st = $this->pdo->prepare("
-            UPDATE cases
-            SET
-              status_id = :to_status,
-              escalated_at = NOW(6),
-              escalated_by_user_id = :uid,
-              escalated_note = :note,
-              last_activity_at = NOW(6),
-              updated_at = NOW(6)
-            WHERE id = :id
-        ");
-        $st->execute([
-            ':to_status' => $toStatusId,
-            ':uid' => $actorUserId,
-            ':note' => $note,
-            ':id' => $caseId,
-        ]);
-
-        return $toStatusId;
     }
 
     /**
-     * ✅ Nuevo: cerrar con observación obligatoria + radicado obligatorio.
-     * $closedCode debe ser el code real del cerrado en tu BD (ej: 'CLOSED' o 'CERRADO').
+     * Cerrar: RESPONDIDO -> cerrado (observación + radicado obligatorios)
+     * $closedCode: code real del estado final en tu BD (ej: 'CERRADO').
+     * Transacción incluida para atomicidad.
      */
     public function close(int $caseId, int $actorUserId, string $note, string $ticket, string $closedCode): int
     {
@@ -314,39 +331,46 @@ final class CasesRepo
             throw new \InvalidArgumentException("Radicado obligatorio");
         }
 
-        // Si lo quieren estrictamente numérico, descomenta:
-        // if (!preg_match('/^\d+$/', $ticket)) {
-        //     throw new \InvalidArgumentException("El radicado debe ser numérico");
-        // }
+        $this->pdo->beginTransaction();
+        try {
+            $case = $this->findCaseForUpdate($caseId);
 
-        $case = $this->findCaseForUpdate($caseId);
-        if ((int)($case['is_final'] ?? 0) === 1) {
-            throw new \RuntimeException("Caso ya finalizado");
+            if ((int)($case['is_final'] ?? 0) === 1) {
+                throw new \RuntimeException("Caso ya finalizado");
+            }
+            if (($case['status_code'] ?? '') !== 'RESPONDIDO') {
+                throw new \RuntimeException("Solo se puede cerrar cuando el caso está RESPONDIDO");
+            }
+
+            $toStatusId = $this->requireStatusIdByCode($closedCode);
+
+            $st = $this->pdo->prepare("
+                UPDATE cases
+                SET
+                  status_id = :to_status,
+                  closed_at = NOW(6),
+                  closed_by_user_id = :uid,
+                  closed_ticket = :ticket,
+                  closed_note = :note,
+                  last_activity_at = NOW(6),
+                  updated_at = NOW(6)
+                WHERE id = :id
+                LIMIT 1
+            ");
+            $st->execute([
+                ':to_status' => $toStatusId,
+                ':uid' => $actorUserId,
+                ':ticket' => $ticket,
+                ':note' => $note,
+                ':id' => $caseId,
+            ]);
+
+            $this->pdo->commit();
+            return $toStatusId;
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
         }
-
-        $toStatusId = $this->requireStatusIdByCode($closedCode);
-
-        $st = $this->pdo->prepare("
-            UPDATE cases
-            SET
-              status_id = :to_status,
-              closed_at = NOW(6),
-              closed_by_user_id = :uid,
-              closed_ticket = :ticket,
-              closed_note = :note,
-              last_activity_at = NOW(6),
-              updated_at = NOW(6)
-            WHERE id = :id
-        ");
-        $st->execute([
-            ':to_status' => $toStatusId,
-            ':uid' => $actorUserId,
-            ':ticket' => $ticket,
-            ':note' => $note,
-            ':id' => $caseId,
-        ]);
-
-        return $toStatusId;
     }
 
     public function assignToUser(int $caseId, int $agentId, int $statusId): void
@@ -357,7 +381,8 @@ final class CasesRepo
                     assigned_at = NOW(6),
                     last_activity_at = NOW(6),
                     updated_at = NOW(6)
-                WHERE id = :cid";
+                WHERE id = :cid
+                LIMIT 1";
         $st = $this->pdo->prepare($sql);
         $st->execute([':aid' => $agentId, ':sid' => $statusId, ':cid' => $caseId]);
     }
@@ -404,4 +429,135 @@ final class CasesRepo
         $st->execute([':sid' => $statusId]);
         return (int)$st->fetchColumn();
     }
+
+    /**
+     * Inicio de gestión: ASIGNADO -> EN_PROCESO
+     * Mantiene firma original (incluye ip/ua) por compatibilidad.
+     * Transacción incluida.
+     */
+    public function startProcess(int $caseId, int $actorUserId, string $ip, string $ua): void
+    {
+        $this->pdo->beginTransaction();
+        try {
+            $row = $this->pdo->prepare("
+                SELECT c.id, c.assigned_user_id, c.status_id, cs.code AS status_code, c.in_process_at
+                FROM cases c
+                JOIN case_statuses cs ON cs.id = c.status_id
+                WHERE c.id = :id
+                FOR UPDATE
+            ");
+            $row->execute([':id' => $caseId]);
+            $c = $row->fetch(PDO::FETCH_ASSOC);
+
+            if (!$c) throw new \RuntimeException("Caso no existe");
+            if ((int)$c['assigned_user_id'] !== $actorUserId) throw new \RuntimeException("No eres el asignado");
+            if (($c['status_code'] ?? '') !== 'ASIGNADO') throw new \RuntimeException("El caso no está en ASIGNADO");
+
+            $toStatusId = $this->requireStatusIdByCode('EN_PROCESO');
+
+            $upd = $this->pdo->prepare("
+                UPDATE cases
+                SET status_id = :to_status,
+                    in_process_at = COALESCE(in_process_at, NOW(6)),
+                    last_activity_at = NOW(6),
+                    updated_at = NOW(6)
+                WHERE id = :id
+                LIMIT 1
+            ");
+            $upd->execute([':to_status' => $toStatusId, ':id' => $caseId]);
+
+            $this->pdo->commit();
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    /**
+     * Finaliza gestión: EN_PROCESO -> RESPONDIDO
+     * Mantiene firma original por compatibilidad.
+     * Transacción incluida.
+     */
+    public function finishProcess(int $caseId, int $actorUserId, string $ip, string $ua): void
+    {
+        $this->pdo->beginTransaction();
+        try {
+            $row = $this->pdo->prepare("
+                SELECT c.id, c.assigned_user_id, c.status_id, cs.code AS status_code, c.first_response_at
+                FROM cases c
+                JOIN case_statuses cs ON cs.id = c.status_id
+                WHERE c.id = :id
+                FOR UPDATE
+            ");
+            $row->execute([':id' => $caseId]);
+            $c = $row->fetch(PDO::FETCH_ASSOC);
+
+            if (!$c) throw new \RuntimeException("Caso no existe");
+            if ((int)$c['assigned_user_id'] !== $actorUserId) throw new \RuntimeException("No eres el asignado");
+            if (($c['status_code'] ?? '') !== 'EN_PROCESO') throw new \RuntimeException("El caso no está en EN_PROCESO");
+
+            $toStatusId = $this->requireStatusIdByCode('RESPONDIDO');
+
+            $upd = $this->pdo->prepare("
+                UPDATE cases
+                SET status_id = :to_status,
+                    first_response_at = COALESCE(first_response_at, NOW(6)),
+                    is_responded = 1,
+                    last_activity_at = NOW(6),
+                    updated_at = NOW(6)
+                WHERE id = :id
+                LIMIT 1
+            ");
+            $upd->execute([':to_status' => $toStatusId, ':id' => $caseId]);
+
+            $this->pdo->commit();
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    public function finishEscalation(int $caseId, int $actorUserId): int
+    {
+        $this->pdo->beginTransaction();
+        try {
+            $case = $this->findCaseForUpdate($caseId);
+
+            if ((int)($case['is_final'] ?? 0) === 1) {
+                throw new \RuntimeException("Caso finalizado");
+            }
+            if (($case['status_code'] ?? '') !== 'ESCALATED') {
+                throw new \RuntimeException("Solo se puede finalizar escalamiento cuando el caso está ESCALATED");
+            }
+
+            // Regresa a EN_PROCESO (tu “volver atrás”)
+            $toStatusId = $this->requireStatusIdByCode('EN_PROCESO');
+
+            $st = $this->pdo->prepare("
+                UPDATE cases
+                SET
+                status_id = :to_status,
+                escalated_finished_at = NOW(6),
+                escalated_finished_by_user_id = :uid,
+                last_activity_at = NOW(6),
+                updated_at = NOW(6)
+                WHERE id = :id
+                LIMIT 1
+            ");
+            $st->execute([
+                ':to_status' => $toStatusId,
+                ':uid' => $actorUserId,
+                ':id' => $caseId,
+            ]);
+
+            $this->pdo->commit();
+            return $toStatusId;
+        } catch (\Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+
+
 }

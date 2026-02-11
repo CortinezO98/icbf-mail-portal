@@ -22,7 +22,7 @@ final class CasesController
     private AttachmentsRepo $attachmentsRepo;
     private EventsRepo $eventsRepo; // se mantiene (no se rompe nada)
     private UsersRepo $usersRepo;
-    private CaseEventsRepo $caseEventsRepo; // nuevo
+    private CaseEventsRepo $caseEventsRepo; // auditoría
 
     public function __construct(private PDO $pdo, private array $config)
     {
@@ -129,11 +129,12 @@ final class CasesController
     }
 
     /**
-     * POST /cases/{id}/escalate
+     * POST /cases/{id}/start
+     * Transición: ASIGNADO -> EN_PROCESO
+     * Repo hace transacción; aquí NO abrimos transacción (evita "double beginTransaction").
      */
-    public function escalate(int $caseId): void
+    public function start(int $caseId): void
     {
-        // ✅ CSRF (mantener patrón del proyecto)
         Csrf::validate($_POST['_csrf'] ?? null);
 
         if (!Auth::check()) {
@@ -148,7 +149,123 @@ final class CasesController
             $this->redirect('/cases');
         }
 
-        // ✅ AGENTE solo puede operar casos asignados a él
+        if (Auth::hasRole('AGENTE') && !Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
+            if ((int)($case['assigned_user_id'] ?? 0) !== (int)Auth::id()) {
+                http_response_code(403);
+                echo "Forbidden";
+                exit;
+            }
+        }
+
+        try {
+            $fromStatusId = (int)($case['status_id'] ?? 0);
+
+            $ip = (string)($_SERVER['REMOTE_ADDR'] ?? '');
+            $ua = (string)($_SERVER['HTTP_USER_AGENT'] ?? '');
+
+            $this->casesRepo->startProcess($caseId, (int)Auth::id(), $ip, $ua);
+
+            $toStatusId = $this->casesRepo->requireStatusIdByCode('EN_PROCESO');
+
+            $this->caseEventsRepo->addStatusChange(
+                $caseId,
+                (int)Auth::id(),
+                'PORTAL',
+                $_SERVER['REMOTE_ADDR'] ?? null,
+                $_SERVER['HTTP_USER_AGENT'] ?? null,
+                'STARTED',
+                $fromStatusId ?: null,
+                $toStatusId ?: null,
+                ['note' => 'Inicio de gestión']
+            );
+
+            $this->flash('success', 'Gestión iniciada.');
+            $this->redirect('/cases/' . $caseId);
+        } catch (\Throwable $e) {
+            $this->flash('error', 'No se pudo iniciar la gestión: ' . $e->getMessage());
+            $this->redirect('/cases/' . $caseId);
+        }
+    }
+
+    /**
+     * POST /cases/{id}/finish
+     * Transición: EN_PROCESO -> RESPONDIDO
+     * Repo hace transacción; aquí NO abrimos transacción.
+     */
+    public function finish(int $caseId): void
+    {
+        Csrf::validate($_POST['_csrf'] ?? null);
+
+        if (!Auth::check()) {
+            http_response_code(401);
+            echo "Unauthorized";
+            exit;
+        }
+
+        $case = $this->casesRepo->findCase($caseId);
+        if (!$case) {
+            $this->flash('error', 'Caso no encontrado.');
+            $this->redirect('/cases');
+        }
+
+        if (Auth::hasRole('AGENTE') && !Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
+            if ((int)($case['assigned_user_id'] ?? 0) !== (int)Auth::id()) {
+                http_response_code(403);
+                echo "Forbidden";
+                exit;
+            }
+        }
+
+        try {
+            $fromStatusId = (int)($case['status_id'] ?? 0);
+
+            $ip = (string)($_SERVER['REMOTE_ADDR'] ?? '');
+            $ua = (string)($_SERVER['HTTP_USER_AGENT'] ?? '');
+
+            $this->casesRepo->finishProcess($caseId, (int)Auth::id(), $ip, $ua);
+
+            $toStatusId = $this->casesRepo->requireStatusIdByCode('RESPONDIDO');
+
+            $this->caseEventsRepo->addStatusChange(
+                $caseId,
+                (int)Auth::id(),
+                'PORTAL',
+                $_SERVER['REMOTE_ADDR'] ?? null,
+                $_SERVER['HTTP_USER_AGENT'] ?? null,
+                'RESPONDED',
+                $fromStatusId ?: null,
+                $toStatusId ?: null,
+                ['note' => 'Finaliza gestión / marcado como respondido']
+            );
+
+            $this->flash('success', 'Gestión finalizada. Caso marcado como RESPONDIDO.');
+            $this->redirect('/cases/' . $caseId);
+        } catch (\Throwable $e) {
+            $this->flash('error', 'No se pudo finalizar la gestión: ' . $e->getMessage());
+            $this->redirect('/cases/' . $caseId);
+        }
+    }
+
+    /**
+     * POST /cases/{id}/escalate
+     * Repo incluye transacción; aquí NO abrimos transacción.
+     */
+    public function escalate(int $caseId): void
+    {
+        Csrf::validate($_POST['_csrf'] ?? null);
+
+        if (!Auth::check()) {
+            http_response_code(401);
+            echo "Unauthorized";
+            exit;
+        }
+
+        $case = $this->casesRepo->findCase($caseId);
+        if (!$case) {
+            $this->flash('error', 'Caso no encontrado.');
+            $this->redirect('/cases');
+        }
+
         if (Auth::hasRole('AGENTE') && !Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
             if ((int)($case['assigned_user_id'] ?? 0) !== (int)Auth::id()) {
                 http_response_code(403);
@@ -160,14 +277,10 @@ final class CasesController
         $note = trim((string)($_POST['escalated_note'] ?? ''));
 
         try {
-            $this->pdo->beginTransaction();
-
             $fromStatusId = (int)($case['status_id'] ?? 0);
 
-            // ✅ usa ESCALATED interno
             $toStatusId = $this->casesRepo->escalate($caseId, (int)Auth::id(), $note);
 
-            // ✅ Evento en case_events (pro)
             $this->caseEventsRepo->addStatusChange(
                 $caseId,
                 (int)Auth::id(),
@@ -180,13 +293,9 @@ final class CasesController
                 ['note' => $note]
             );
 
-            $this->pdo->commit();
-
             $this->flash('success', 'Caso escalado correctamente.');
             $this->redirect('/cases/' . $caseId);
-
         } catch (\Throwable $e) {
-            if ($this->pdo->inTransaction()) $this->pdo->rollBack();
             $this->flash('error', 'No se pudo escalar: ' . $e->getMessage());
             $this->redirect('/cases/' . $caseId);
         }
@@ -194,10 +303,10 @@ final class CasesController
 
     /**
      * POST /cases/{id}/close
+     * Repo incluye transacción; aquí NO abrimos transacción.
      */
     public function close(int $caseId): void
     {
-        // ✅ CSRF
         Csrf::validate($_POST['_csrf'] ?? null);
 
         if (!Auth::check()) {
@@ -212,7 +321,6 @@ final class CasesController
             $this->redirect('/cases');
         }
 
-        // ✅ AGENTE solo puede operar casos asignados a él
         if (Auth::hasRole('AGENTE') && !Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
             if ((int)($case['assigned_user_id'] ?? 0) !== (int)Auth::id()) {
                 http_response_code(403);
@@ -225,14 +333,11 @@ final class CasesController
         $ticket = trim((string)($_POST['closed_ticket'] ?? ''));
 
         try {
-            $this->pdo->beginTransaction();
-
             $fromStatusId = (int)($case['status_id'] ?? 0);
 
-            // ✅ AQUÍ está el ajuste mínimo: tu BD usa CERRADO
+            // Mantener tu comportamiento: en tu BD el code final es CERRADO
             $toStatusId = $this->casesRepo->close($caseId, (int)Auth::id(), $note, $ticket, 'CERRADO');
 
-            // ✅ Evento en case_events
             $this->caseEventsRepo->addStatusChange(
                 $caseId,
                 (int)Auth::id(),
@@ -245,13 +350,9 @@ final class CasesController
                 ['note' => $note, 'ticket' => $ticket]
             );
 
-            $this->pdo->commit();
-
             $this->flash('success', 'Caso cerrado correctamente.');
             $this->redirect('/cases/' . $caseId);
-
         } catch (\Throwable $e) {
-            if ($this->pdo->inTransaction()) $this->pdo->rollBack();
             $this->flash('error', 'No se pudo cerrar: ' . $e->getMessage());
             $this->redirect('/cases/' . $caseId);
         }
@@ -274,4 +375,62 @@ final class CasesController
         $viewPath = dirname(__DIR__) . '/views/' . $view;
         include dirname(__DIR__) . '/views/layout.php';
     }
+
+    /**
+     * POST /cases/{id}/finish-escalation
+     * Transición: ESCALATED -> EN_PROCESO
+     */
+    public function finishEscalation(int $caseId): void
+    {
+        Csrf::validate($_POST['_csrf'] ?? null);
+
+        if (!Auth::check()) {
+            http_response_code(401);
+            echo "Unauthorized";
+            exit;
+        }
+
+        $case = $this->casesRepo->findCase($caseId);
+        if (!$case) {
+            $this->flash('error', 'Caso no encontrado.');
+            $this->redirect('/cases');
+        }
+
+        // AGENTE solo puede operar casos asignados a él
+        if (Auth::hasRole('AGENTE') && !Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
+            if ((int)($case['assigned_user_id'] ?? 0) !== (int)Auth::id()) {
+                http_response_code(403);
+                echo "Forbidden";
+                exit;
+            }
+        }
+
+        try {
+            $fromStatusId = (int)($case['status_id'] ?? 0);
+
+            $toStatusId = $this->casesRepo->finishEscalation($caseId, (int)Auth::id());
+
+            $this->caseEventsRepo->addStatusChange(
+                $caseId,
+                (int)Auth::id(),
+                'PORTAL',
+                $_SERVER['REMOTE_ADDR'] ?? null,
+                $_SERVER['HTTP_USER_AGENT'] ?? null,
+                'ESCALATION_FINISHED',
+                $fromStatusId ?: null,
+                $toStatusId ?: null,
+                ['note' => 'Finaliza escalamiento']
+            );
+
+            $this->flash('success', 'Escalamiento finalizado. Puedes continuar la gestión.');
+            $this->redirect('/cases/' . $caseId);
+
+        } catch (\Throwable $e) {
+            $this->flash('error', 'No se pudo finalizar escalamiento: ' . $e->getMessage());
+            $this->redirect('/cases/' . $caseId);
+        }
+    }
+
+
+
 }
