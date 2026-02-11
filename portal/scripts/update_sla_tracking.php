@@ -1,25 +1,36 @@
 <?php
-// File: portal/scripts/update_sla_tracking.php
-<?php
+declare(strict_types=1);
+
 require_once __DIR__ . '/../app/config/config.php';
 require_once __DIR__ . '/../app/config/db.php';
+
+require_once __DIR__ . '/../app/services/BusinessTime.php';
+require_once __DIR__ . '/../app/repos/HolidayRepo.php';
 require_once __DIR__ . '/../app/repos/MetricsRepo.php';
 
-$pdo = \App\Config\pdo();
+function logl(string $m): void {
+    echo date('Y-m-d H:i:s') . " " . $m . PHP_EOL;
+}
+
+$config = \App\Config\load_config();
+$pdo    = \App\Config\pdo($config);
+
+// Debug: confirma que es la misma BD/puerto que phpMyAdmin
+$who = $pdo->query("SELECT DATABASE() db, @@hostname host, @@port port")->fetch(PDO::FETCH_ASSOC);
+logl("DB connected db={$who['db']} host={$who['host']} port={$who['port']}");
+
 $metricsRepo = new \App\Repos\MetricsRepo($pdo);
 
 try {
-    // 1. Inicializar casos nuevos
+    logl("SLA TRACKING START");
     $initialized = $metricsRepo->initializeSlaTracking();
-    
-    // 2. Actualizar tracking existente
+    logl("initializeSlaTracking inserted={$initialized}");
+
     $updated = $metricsRepo->updateSlaTracking();
-    
-    echo date('Y-m-d H:i:s') . " - SLA Tracking: $initialized inicializados, $updated actualizados\n";
-} catch (Exception $e) {
-    echo date('Y-m-d H:i:s') . " - ERROR: " . $e->getMessage() . "\n";
+    logl("updateSlaTracking updated_rows={$updated}");
+
+    logl("SLA TRACKING END OK");
+} catch (Throwable $e) {
+    logl("ERROR: " . $e->getMessage());
     exit(1);
 }
-
-
-?>

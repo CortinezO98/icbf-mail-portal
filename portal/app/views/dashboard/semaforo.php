@@ -3,8 +3,6 @@ declare(strict_types=1);
 
 use function App\Config\url;
 
-
-
 function fmt_dt(?string $dt): string {
     if (!$dt) return '—';
     $ts = strtotime($dt);
@@ -21,6 +19,36 @@ function fmt_date(?string $dt): string {
 
 function n(mixed $v): int {
     return (int)($v ?? 0);
+}
+
+/**
+ * Devuelve:
+ *  - value: string (solo número, ej: "3.5")
+ *  - unit: string (texto pequeño abajo, ej: "h hábiles" / "h" / "días")
+ * SIN romper: si no viene business_minutes, cae a minutos calendario o días.
+ */
+function caseTimeValue(array $c): array {
+    // Preferimos minutos hábiles (aunque sea 0)
+    if (array_key_exists('business_minutes', $c) && $c['business_minutes'] !== null) {
+        $biz = n($c['business_minutes']);
+        $h = round($biz / 60, 1);
+        return ['value' => number_format($h, 1, '.', ''), 'unit' => 'h hábiles'];
+    }
+
+    // fallback: minutos calendario si existen
+    $mins = n($c['minutes_since_creation'] ?? $c['minutos_desde_recibido'] ?? 0);
+    if ($mins > 0) {
+        $h = round($mins / 60, 1);
+        return ['value' => number_format($h, 1, '.', ''), 'unit' => 'h'];
+    }
+
+    // fallback: días si existen
+    $days = n($c['dias_desde_recibido'] ?? $c['days_since_creation'] ?? 0);
+    if ($days > 0) {
+        return ['value' => (string)$days, 'unit' => 'días'];
+    }
+
+    return ['value' => '—', 'unit' => ''];
 }
 
 $estado = strtoupper((string)($estado ?? ''));
@@ -59,6 +87,14 @@ $cfg = $meta[$estado] ?? [
 ];
 
 $total = count($cases);
+
+// Leyenda contractual (UI)
+$semaforoLegend = [
+    'VERDE' => '0 a < 5 horas hábiles',
+    'AMARILLO' => '5 a 12 horas hábiles',
+    'ROJO' => '> 12 horas hábiles',
+];
+
 ?>
 
 <div class="dashboard-container">
@@ -170,7 +206,7 @@ $total = count($cases);
                                 <th style="width: 170px;">Estado</th>
                                 <th style="width: 190px;">Agente</th>
                                 <th style="width: 150px;">Recibido</th>
-                                <th style="width: 120px;" class="text-end">Días</th>
+                                <th style="width: 160px;" class="text-end">Horas hábiles</th>
                                 <th style="width: 170px;">Vence (SLA)</th>
                                 <th style="width: 120px;" class="text-end">Acción</th>
                             </tr>
@@ -187,13 +223,13 @@ $total = count($cases);
                                 $statusCode = (string)($c['status_code'] ?? '');
                                 $assignedTo = (string)($c['assigned_to'] ?? '—');
                                 $receivedAt = (string)($c['received_at'] ?? '');
-                                $days = n($c['dias_desde_recibido'] ?? 0);
                                 $dueAt = (string)($c['sla_due_at'] ?? '');
                                 $breached = (int)($c['breached'] ?? 0);
 
+                                $t = caseTimeValue($c); // ['value','unit']
+
                                 $rowClass = $cfg['tableRowClass'];
                                 if ($breached === 1) {
-                                    // refuerza visualmente si ya incumplió
                                     $rowClass = 'table-danger';
                                 }
 
@@ -244,9 +280,14 @@ $total = count($cases);
                                 </td>
 
                                 <td class="text-end">
-                                    <span class="badge bg-dark">
-                                        <?= (int)$days ?>
-                                    </span>
+                                    <div class="d-inline-block text-end">
+                                        <span class="badge bg-dark px-3">
+                                            <?= esc($t['value']) ?>
+                                        </span>
+                                        <?php if ($t['unit'] !== ''): ?>
+                                            <div class="small text-muted mt-1"><?= esc($t['unit']) ?></div>
+                                        <?php endif; ?>
+                                    </div>
                                 </td>
 
                                 <td class="small">
@@ -275,9 +316,9 @@ $total = count($cases);
                 Semáforo calculado desde <span class="fw-semibold">received_at</span> y tracking (<span class="fw-semibold">case_sla_tracking</span>).
             </div>
             <div class="small text-muted">
-                <span class="badge bg-success me-1">VERDE</span> 0–1 días
-                <span class="badge bg-warning text-dark ms-2 me-1">AMARILLO</span> 2–3 días
-                <span class="badge bg-danger ms-2 me-1">ROJO</span> 4+ días
+                <span class="badge bg-success me-1">VERDE</span> <?= esc($semaforoLegend['VERDE']) ?>
+                <span class="badge bg-warning text-dark ms-2 me-1">AMARILLO</span> <?= esc($semaforoLegend['AMARILLO']) ?>
+                <span class="badge bg-danger ms-2 me-1">ROJO</span> <?= esc($semaforoLegend['ROJO']) ?>
             </div>
         </div>
         <?php endif; ?>
@@ -321,7 +362,6 @@ $total = count($cases);
         });
     }
 
-    // foco rápido
     window.addEventListener('keydown', (e) => {
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
             e.preventDefault();
@@ -334,7 +374,6 @@ $total = count($cases);
 </script>
 
 <style>
-/* Mantiene coherencia con dashboard/index.php */
 .dashboard-container { padding: 1rem; }
 .card { border-radius: 10px; border: 1px solid #e9ecef; }
 .table-responsive { border-radius: 10px; }

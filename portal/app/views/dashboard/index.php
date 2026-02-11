@@ -4,7 +4,6 @@ declare(strict_types=1);
 use App\Auth\Auth;
 use function App\Config\url;
 
-
 function n($v): int { return (int)($v ?? 0); }
 function f($v): float { return (float)($v ?? 0); }
 function dt($v): string {
@@ -63,12 +62,18 @@ $rojoPct = $totalSLA > 0 ? ($slaRojo / $totalSLA) * 100 : 0;
 // tasa respuesta (sobre abiertos del tablero)
 $responseRate = $openTotal > 0 ? round(($stRespondido / $openTotal) * 100, 1) : 0;
 
-// hints/leyendas (configurable por backend)
-$semaforoHint = $summary['semaforo_hint'] ?? 'El semáforo se calcula automáticamente según la política de ANS (SLA) configurada.';
+/**
+ * Hints/leyendas (configurable por backend)
+ * Ajuste recomendado: si backend no manda leyenda/hint, dejar claro que ahora es por horas hábiles.
+ * (No afecta funcionalidad: solo texto UI.)
+ */
+$semaforoHint = $summary['semaforo_hint']
+    ?? 'Semáforo calculado por horas hábiles (L–V 08:00–17:00).';
+
 $semaforoLegend = $summary['semaforo_legend'] ?? [
-    'VERDE' => 'Dentro de plazo',
-    'AMARILLO' => 'Próximo a vencer',
-    'ROJO' => 'Prioridad alta / posible incumplimiento',
+    'VERDE' => '0 a < 5 horas hábiles',
+    'AMARILLO' => '5 a 12 horas hábiles',
+    'ROJO' => '> 12 horas hábiles',
 ];
 
 // Tablas accionables (compatibilidad)
@@ -88,13 +93,27 @@ function caseSender(array $c): string {
 function caseStatus(array $c): string {
     return (string)($c['status_name'] ?? $c['status_code'] ?? '');
 }
+
+/**
+ * Ajuste recomendado (SIN romper):
+ * - Si business_minutes existe (aunque sea 0) lo mostramos como "h hábiles"
+ * - Si no existe, fallback viejo por minutos/días calendario
+ */
 function caseTimeLabel(array $c): string {
+    if (array_key_exists('business_minutes', $c) && $c['business_minutes'] !== null) {
+        $biz = n($c['business_minutes']);
+        return round($biz / 60, 1) . ' h hábiles';
+    }
+
     $mins = n($c['minutes_since_creation'] ?? $c['minutos_desde_recibido'] ?? 0);
     if ($mins > 0) return round($mins / 60, 1) . ' h';
+
     $days = n($c['days_since_creation'] ?? $c['dias_desde_recibido'] ?? $c['dias_desde_creacion'] ?? 0);
     if ($days > 0) return $days . ' días';
+
     return '—';
 }
+
 ?>
 
 <div class="dashboard-container">
