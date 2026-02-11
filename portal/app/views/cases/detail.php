@@ -68,10 +68,6 @@ $caseId = (int)($case['id'] ?? 0);
       default   => 'alert-info'
     };
   ?>
-  <div class="alert <?= esc($cls) ?> alert-dismissible fade show" role="alert">
-    <?= nl2br(esc($msg)) ?>
-    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-  </div>
 <?php endif; ?>
 
 <div class="page-title">

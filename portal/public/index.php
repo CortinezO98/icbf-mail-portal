@@ -120,7 +120,7 @@ try {
     // Dashboard (Supervisor/Admin)
     if ($path === '/dashboard' && $method === 'GET') {
         \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR', 'AGENT']);
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR', 'AGENTE']);
         (new \App\Controllers\DashboardController($pdo, $config))->index();
         exit;
     }
@@ -129,7 +129,7 @@ try {
     // /dashboard/semaforo/verde | /dashboard/semaforo/amarillo | /dashboard/semaforo/rojo
     if (preg_match('#^/dashboard/semaforo/(verde|amarillo|rojo)$#i', $path, $m) && $method === 'GET') {
         \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR', 'AGENTE']);
         $estado = strtolower($m[1]);
         (new \App\Controllers\DashboardController($pdo, $config))->semaforo($estado);
         exit;
