@@ -16,6 +16,9 @@ final class AuthController
 
     public function __construct(private PDO $pdo, private array $config)
     {
+        // ✅ Asegura sesión iniciada SIEMPRE para este controlador
+        Auth::initSession($this->config);
+
         $this->usersRepo = new UsersRepo($pdo);
     }
 
@@ -28,6 +31,9 @@ final class AuthController
 
     public function login(): void
     {
+        // ✅ Asegura sesión iniciada incluso si algún flujo no pasó por __construct
+        Auth::initSession($this->config);
+
         Csrf::validate($_POST['_csrf'] ?? null);
 
         $login = trim((string)($_POST['login'] ?? ''));
@@ -40,13 +46,23 @@ final class AuthController
         }
 
         $user = $this->usersRepo->findByUsernameOrEmail($login);
-        if (!$user || !password_verify($password, $user['password_hash'])) {
+        if (!$user || !password_verify($password, (string)($user['password_hash'] ?? ''))) {
             $_SESSION['_flash_error'] = "Credenciales inválidas.";
             header('Location: ' . url('/login'));
             exit;
         }
 
+        // ✅ Trae roles (robusto) y si no hay, puedes definir un default si deseas
         $roles = $this->usersRepo->rolesForUser((int)$user['id']);
+
+        // (Opcional) Si quieres forzar que TODO usuario tenga al menos AGENTE:
+        // if (empty($roles)) $roles = ['AGENTE'];
+
+        // ✅ Seguridad: evita session fixation
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_regenerate_id(true);
+        }
+
         Auth::login($user, $roles);
 
         header('Location: ' . url('/cases'));
@@ -55,6 +71,8 @@ final class AuthController
 
     public function logout(): void
     {
+        Auth::initSession($this->config);
+
         Csrf::validate($_POST['_csrf'] ?? null);
         Auth::logout();
         header('Location: ' . url('/login'));

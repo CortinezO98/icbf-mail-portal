@@ -10,9 +10,8 @@ final class Auth
         if (session_status() === PHP_SESSION_ACTIVE) return;
 
         $cookieParams = session_get_cookie_params();
-        session_name($config['session_name']);
+        session_name($config['session_name'] ?? 'APPSESSID');
 
-        // Secure-ish defaults (in local dev, https might be false; keep secure=false for localhost)
         session_set_cookie_params([
             'lifetime' => 0,
             'path' => $cookieParams['path'] ?? '/',
@@ -40,34 +39,115 @@ final class Auth
         return isset($_SESSION['user']['id']) ? (int)$_SESSION['user']['id'] : null;
     }
 
+    /**
+     * ✅ Normaliza un role code: trim + strtoupper
+     */
+    private static function normRole(string $roleCode): string
+    {
+        return strtoupper(trim($roleCode));
+    }
+
+    /**
+     * ✅ Devuelve roles siempre como array limpio (normalizados, únicos)
+     */
     public static function roles(): array
     {
-        return $_SESSION['user']['roles'] ?? [];
+        $roles = $_SESSION['user']['roles'] ?? [];
+
+        // si por algún motivo llega como string "ADMIN,AGENTE"
+        if (is_string($roles)) {
+            $roles = preg_split('/[,;|]/', $roles) ?: [];
+        }
+
+        if (!is_array($roles)) {
+            return [];
+        }
+
+        $roles = array_map(
+            fn($r) => self::normRole((string)$r),
+            $roles
+        );
+
+        // remove vacíos + únicos
+        $roles = array_values(array_unique(array_filter($roles, fn($r) => $r !== '')));
+
+        // persistimos ya normalizado para que todo el sistema lo lea bien
+        $_SESSION['user']['roles'] = $roles;
+
+        return $roles;
     }
 
+    /**
+     * ✅ Case-insensitive y tolerante a espacios
+     */
     public static function hasRole(string $roleCode): bool
     {
-        return in_array($roleCode, self::roles(), true);
+        $needle = self::normRole($roleCode);
+        return in_array($needle, self::roles(), true);
     }
 
+    /**
+     * ✅ Útil para validaciones rápidas
+     */
+    public static function hasAnyRole(array $roleCodes): bool
+    {
+        foreach ($roleCodes as $code) {
+            if (self::hasRole((string)$code)) return true;
+        }
+        return false;
+    }
+
+    public static function isAdmin(): bool
+    {
+        return self::hasRole('ADMIN');
+    }
+
+    public static function isSupervisor(): bool
+    {
+        return self::hasAnyRole(['SUPERVISOR', 'ADMIN']);
+    }
+
+    public static function isAgent(): bool
+    {
+        return self::hasRole('AGENTE');
+    }
+
+    /**
+     * ✅ Login guarda roles normalizados
+     */
     public static function login(array $user, array $roleCodes): void
     {
+        $normalized = array_values(array_unique(array_filter(array_map(
+            fn($r) => self::normRole((string)$r),
+            $roleCodes
+        ), fn($r) => $r !== '')));
+
         $_SESSION['user'] = [
-            'id' => (int)$user['id'],
-            'username' => $user['username'] ?? '',
-            'email' => $user['email'] ?? '',
-            'full_name' => $user['full_name'] ?? '',
-            'roles' => $roleCodes,
+            'id' => (int)($user['id'] ?? 0),
+            'username' => (string)($user['username'] ?? ''),
+            'email' => (string)($user['email'] ?? ''),
+            'full_name' => (string)($user['full_name'] ?? ''),
+            'roles' => $normalized,
         ];
     }
 
     public static function logout(): void
     {
         $_SESSION = [];
+
         if (ini_get('session.use_cookies')) {
             $params = session_get_cookie_params();
-            setcookie(session_name(), '', time() - 42000, $params['path'], $params['domain'], $params['secure'], $params['httponly']);
+            setcookie(
+                session_name(),
+                '',
+                time() - 42000,
+                $params['path'] ?? '/',
+                $params['domain'] ?? '',
+                !empty($params['secure']),
+                !empty($params['httponly'])
+            );
         }
+
         session_destroy();
     }
 }

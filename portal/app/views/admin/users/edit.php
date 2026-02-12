@@ -201,29 +201,51 @@ $userRoles = $user['role_ids'] ?? [];
                         </div>
                         
                         <!-- Información del sistema -->
+                        <!-- Información del sistema -->
                         <div class="alert alert-light border mt-3">
                             <div class="row small">
                                 <div class="col-md-6">
+
                                     <div class="mb-2">
                                         <i class="bi bi-calendar me-1 text-muted"></i>
                                         <strong>Último acceso:</strong>
-                                        <?php if ($user['last_login_at']): ?>
-                                            <?= esc(date('d/m/Y H:i', strtotime($user['last_login_at']))) ?>
+                                        <?php
+                                            $lastLogin = $user['last_login_at'] ?? null;
+                                            if (!empty($lastLogin) && strtotime((string)$lastLogin) !== false):
+                                        ?>
+                                            <?= esc(date('d/m/Y H:i', strtotime((string)$lastLogin))) ?>
                                         <?php else: ?>
                                             <span class="text-muted">Nunca</span>
                                         <?php endif; ?>
                                     </div>
+
                                     <div>
                                         <i class="bi bi-calendar-plus me-1 text-muted"></i>
                                         <strong>Creado:</strong>
-                                        <?= esc(date('d/m/Y', strtotime($user['created_at'] ?? ''))) ?>
+                                        <?php
+                                            $created = $user['created_at'] ?? null;
+                                            if (!empty($created) && strtotime((string)$created) !== false):
+                                        ?>
+                                            <?= esc(date('d/m/Y', strtotime((string)$created))) ?>
+                                        <?php else: ?>
+                                            <span class="text-muted">-</span>
+                                        <?php endif; ?>
                                     </div>
+
                                 </div>
+
                                 <div class="col-md-6">
                                     <div>
                                         <i class="bi bi-calendar-check me-1 text-muted"></i>
                                         <strong>Actualizado:</strong>
-                                        <?= esc(date('d/m/Y', strtotime($user['updated_at'] ?? ''))) ?>
+                                        <?php
+                                            $updated = $user['updated_at'] ?? null;
+                                            if (!empty($updated) && strtotime((string)$updated) !== false):
+                                        ?>
+                                            <?= esc(date('d/m/Y', strtotime((string)$updated))) ?>
+                                        <?php else: ?>
+                                            <span class="text-muted">-</span>
+                                        <?php endif; ?>
                                     </div>
                                 </div>
                             </div>

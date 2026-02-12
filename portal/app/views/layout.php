@@ -10,18 +10,78 @@ require_once __DIR__ . '/_helpers.php';
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 $isLogin = str_ends_with($path, '/login') || $path === '/login';
 
-$roleIsSupervisor = Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN');
-$roleIsAgent = Auth::hasRole('AGENTE') || Auth::hasRole('AGENTE'); 
-$enableSemaforoRoutes = false;
+/**
+ * ✅ Normalizador de roles
+ */
+$normRole = static fn(string $r): string => strtoupper(trim($r));
 
+/**
+ * ✅ Usuario en sesión
+ */
 $user = Auth::user() ?? [];
 $fullName = (string)($user['full_name'] ?? $user['username'] ?? '');
-$rolesLabel = '';
 
+/**
+ * ✅ Roles del usuario logueado:
+ * sesión -> fallback BD si vienen vacíos
+ * NOTA: aquí usamos $pdo si existe (llega vía extract($params) desde el controller)
+ *
+ * 🚨 IMPORTANTE:
+ * Usamos $userRoles (NO $roles) para no pisar la variable $roles
+ * que usan vistas como admin/users/create.php (lista de roles disponibles).
+ */
+$userRoles = [];
 if (Auth::check()) {
-    $roles = Auth::roles();
-    $rolesLabel = $roles ? implode(', ', $roles) : '';
+    // 1) Roles desde sesión
+    $userRoles = Auth::roles() ?: [];
+    $userRoles = array_values(array_unique(array_filter(array_map($normRole, $userRoles))));
+
+    // 2) Si vienen vacíos, fallback a BD
+    if (empty($userRoles) && isset($pdo) && $pdo instanceof PDO && !empty($user['id'])) {
+        try {
+            $sql = "
+                SELECT r.code
+                FROM user_roles ur
+                JOIN roles r ON r.id = ur.role_id
+                WHERE ur.user_id = :uid
+                ORDER BY r.code
+            ";
+            $st = $pdo->prepare($sql);
+            $st->execute([':uid' => (int)$user['id']]);
+            $userRoles = $st->fetchAll(PDO::FETCH_COLUMN) ?: [];
+            $userRoles = array_values(array_unique(array_filter(array_map($normRole, $userRoles))));
+
+            // Guardamos en sesión para no consultar BD en cada request
+            $_SESSION['user']['roles'] = $userRoles;
+
+        } catch (\Throwable $e) {
+            $userRoles = [];
+        }
+    }
+
+    // 3) Último fallback: string "ADMIN,AGENTE"
+    if (empty($userRoles)) {
+        $maybe = $user['roles'] ?? $user['roles_label'] ?? null;
+        if (is_string($maybe) && trim($maybe) !== '') {
+            $tmp = preg_split('/[,;|]/', $maybe) ?: [];
+            $userRoles = array_values(array_unique(array_filter(array_map($normRole, $tmp))));
+            $_SESSION['user']['roles'] = $userRoles;
+        }
+    }
 }
+
+$userRolesLabel = $userRoles ? implode(', ', $userRoles) : '';
+
+/**
+ * ✅ Helpers de roles (robustos)
+ * Usan $userRoles ya normalizados (sesión o BD).
+ */
+$hasRole = static fn(string $code): bool => in_array($normRole($code), $userRoles, true);
+
+$roleIsSupervisor = $hasRole('SUPERVISOR') || $hasRole('ADMIN');
+$roleIsAgent      = $hasRole('AGENTE');
+
+$enableSemaforoRoutes = false;
 
 ?>
 <!DOCTYPE html>
@@ -32,24 +92,20 @@ if (Auth::check()) {
     <meta name="description" content="Sistema de gestión de correspondencia ICBF">
     <title>ICBF - Portal de Correos</title>
 
-    <!-- Bootstrap CSS con SRI para seguridad -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
           rel="stylesheet"
           integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
           crossorigin="anonymous">
 
-    <!-- Bootstrap Icons -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
           rel="stylesheet">
 
-    <!-- Animate.css -->
     <link href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css"
           rel="stylesheet">
 
-    <!-- ✅ SweetAlert2 (UNA sola vez - aquí en head para que exista antes del flash) -->
+    <!-- ✅ SweetAlert2 -->
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
-    <!-- Estilos propios -->
     <link href="<?= esc(url('/assets/css/app.css?v=2')) ?>" rel="stylesheet">
 
     <style>
@@ -88,6 +144,12 @@ if (Auth::check()) {
             outline: 2px solid var(--color-primary-dark);
             outline-offset: 2px;
         }
+
+        .swal2-html-container code{
+            padding: .15rem .35rem;
+            border-radius: .35rem;
+            background: rgba(0,0,0,.06);
+        }
     </style>
 </head>
 
@@ -125,7 +187,7 @@ if (Auth::check()) {
                         </a>
                     </li>
 
-                    <!-- ✅ Dashboard visible para Supervisor/Admin y también para Agente -->
+                    <!-- ✅ Dashboard Supervisor/Admin y Agente -->
                     <?php if ($roleIsSupervisor || $roleIsAgent): ?>
                         <li class="nav-item">
                             <a class="nav-link <?= is_active_prefix($path, '/dashboard') ? 'active' : '' ?>"
@@ -137,7 +199,7 @@ if (Auth::check()) {
                         </li>
                     <?php endif; ?>
 
-                    <!-- ✅ Reportes solo para Supervisor/Admin -->
+                    <!-- ✅ Reportes solo Supervisor/Admin -->
                     <?php if ($roleIsSupervisor): ?>
                         <li class="nav-item">
                             <a class="nav-link <?= is_active_prefix($path, '/reports') ? 'active' : '' ?>"
@@ -148,7 +210,7 @@ if (Auth::check()) {
                             </a>
                         </li>
 
-                        <?php if (Auth::hasRole('ADMIN')): ?>
+                        <?php if ($hasRole('ADMIN')): ?>
                             <li class="nav-item dropdown">
                                 <a class="nav-link dropdown-toggle <?= is_active_prefix($path, '/admin') ? 'active' : '' ?>"
                                    href="#"
@@ -210,11 +272,11 @@ if (Auth::check()) {
                     <?php if (Auth::check()): ?>
                         <div class="text-white small text-end">
                             <div class="fw-semibold" id="userFullName"><?= esc($fullName) ?></div>
-                            <?php if ($rolesLabel !== ''): ?>
-                                <div class="opacity-75">
-                                    <span class="badge badge-role" aria-label="Roles asignados"><?= esc($rolesLabel) ?></span>
-                                </div>
-                            <?php endif; ?>
+                            <div class="opacity-75">
+                                <span class="badge badge-role" aria-label="Roles asignados">
+                                    <?= esc($userRolesLabel !== '' ? $userRolesLabel : 'SIN ROLES') ?>
+                                </span>
+                            </div>
                         </div>
 
                         <form method="post"
@@ -254,7 +316,7 @@ if (Auth::check()) {
 
 <script>
 /**
- * Flash -> SweetAlert (global)
+ * ✅ Flash -> SweetAlert (soporta HTML y texto)
  */
 window.addEventListener('DOMContentLoaded', function () {
   <?php if (!empty($flash) && is_array($flash)): ?>
@@ -264,17 +326,24 @@ window.addEventListener('DOMContentLoaded', function () {
     const iconMap = { success: 'success', error: 'error', warning: 'warning', info: 'info' };
     const icon = iconMap[type] || 'info';
 
-    Swal.fire({
+    const looksHtml = /<\/?[a-z][\s\S]*>/i.test(message);
+
+    const payload = {
       icon: icon,
       title: (icon === 'success' ? 'Listo' : (icon === 'error' ? 'Error' : 'Atención')),
-      text: message,
       confirmButtonText: 'Aceptar'
-    });
+    };
+
+    if (looksHtml) payload.html = message;
+    else payload.text = message;
+
+    if (window.Swal && typeof Swal.fire === 'function') Swal.fire(payload);
+    else alert(message);
   <?php endif; ?>
 });
 
 /**
- * Confirmaciones globales para forms y links.
+ * ✅ Confirmaciones globales para forms y links.
  */
 document.addEventListener('click', function (e) {
   const el = e.target.closest('[data-confirm="true"]');

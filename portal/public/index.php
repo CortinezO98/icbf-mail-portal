@@ -34,7 +34,7 @@ $config = \App\Config\load_config();
 \App\Auth\Auth::initSession($config);
 
 $pdo = \App\Config\pdo();
-
+$GLOBALS['pdo'] = $pdo;
 $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 
@@ -90,7 +90,7 @@ try {
     if (preg_match('#^/cases/(\d+)/start$#', $path, $m) && $method === 'POST') {
         \App\Middleware\require_login();
         // Agente puede iniciar gestión (y también admin/supervisor si quieres permitir soporte)
-        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE','AGENT']);
+        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE']);
         $caseId = (int)$m[1];
         (new \App\Controllers\CasesController($pdo, $config))->start($caseId);
         exit;
@@ -99,7 +99,7 @@ try {
     // FINISH: EN_PROCESO -> RESPONDIDO
     if (preg_match('#^/cases/(\d+)/finish$#', $path, $m) && $method === 'POST') {
         \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE','AGENT']);
+        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE']);
         $caseId = (int)$m[1];
         (new \App\Controllers\CasesController($pdo, $config))->finish($caseId);
         exit;
@@ -108,7 +108,7 @@ try {
     // Escalar caso
     if (preg_match('#^/cases/(\d+)/escalate$#', $path, $m) && $method === 'POST') {
         \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE','AGENT']);
+        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE']);
         $caseId = (int)$m[1];
         (new \App\Controllers\CasesController($pdo, $config))->escalate($caseId);
         exit;
@@ -117,7 +117,7 @@ try {
     // FINALIZAR ESCALAMIENTO: ESCALATED -> EN_PROCESO
     if (preg_match('#^/cases/(\d+)/finish-escalation$#', $path, $m) && $method === 'POST') {
         \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE','AGENT']);
+        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE']);
         $caseId = (int)$m[1];
         (new \App\Controllers\CasesController($pdo, $config))->finishEscalation($caseId);
         exit;
@@ -127,7 +127,7 @@ try {
     // Cerrar caso
     if (preg_match('#^/cases/(\d+)/close$#', $path, $m) && $method === 'POST') {
         \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE','AGENT']);
+        \App\Middleware\require_role(['ADMIN','SUPERVISOR','AGENTE']);
         $caseId = (int)$m[1];
         (new \App\Controllers\CasesController($pdo, $config))->close($caseId);
         exit;
@@ -203,110 +203,116 @@ try {
     // NUEVAS RUTAS DE ADMINISTRACIÓN DE USUARIOS
     // ============================================
 
-    // Users admin (ADMIN only) - Lista
-    if ($path === '/admin/users' && $method === 'GET') {
-        \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN']);
-        (new \App\Controllers\UsersAdminController($pdo, $config))->index();
-        exit;
-    }
+    // // Users admin (ADMIN only) - Lista
+    // if ($path === '/admin/users' && $method === 'GET') {
+    //     \App\Middleware\require_login();
+    //     \App\Middleware\require_role(['ADMIN']);
+    //     (new \App\Controllers\UsersAdminController($pdo, $config))->index();
+    //     exit;
+    // }
 
-    // Crear usuario - Formulario
-    if ($path === '/admin/users/create' && $method === 'GET') {
-        \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN']);
-        (new \App\Controllers\UsersAdminController($pdo, $config))->showCreate();
-        exit;
-    }
+    // // Crear usuario - Formulario
+    // if ($path === '/admin/users/create' && $method === 'GET') {
+    //     \App\Middleware\require_login();
+    //     \App\Middleware\require_role(['ADMIN']);
+    //     (new \App\Controllers\UsersAdminController($pdo, $config))->showCreate();
+    //     exit;
+    // }
 
-    // Crear usuario - Procesar
-    if ($path === '/admin/users/create' && $method === 'POST') {
-        \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN']);
-        (new \App\Controllers\UsersAdminController($pdo, $config))->create();
-        exit;
-    }
+    // // Crear usuario - Procesar
+    // if ($path === '/admin/users/create' && $method === 'POST') {
+    //     \App\Middleware\require_login();
+    //     \App\Middleware\require_role(['ADMIN']);
+    //     (new \App\Controllers\UsersAdminController($pdo, $config))->create();
+    //     exit;
+    // }
 
-    // Editar usuario - Formulario
-    if (preg_match('#^/admin/users/edit/(\d+)$#', $path, $m) && $method === 'GET') {
-        \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN']);
-        $userId = (int)$m[1];
-        (new \App\Controllers\UsersAdminController($pdo, $config))->showEdit($userId);
-        exit;
-    }
+    // // Editar usuario - Formulario
+    // if (preg_match('#^/admin/users/edit/(\d+)$#', $path, $m) && $method === 'GET') {
+    //     \App\Middleware\require_login();
+    //     \App\Middleware\require_role(['ADMIN']);
+    //     $userId = (int)$m[1];
+    //     (new \App\Controllers\UsersAdminController($pdo, $config))->showEdit($userId);
+    //     exit;
+    // }
 
-    // Editar usuario - Procesar
-    if (preg_match('#^/admin/users/edit/(\d+)$#', $path, $m) && $method === 'POST') {
-        \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN']);
-        $userId = (int)$m[1];
-        (new \App\Controllers\UsersAdminController($pdo, $config))->update($userId);
-        exit;
-    }
+    // // Editar usuario - Procesar
+    // if (preg_match('#^/admin/users/edit/(\d+)$#', $path, $m) && $method === 'POST') {
+    //     \App\Middleware\require_login();
+    //     \App\Middleware\require_role(['ADMIN']);
+    //     $userId = (int)$m[1];
+    //     (new \App\Controllers\UsersAdminController($pdo, $config))->update($userId);
+    //     exit;
+    // }
 
-    // Activar/Desactivar usuario
-    if (preg_match('#^/admin/users/toggle-active/(\d+)$#', $path, $m) && $method === 'POST') {
-        \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN']);
-        $userId = (int)$m[1];
-        (new \App\Controllers\UsersAdminController($pdo, $config))->toggleActive($userId);
-        exit;
-    }
+    // // Activar/Desactivar usuario
+    // if (preg_match('#^/admin/users/toggle-active/(\d+)$#', $path, $m) && $method === 'POST') {
+    //     \App\Middleware\require_login();
+    //     \App\Middleware\require_role(['ADMIN']);
+    //     $userId = (int)$m[1];
+    //     (new \App\Controllers\UsersAdminController($pdo, $config))->toggleActive($userId);
+    //     exit;
+    // }
 
-    // Eliminar usuario
-    if (preg_match('#^/admin/users/delete/(\d+)$#', $path, $m) && $method === 'POST') {
-        \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN']);
-        $userId = (int)$m[1];
-        (new \App\Controllers\UsersAdminController($pdo, $config))->delete($userId);
-        exit;
-    }
+    // // Eliminar usuario
+    // if (preg_match('#^/admin/users/delete/(\d+)$#', $path, $m) && $method === 'POST') {
+    //     \App\Middleware\require_login();
+    //     \App\Middleware\require_role(['ADMIN']);
+    //     $userId = (int)$m[1];
+    //     (new \App\Controllers\UsersAdminController($pdo, $config))->delete($userId);
+    //     exit;
+    // }
 
-    // Importar usuarios - Formulario
-    if ($path === '/admin/users/import' && $method === 'GET') {
-        \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN']);
-        (new \App\Controllers\UsersAdminController($pdo, $config))->showImport();
-        exit;
-    }
+    // // Importar usuarios - Formulario
+    // if ($path === '/admin/users/import' && $method === 'GET') {
+    //     \App\Middleware\require_login();
+    //     \App\Middleware\require_role(['ADMIN']);
+    //     (new \App\Controllers\UsersAdminController($pdo, $config))->showImport();
+    //     exit;
+    // }
 
-    // Importar usuarios - Procesar
-    if ($path === '/admin/users/import' && $method === 'POST') {
-        \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN']);
-        $controller = new \App\Controllers\UsersAdminController($pdo, $config);
+    // // Importar usuarios - Procesar
+    // if ($path === '/admin/users/import' && $method === 'POST') {
+    //     \App\Middleware\require_login();
+    //     \App\Middleware\require_role(['ADMIN']);
+    //     $controller = new \App\Controllers\UsersAdminController($pdo, $config);
 
-        if (method_exists($controller, 'import')) {
-            $controller->import();
-        } else {
-            $controller->importExcel();
-        }
-        exit;
-    }
+    //     if (method_exists($controller, 'import')) {
+    //         $controller->import();
+    //     } else {
+    //         $controller->importExcel();
+    //     }
+    //     exit;
+    // }
 
-    // Exportar plantilla Excel
-    if ($path === '/admin/users/export-template' && $method === 'GET') {
-        \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN']);
-        (new \App\Controllers\UsersAdminController($pdo, $config))->exportTemplate();
-        exit;
-    }
+    // // Exportar plantilla Excel
+    // if ($path === '/admin/users/export-template' && $method === 'GET') {
+    //     \App\Middleware\require_login();
+    //     \App\Middleware\require_role(['ADMIN']);
+    //     (new \App\Controllers\UsersAdminController($pdo, $config))->exportTemplate();
+    //     exit;
+    // }
 
-    // Exportar usuarios a Excel
-    if ($path === '/admin/users/export' && $method === 'POST') {
-        \App\Middleware\require_login();
-        \App\Middleware\require_role(['ADMIN']);
-        $controller = new \App\Controllers\UsersAdminController($pdo, $config);
+    // // Exportar usuarios a Excel
+    // if ($path === '/admin/users/export' && $method === 'POST') {
+    //     \App\Middleware\require_login();
+    //     \App\Middleware\require_role(['ADMIN']);
+    //     $controller = new \App\Controllers\UsersAdminController($pdo, $config);
 
-        if (method_exists($controller, 'exportExcel')) {
-            $controller->exportExcel();
-        } else {
-            $_SESSION['_flash'] = ['type' => 'error', 'message' => 'Función de exportación no disponible'];
-            header('Location: ' . \App\Config\url('/admin/users'));
-            exit;
-        }
-        exit;
+    //     if (method_exists($controller, 'exportExcel')) {
+    //         $controller->exportExcel();
+    //     } else {
+    //         $_SESSION['_flash'] = ['type' => 'error', 'message' => 'Función de exportación no disponible'];
+    //         header('Location: ' . \App\Config\url('/admin/users'));
+    //         exit;
+    //     }
+    //     exit;
+    // }
+
+    // Verificar si la ruta comienza con /admin/users
+    if (str_starts_with($path, '/admin/users')) {
+        require_once __DIR__ . '/../app/routes/admin_users.php';
+        exit; // Importante: salir después de procesar
     }
 
     // 404

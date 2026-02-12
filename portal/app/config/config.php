@@ -29,7 +29,7 @@ function load_config(): array
     return [
         'db' => [
             'host' => getenv('PORTAL_DB_HOST') ?: '127.0.0.1',
-            'port' => (int)(getenv('PORTAL_DB_PORT') ?: 3306),
+            'port' => (int)(getenv('PORTAL_DB_PORT') ?: 3307),
             'name' => getenv('PORTAL_DB_NAME') ?: 'icbf_mail',
             'user' => getenv('PORTAL_DB_USER') ?: 'root',
             'pass' => getenv('PORTAL_DB_PASSWORD') ?: '',

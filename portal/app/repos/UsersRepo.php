@@ -11,39 +11,61 @@ final class UsersRepo
 
     public function findByUsernameOrEmail(string $login): ?array
     {
-        $sql = "SELECT * FROM users
-                WHERE (username = :login OR email = :login)
-                  AND is_active = 1
-                LIMIT 1";
+        $sql = "
+            SELECT *
+            FROM users
+            WHERE (username = :login OR email = :login)
+              AND is_active = 1
+            LIMIT 1
+        ";
         $st = $this->pdo->prepare($sql);
         $st->execute([':login' => $login]);
-        $row = $st->fetch();
+        $row = $st->fetch(PDO::FETCH_ASSOC);
         return $row ?: null;
     }
 
+    /**
+     * ✅ Devuelve array de códigos de rol normalizados (ADMIN, SUPERVISOR, AGENTE)
+     * - FETCH_COLUMN para evitar líos de índices
+     * - DISTINCT + TRIM + UPPER para consistencia
+     */
     public function rolesForUser(int $userId): array
     {
-        $sql = "SELECT r.code
-                FROM user_roles ur
-                JOIN roles r ON r.id = ur.role_id
-                WHERE ur.user_id = :uid";
+        $sql = "
+            SELECT DISTINCT UPPER(TRIM(r.code)) AS code
+            FROM user_roles ur
+            JOIN roles r ON r.id = ur.role_id
+            WHERE ur.user_id = :uid
+            ORDER BY code
+        ";
         $st = $this->pdo->prepare($sql);
         $st->execute([':uid' => $userId]);
-        return array_map(fn($r) => $r['code'], $st->fetchAll());
+
+        $codes = $st->fetchAll(PDO::FETCH_COLUMN) ?: [];
+
+        // normalización extra
+        $codes = array_values(array_unique(array_filter(array_map(
+            static fn($v) => strtoupper(trim((string)$v)),
+            $codes
+        ))));
+
+        return $codes;
     }
 
     public function listAgents(): array
     {
-        // OJO: En tu BD el rol es AGENTE (no AGENT)
-        $sql = "SELECT u.id, u.full_name, u.username, u.email
-                FROM users u
-                JOIN user_roles ur ON ur.user_id = u.id
-                JOIN roles r ON r.id = ur.role_id
-                WHERE u.is_active=1 AND r.code='AGENTE'
-                ORDER BY u.full_name ASC";
-        return $this->pdo->query($sql)->fetchAll();
+        $sql = "
+            SELECT u.id, u.full_name, u.username, u.email
+            FROM users u
+            JOIN user_roles ur ON ur.user_id = u.id
+            JOIN roles r ON r.id = ur.role_id
+            WHERE u.is_active = 1
+              AND UPPER(TRIM(r.code)) = 'AGENTE'
+            ORDER BY u.full_name ASC
+        ";
+        $st = $this->pdo->query($sql);
+        return $st ? $st->fetchAll(PDO::FETCH_ASSOC) : [];
     }
-
 
     public function pickLeastLoadedAgentId(): ?int
     {
@@ -51,17 +73,17 @@ final class UsersRepo
             SELECT u.id
             FROM users u
             JOIN user_roles ur ON ur.user_id = u.id
-            JOIN roles r ON r.id = ur.role_id AND r.code = 'AGENTE'
+            JOIN roles r ON r.id = ur.role_id AND UPPER(TRIM(r.code)) = 'AGENTE'
             LEFT JOIN cases c ON c.assigned_user_id = u.id
             LEFT JOIN case_statuses cs
-            ON cs.id = c.status_id
-            AND cs.code IN ('ASIGNADO','EN_PROCESO')
+              ON cs.id = c.status_id
+             AND cs.code IN ('ASIGNADO','EN_PROCESO')
             WHERE u.is_active = 1
-            AND u.assign_enabled = 1
+              AND u.assign_enabled = 1
             GROUP BY u.id
             ORDER BY COUNT(c.id) ASC,
-                    COALESCE(u.last_assigned_at, '1970-01-01') ASC,
-                    u.id ASC
+                     COALESCE(u.last_assigned_at, '1970-01-01') ASC,
+                     u.id ASC
             LIMIT 1
         ";
         $st = $this->pdo->query($sql);
@@ -80,6 +102,4 @@ final class UsersRepo
         ");
         $st->execute([':id' => $userId]);
     }
-
-
 }
