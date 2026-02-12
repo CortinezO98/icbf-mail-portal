@@ -259,6 +259,78 @@ function caseTimeLabel(array $c): string {
     </div>
   </div>
 
+  <!-- Status cards -->
+  <div class="row g-3 mb-4">
+      <!-- EN PROCESO -->
+      <div class="col-md-4">
+          <div class="card shadow-sm h-100 border-start border-4 border-info">
+              <div class="card-body">
+                  <div class="d-flex justify-content-between">
+                      <div>
+                          <div class="text-muted small">En Proceso</div>
+                          <div class="h2 mb-0 fw-bold text-info"><?= $stEnProceso ?></div>
+                          <div class="text-muted small mt-1">Casos siendo atendidos</div>
+                      </div>
+                      <div class="bg-info bg-opacity-10 text-info rounded-circle p-3">
+                          <i class="bi bi-gear fs-4"></i>
+                      </div>
+                  </div>
+                  <hr class="my-3">
+                  <a class="btn btn-sm btn-outline-info w-100" href="<?= esc(url('/cases?status=EN_PROCESO')) ?>">
+                      <i class="bi bi-eye me-1"></i>Ver en proceso
+                  </a>
+              </div>
+          </div>
+      </div>
+      
+      <!-- RESPONDIDOS -->
+      <div class="col-md-4">
+          <div class="card shadow-sm h-100 border-start border-4" style="border-color: #fd7e14 !important;">
+              <div class="card-body">
+                  <div class="d-flex justify-content-between">
+                      <div>
+                          <div class="text-muted small">Respondidos</div>
+                          <div class="h2 mb-0 fw-bold" style="color: #fd7e14 !important;"><?= $stRespondido ?></div>
+                          <div class="text-muted small mt-1">Esperando confirmación</div>
+                      </div>
+                      <div class="rounded-circle p-3" style="background-color: rgba(253, 126, 20, 0.1); color: #fd7e14 !important;">
+                          <i class="bi bi-chat-text fs-4"></i>
+                      </div>
+                  </div>
+                  <hr class="my-3">
+                  <a class="btn w-100" style="color: #fd7e14; border-color: #fd7e14; background-color: transparent;" 
+                    href="<?= esc(url('/cases?status=RESPONDIDO')) ?>"
+                    onmouseover="this.style.backgroundColor='#fd7e14'; this.style.color='white';" 
+                    onmouseout="this.style.backgroundColor='transparent'; this.style.color='#fd7e14';">
+                      <i class="bi bi-eye me-1"></i>Ver respondidos
+                  </a>
+              </div>
+          </div>
+      </div>
+      
+      <!-- CERRADOS -->
+      <div class="col-md-4">
+          <div class="card shadow-sm h-100 border-start border-4 border-secondary">
+              <div class="card-body">
+                  <div class="d-flex justify-content-between">
+                      <div>
+                          <div class="text-muted small">Cerrados</div>
+                          <div class="h2 mb-0 fw-bold text-secondary"><?= n($summary['cerrados'] ?? 0) ?></div>
+                          <div class="text-muted small mt-1">Casos finalizados</div>
+                      </div>
+                      <div class="bg-secondary bg-opacity-10 text-secondary rounded-circle p-3">
+                          <i class="bi bi-check2-all fs-4"></i>
+                      </div>
+                  </div>
+                  <hr class="my-3">
+                  <a class="btn btn-sm btn-outline-secondary w-100" href="<?= esc(url('/cases?status=CERRADO')) ?>">
+                      <i class="bi bi-archive me-1"></i>Ver cerrados
+                  </a>
+              </div>
+          </div>
+      </div>
+  </div>
+
   <!-- Semáforo cards -->
   <div class="row g-3 mb-4">
     <div class="col-md-4">

@@ -106,13 +106,16 @@ final class DashboardController
         // Agente: solo lo suyo. Supervisor/Admin: global.
         $uid = $isSupervisor ? null : (int)Auth::id();
 
-        // ✅ NUEVO (recomendación): refresh corto para que el tablero sea real-time
-        // Importante: se llama aquí (cada request) pero con TTL + lock para no sobrecargar.
+        // ✅ Refresh corto para que el tablero sea real-time (TTL + lock)
         $this->refreshSlaTrackingShortTtl();
 
         // Métricas principales
         $summary = $this->metrics->realtimeSummary($uid);
         if (!is_array($summary)) $summary = [];
+
+        // ✅ Obtener estados adicionales (EN_PROCESO, CERRADOS) y fusionar con summary
+        $additionalStates = $this->metrics->getAdditionalStates($uid);
+        $summary = array_merge($summary, $additionalStates);
 
         // UX: textos del semáforo (para tu view)
         $summary['semaforo_hint'] = $summary['semaforo_hint']
@@ -159,25 +162,170 @@ final class DashboardController
         $isSupervisor = Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN');
         $uid = $isSupervisor ? null : (int)Auth::id();
 
-        // ✅ NUEVO (recomendación): asegura que el listado sea real-time
+        // ✅ Asegura que el listado sea real-time (TTL + lock)
         $this->refreshSlaTrackingShortTtl();
 
         $estado = strtolower(trim($estado));
-        $valid = ['verde', 'amarillo', 'rojo'];
+        
+        // ✅ Agregamos los nuevos estados válidos SIN eliminar los originales
+        $valid = ['verde', 'amarillo', 'rojo', 'en_proceso', 'respondidos', 'cerrados'];
+        
         if (!in_array($estado, $valid, true)) {
             http_response_code(404);
             echo "Estado no válido";
             exit;
         }
 
-        $estadoUpper = strtoupper($estado);
-        $cases = $this->metrics->getCasesBySemaforo($estadoUpper, $uid, 50);
+        // ✅ Para los estados del semáforo original (verde, amarillo, rojo)
+        if (in_array($estado, ['verde', 'amarillo', 'rojo'], true)) {
+            $estadoUpper = strtoupper($estado);
+            $cases = $this->metrics->getCasesBySemaforo($estadoUpper, $uid, 50);
+        } 
+        // ✅ Para EN_PROCESO
+        elseif ($estado === 'en_proceso') {
+            $cases = $this->getCasesByStatus('EN_PROCESO', $uid, 50);
+        }
+        // ✅ Para RESPONDIDOS
+        elseif ($estado === 'respondidos') {
+            $cases = $this->getCasesByResponded($uid, 50);
+        }
+        // ✅ Para CERRADOS
+        elseif ($estado === 'cerrados') {
+            $cases = $this->getCasesByClosed($uid, 50);
+        } else {
+            $cases = [];
+        }
+
         if (!is_array($cases)) $cases = [];
 
         $this->render('dashboard/semaforo.php', [
-            'estado' => $estadoUpper,
+            'estado' => strtoupper($estado),
             'cases' => $cases,
         ]);
+    }
+
+    /**
+     * Obtiene casos por código de estado (EN_PROCESO, ASIGNADO, NUEVO, etc)
+     */
+    private function getCasesByStatus(string $statusCode, ?int $userId, int $limit): array
+    {
+        $andUser = $userId ? " AND c.assigned_user_id = :user_id " : "";
+        $params = [':status' => $statusCode];
+        if ($userId) $params[':user_id'] = $userId;
+
+        $sql = "
+            SELECT
+                c.id,
+                c.case_number,
+                c.subject,
+                c.requester_name,
+                c.requester_email,
+                cs.name AS status_name,
+                cs.code AS status_code,
+                u.full_name AS assigned_to,
+                c.received_at,
+                c.assigned_at,
+                c.first_response_at,
+                COALESCE(cst.business_minutes, 0) AS business_minutes,
+                cst.sla_due_at,
+                COALESCE(cst.breached, 0) AS breached
+            FROM cases c
+            JOIN case_statuses cs ON cs.id = c.status_id
+            LEFT JOIN users u ON u.id = c.assigned_user_id
+            LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
+            WHERE cs.code = :status
+              AND cs.is_final = 0
+              {$andUser}
+            ORDER BY 
+                CASE WHEN cst.breached = 1 THEN 0 ELSE 1 END,
+                cst.sla_due_at ASC,
+                c.received_at ASC
+            LIMIT :limit
+        ";
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->bindValue(':status', $statusCode);
+        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+        if ($userId) $stmt->bindValue(':user_id', $userId, PDO::PARAM_INT);
+        $stmt->execute();
+        return $stmt->fetchAll() ?: [];
+    }
+
+    /**
+     * Obtiene casos respondidos (is_responded = 1)
+     */
+    private function getCasesByResponded(?int $userId, int $limit): array
+    {
+        $andUser = $userId ? " AND c.assigned_user_id = :user_id " : "";
+        $params = $userId ? [':user_id' => $userId] : [];
+
+        $sql = "
+            SELECT
+                c.id,
+                c.case_number,
+                c.subject,
+                c.requester_name,
+                c.requester_email,
+                cs.name AS status_name,
+                cs.code AS status_code,
+                u.full_name AS assigned_to,
+                c.received_at,
+                c.first_response_at AS responded_at,
+                COALESCE(cst.business_minutes, 0) AS business_minutes
+            FROM cases c
+            JOIN case_statuses cs ON cs.id = c.status_id
+            LEFT JOIN users u ON u.id = c.assigned_user_id
+            LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
+            WHERE c.is_responded = 1
+              AND cs.is_final = 0
+              {$andUser}
+            ORDER BY c.first_response_at DESC
+            LIMIT :limit
+        ";
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+        if ($userId) $stmt->bindValue(':user_id', $userId, PDO::PARAM_INT);
+        $stmt->execute($params);
+        return $stmt->fetchAll() ?: [];
+    }
+
+    /**
+     * Obtiene casos cerrados (is_final = 1)
+     */
+    private function getCasesByClosed(?int $userId, int $limit): array
+    {
+        $andUser = $userId ? " AND c.assigned_user_id = :user_id " : "";
+        $params = $userId ? [':user_id' => $userId] : [];
+
+        $sql = "
+            SELECT
+                c.id,
+                c.case_number,
+                c.subject,
+                c.requester_name,
+                c.requester_email,
+                cs.name AS status_name,
+                cs.code AS status_code,
+                u.full_name AS assigned_to,
+                c.received_at,
+                c.closed_at,
+                c.resolved_at,
+                c.updated_at
+            FROM cases c
+            JOIN case_statuses cs ON cs.id = c.status_id
+            LEFT JOIN users u ON u.id = c.assigned_user_id
+            WHERE cs.is_final = 1
+              {$andUser}
+            ORDER BY c.closed_at DESC, c.updated_at DESC
+            LIMIT :limit
+        ";
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+        if ($userId) $stmt->bindValue(':user_id', $userId, PDO::PARAM_INT);
+        $stmt->execute($params);
+        return $stmt->fetchAll() ?: [];
     }
 
     private function render(string $view, array $params = []): void
@@ -189,7 +337,7 @@ final class DashboardController
 
     private function refreshSlaTrackingShortTtl(): void
     {
-        // ✅ Refresh frecuente pero controlado (no cada request)
+        // ✅ Refresh frecuente pero controlado (TTL + lock global)
         $locksDir = dirname(__DIR__, 2) . '/storage/locks';
         if (!is_dir($locksDir)) {
             @mkdir($locksDir, 0777, true);

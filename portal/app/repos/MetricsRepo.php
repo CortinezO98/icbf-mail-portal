@@ -99,7 +99,7 @@ final class MetricsRepo
 
     /* ============================================================
        DASHBOARD (misma interfaz, mismo output, solo mejor semáforo)
-       - Eliminamos fallbacks por días (solo tracking)
+       - Semáforo SOLO si existe tracking (cst.case_id IS NOT NULL)
        ============================================================ */
 
     public function realtimeSummary(?int $assignedUserId = null): array
@@ -164,7 +164,11 @@ final class MetricsRepo
 
     public function realtimeByAgent(): array
     {
-        // ✅ Sin fallback a VERDE: contamos solo donde hay tracking
+        /**
+         * ✅ Semáforo SOLO con tracking
+         * Nota: Para no “romper” el total_open que ya mostrabas, dejamos COUNT(*) como total de abiertos del agente.
+         * El semáforo (verde/amarillo/rojo/breached) se cuenta solo donde exista cst.case_id.
+         */
         $sql = "
             SELECT
                 u.id AS user_id,
@@ -204,7 +208,6 @@ final class MetricsRepo
     /**
      * Inicializa tracking para casos abiertos.
      * - minutes/days desde received_at (compat)
-     * - NO tocamos policy/warn_* si ya existen
      * - Insertamos también sla_started_at/business_minutes/sla_ignored
      */
     public function initializeSlaTracking(): int
@@ -278,7 +281,7 @@ final class MetricsRepo
     }
 
     /**
-     * ✅ NUEVO: update por minutos hábiles, paginado por case_id (evita quedarse en primeros N)
+     * ✅ update por minutos hábiles, paginado por case_id (evita quedarse en primeros N)
      * Retorna: [updatedRows, lastCaseId]
      */
     public function updateSlaTrackingBusinessPaged(int $batchSize = 800, int $afterCaseId = 0): array
@@ -406,7 +409,7 @@ final class MetricsRepo
     }
 
     /**
-     * ✅ NUEVO: barre TODO iterando batches hasta terminar
+     * ✅ barre TODO iterando batches hasta terminar
      * (la clave para que no se te queden casos “colgados”)
      */
     public function updateSlaTrackingBusinessAll(int $batchSize = 800, int $maxLoops = 2000): int
@@ -441,10 +444,10 @@ final class MetricsRepo
             JOIN case_statuses cs ON cs.id = c.status_id
             LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
             WHERE cs.is_final = 0
-              AND c.is_responded = 0
-              AND cst.case_id IS NOT NULL
-              AND cst.current_sla_state = 'ROJO'
-              {$andUser}
+            AND c.is_responded = 0
+            AND cst.case_id IS NOT NULL
+            AND cst.current_sla_state = 'ROJO'
+            {$andUser}
 
             UNION ALL
 
@@ -458,10 +461,10 @@ final class MetricsRepo
             JOIN case_statuses cs ON cs.id = c.status_id
             LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
             WHERE cs.is_final = 0
-              AND c.is_responded = 0
-              AND cst.case_id IS NOT NULL
-              AND cst.current_sla_state = 'AMARILLO'
-              {$andUser}
+            AND c.is_responded = 0
+            AND cst.case_id IS NOT NULL
+            AND cst.current_sla_state = 'AMARILLO'
+            {$andUser}
 
             UNION ALL
 
@@ -475,10 +478,24 @@ final class MetricsRepo
             JOIN case_statuses cs ON cs.id = c.status_id
             LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
             WHERE cs.is_final = 0
-              AND c.is_responded = 0
-              AND cst.case_id IS NOT NULL
-              AND cst.current_sla_state = 'VERDE'
-              {$andUser}
+            AND c.is_responded = 0
+            AND cst.case_id IS NOT NULL
+            AND cst.current_sla_state = 'VERDE'
+            {$andUser}
+
+            UNION ALL
+
+            SELECT
+                'EN_PROCESO' AS estado,
+                COUNT(*) AS total,
+                'Casos en atención activa' AS descripcion,
+                '#fd7e14' AS color,  /* Naranja */
+                'bi-gear-fill' AS icono
+            FROM cases c
+            JOIN case_statuses cs ON cs.id = c.status_id
+            WHERE cs.code = 'EN_PROCESO'
+            AND cs.is_final = 0
+            {$andUser}
 
             UNION ALL
 
@@ -486,13 +503,33 @@ final class MetricsRepo
                 'RESPONDIDOS' AS estado,
                 COUNT(*) AS total,
                 'Casos ya contestados' AS descripcion,
-                '#3b82f6' AS color,
+                '#3b82f6' AS color,  /* Azul */
                 'bi-chat-square-text-fill' AS icono
             FROM cases c
             WHERE c.is_responded = 1
-              " . ($userId ? " AND c.assigned_user_id = :user_id " : "") . "
+            {$andUser}
 
-            ORDER BY FIELD(estado, 'ROJO', 'AMARILLO', 'VERDE', 'RESPONDIDOS')
+            UNION ALL
+
+            SELECT
+                'CERRADOS' AS estado,
+                COUNT(*) AS total,
+                'Casos finalizados' AS descripcion,
+                '#6c757d' AS color,  /* Gris */
+                'bi-check2-all' AS icono
+            FROM cases c
+            JOIN case_statuses cs ON cs.id = c.status_id
+            WHERE cs.is_final = 1
+            {$andUser}
+
+            ORDER BY FIELD(estado, 
+                'ROJO', 
+                'AMARILLO', 
+                'VERDE', 
+                'EN_PROCESO', 
+                'RESPONDIDOS', 
+                'CERRADOS'
+            )
         ";
 
         $stmt = $this->pdo->prepare($sql);
@@ -600,6 +637,9 @@ final class MetricsRepo
 
     public function getExecutiveReport(): array
     {
+        /**
+         * ✅ Sin COALESCE(cst.current_sla_state,'VERDE'): semáforo SOLO con tracking.
+         */
         $sql = "
             SELECT
                 (SELECT COUNT(*) FROM cases) AS total_casos,
@@ -734,4 +774,29 @@ final class MetricsRepo
         $st->execute();
         return $st->fetchAll() ?: [];
     }
+
+
+    public function getAdditionalStates(?int $assignedUserId = null): array
+    {
+        $params = [];
+        $whereUser = $assignedUserId ? " AND c.assigned_user_id = :uid" : "";
+        if ($assignedUserId) $params[':uid'] = $assignedUserId;
+
+        $sql = "
+            SELECT
+                SUM(CASE WHEN cs.code = 'EN_PROCESO' THEN 1 ELSE 0 END) AS en_proceso,
+                SUM(CASE WHEN cs.code = 'RESPONDIDO' THEN 1 ELSE 0 END) AS respondido,
+                SUM(CASE WHEN cs.is_final = 1 THEN 1 ELSE 0 END) AS cerrados
+            FROM cases c
+            JOIN case_statuses cs ON cs.id = c.status_id
+            WHERE 1=1
+            {$whereUser}
+        ";
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetch() ?: ['en_proceso' => 0, 'respondido' => 0, 'cerrados' => 0];
+    }
+
+
 }
