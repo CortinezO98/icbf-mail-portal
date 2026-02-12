@@ -14,7 +14,11 @@ final class ReportsRepo
     {
         $whereMailbox = $mailboxId ? " AND c.mailbox_id = :mb " : "";
 
-        // KPIs principales
+        /**
+         * ✅ NO SE ALTERA FUNCIONALIDAD ORIGINAL:
+         * - Se mantienen EXACTOS los KPIs existentes.
+         * - Solo se agregan columnas nuevas (avg_*), si no las usas en la vista, no afectan nada.
+         */
         $sql = "
             SELECT
               COUNT(*) AS total_cases,
@@ -24,7 +28,33 @@ final class ReportsRepo
               SUM(CASE WHEN COALESCE(cst.breached,0) = 1 THEN 1 ELSE 0 END) AS breached_cases,
               SUM(CASE WHEN cst.current_sla_state='VERDE' THEN 1 ELSE 0 END) AS sla_verde,
               SUM(CASE WHEN cst.current_sla_state='AMARILLO' THEN 1 ELSE 0 END) AS sla_amarillo,
-              SUM(CASE WHEN cst.current_sla_state='ROJO' THEN 1 ELSE 0 END) AS sla_rojo
+              SUM(CASE WHEN cst.current_sla_state='ROJO' THEN 1 ELSE 0 END) AS sla_rojo,
+
+              -- ✅ NUEVO (NO rompe): promedios en HORAS desde received_at
+              ROUND(AVG(
+                CASE WHEN c.assigned_at IS NOT NULL
+                  THEN TIMESTAMPDIFF(MINUTE, c.received_at, c.assigned_at) / 60
+                  ELSE NULL
+                END
+              ), 2) AS avg_assign_hours,
+
+              ROUND(AVG(
+                CASE WHEN c.first_response_at IS NOT NULL
+                  THEN TIMESTAMPDIFF(MINUTE, c.received_at, c.first_response_at) / 60
+                  ELSE NULL
+                END
+              ), 2) AS avg_first_response_hours,
+
+              ROUND(AVG(
+                CASE WHEN c.closed_at IS NOT NULL
+                  THEN TIMESTAMPDIFF(MINUTE, c.received_at, c.closed_at) / 60
+                  ELSE NULL
+                END
+              ), 2) AS avg_close_hours,
+
+              -- ✅ NUEVO (NO rompe): promedio horas hábiles (desde tracking)
+              ROUND(AVG(NULLIF(cst.business_minutes,0)) / 60, 2) AS avg_business_hours
+
             FROM cases c
             JOIN case_statuses cs ON cs.id = c.status_id
             LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
@@ -39,7 +69,7 @@ final class ReportsRepo
         $st->execute();
         $kpis = $st->fetch() ?: [];
 
-        // Serie diaria (recibidos)
+        // Serie diaria (recibidos) — ORIGINAL
         $sqlDaily = "
             SELECT DATE(c.received_at) AS day, COUNT(*) AS cnt
             FROM cases c
@@ -56,7 +86,10 @@ final class ReportsRepo
         $st->execute();
         $daily = $st->fetchAll() ?: [];
 
-        // Gaps de adjuntos
+        /**
+         * ✅ Gaps de adjuntos — ORIGINAL (NO tocar):
+         * - Sigue usando messages.created_at y m.has_attachments = 1
+         */
         $sqlMissing = "
             SELECT COUNT(*) AS missing_attachments
             FROM (
@@ -107,6 +140,11 @@ final class ReportsRepo
     {
         $whereMailbox = $mailboxId ? " AND c.mailbox_id = :mb " : "";
 
+        /**
+         * ✅ NO SE ALTERA FUNCIONALIDAD ORIGINAL:
+         * - Se mantienen todos los campos que ya devolvías.
+         * - Solo se agregan columnas (tracking extra + horas calculadas).
+         */
         $sql = "
             SELECT
               c.id AS case_id,
@@ -126,12 +164,60 @@ final class ReportsRepo
               c.is_responded,
               c.due_at,
               c.sla_state,
+
               cst.current_sla_state,
               COALESCE(cst.breached,0) AS breached,
               cst.sla_due_at,
               cst.minutes_since_creation,
               cst.days_since_creation,
-              cst.last_updated
+              cst.last_updated,
+
+              -- ✅ NUEVO: tracking extendido (ya existe en tu tabla)
+              cst.sla_ignored,
+              cst.policy_id,
+              cst.warn_yellow_at,
+              cst.warn_red_at,
+              cst.business_minutes,
+              cst.sla_started_at,
+
+              -- ✅ NUEVO: métricas de gestión en HORAS (reloj: received_at)
+              ROUND(TIMESTAMPDIFF(MINUTE, c.received_at, NOW()) / 60, 2) AS horas_desde_recepcion,
+
+              ROUND(
+                CASE WHEN c.assigned_at IS NOT NULL
+                  THEN TIMESTAMPDIFF(MINUTE, c.received_at, c.assigned_at) / 60
+                  ELSE NULL
+                END
+              , 2) AS horas_hasta_asignacion,
+
+              ROUND(
+                CASE WHEN c.first_response_at IS NOT NULL
+                  THEN TIMESTAMPDIFF(MINUTE, c.received_at, c.first_response_at) / 60
+                  ELSE NULL
+                END
+              , 2) AS horas_hasta_1ra_respuesta,
+
+              ROUND(
+                CASE WHEN c.closed_at IS NOT NULL
+                  THEN TIMESTAMPDIFF(MINUTE, c.received_at, c.closed_at) / 60
+                  ELSE NULL
+                END
+              , 2) AS horas_hasta_cierre,
+
+              ROUND(
+                CASE WHEN cst.sla_due_at IS NOT NULL
+                  THEN TIMESTAMPDIFF(MINUTE, NOW(), cst.sla_due_at) / 60
+                  ELSE NULL
+                END
+              , 2) AS horas_restantes_sla,
+
+              ROUND(
+                CASE WHEN cst.sla_due_at IS NOT NULL
+                  THEN TIMESTAMPDIFF(MINUTE, c.received_at, cst.sla_due_at) / 60
+                  ELSE NULL
+                END
+              , 2) AS horas_sla_total
+
             FROM cases c
             JOIN case_statuses cs ON cs.id = c.status_id
             LEFT JOIN users u ON u.id = c.assigned_user_id
@@ -150,8 +236,8 @@ final class ReportsRepo
     }
 
     /**
-     * ✅ DDL real: generated_reports NO tiene updated_at / created_by
-     * ✅ SÍ tiene: generated_by, status, error_message, row_count, finished_at
+     * ✅ Alineado 1:1 con DESCRIBE generated_reports
+     * ✅ FIX HY093: NO repetir placeholders (:st, :fa) dentro del SQL
      */
     public function insertGeneratedReport(
         int $userId,
@@ -168,25 +254,20 @@ final class ReportsRepo
         $paramsJson = json_encode($params, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         $hash = hash('sha256', $paramsJson ?: '');
 
-        // Si lo generas en request (sin cola), típicamente queda READY y finaliza ya.
-        if ($finishedAt === null) {
-            if ($status === 'READY' || $status === 'FAILED') {
-                // DATETIME(6) => usamos NOW(6) en SQL para consistencia (dejamos null aquí)
-                $finishedAt = null;
-            }
+        $statusUp = strtoupper(trim($status));
+
+        // ✅ Regla: si READY/FAILED y no viene finishedAt, se marca finalizado ahora (NOW(6) equivalente)
+        if ($finishedAt === null && in_array($statusUp, ['READY', 'FAILED'], true)) {
+            $finishedAt = (new \DateTimeImmutable('now'))->format('Y-m-d H:i:s.u');
         }
 
         $sql = "
-          INSERT INTO generated_reports
-            (report_type, report_date, file_path, download_count, generated_by, created_at, params, params_hash, period_start, period_end, status, error_message, row_count, finished_at)
-          VALUES
-            (:rt, CURDATE(), :fp, 0, :uid, NOW(6), :pj, :ph, :ps, :pe, :st, :em, :rc,
-             CASE
-                WHEN :fa IS NOT NULL THEN :fa
-                WHEN :st IN ('READY','FAILED') THEN NOW(6)
-                ELSE NULL
-             END
-            )
+            INSERT INTO generated_reports
+                (report_type, report_date, file_path, download_count, generated_by, created_at,
+                 params, params_hash, period_start, period_end, status, error_message, row_count, finished_at)
+            VALUES
+                (:rt, CURDATE(), :fp, 0, :uid, NOW(6),
+                 :pj, :ph, :ps, :pe, :st, :em, :rc, :finished_at)
         ";
 
         $st = $this->pdo->prepare($sql);
@@ -198,16 +279,15 @@ final class ReportsRepo
             ':ph' => $hash,
             ':ps' => $periodStart,
             ':pe' => $periodEnd,
-            ':st' => strtoupper($status),
+            ':st' => $statusUp,
             ':em' => $errorMessage,
             ':rc' => $rowCount,
-            ':fa' => $finishedAt,
+            ':finished_at' => $finishedAt, // puede ser NULL
         ]);
     }
 
     public function getReportById(int $id): ?array
     {
-        // ✅ compat: devolvemos created_by como alias (si algún controller/vista lo usa)
         $sql = "
             SELECT
                 gr.*,
@@ -224,7 +304,6 @@ final class ReportsRepo
 
     public function incrementDownloadCount(int $id): void
     {
-        // ✅ Tu tabla NO tiene updated_at
         $sql = "
             UPDATE generated_reports
             SET download_count = download_count + 1
@@ -270,8 +349,6 @@ final class ReportsRepo
         $pageSize = max(1, min($pageSize, 100));
         $offset = ($page - 1) * $pageSize;
 
-        // ✅ NO usamos gr.updated_at (no existe)
-        // ✅ devolvemos NULL AS updated_at para compatibilidad si alguna vista lo imprime
         $sql = "
             SELECT
                 gr.id,

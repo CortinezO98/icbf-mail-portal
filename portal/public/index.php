@@ -183,6 +183,15 @@ try {
         exit;
     }
 
+    // Generar reporte (HTML/CSV/EXCEL) desde formulario /reports (POST)
+    if ($path === '/reports/generate' && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
+        (new \App\Controllers\ReportsController($pdo, $config))->generate();
+        exit;
+    }
+
+
     // Descarga por querystring: /reports/download?id=123
     if ($path === '/reports/download' && $method === 'GET') {
         \App\Middleware\require_login();

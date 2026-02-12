@@ -53,6 +53,70 @@ final class ReportsController
         ]);
     }
 
+    /**
+     * ✅ POST /reports/generate
+     * - Render HTML (results.php) o exportar (CSV/EXCEL)
+     * - SIN romper export/download existentes
+     */
+    public function generate(): void
+    {
+        // CSRF
+        $csrf = (string)($_POST['_csrf'] ?? '');
+        if (!\App\Auth\Csrf::validate($csrf)) {
+            http_response_code(419);
+            echo "CSRF inválido";
+            exit;
+        }
+
+        $start = $this->safeDate($_POST['start_date'] ?? '') ?? date('Y-m-d', strtotime('-7 days'));
+        $end   = $this->safeDate($_POST['end_date'] ?? '') ?? date('Y-m-d');
+
+        // filtros (compatibles con tu UI)
+        $status   = strtoupper(trim((string)($_POST['status'] ?? '')));   // NUEVO/ASIGNADO/EN_PROCESO/RESPONDIDO/CERRADO
+        $agentId  = trim((string)($_POST['agent_id'] ?? ''));
+        $semaforo = strtoupper(trim((string)($_POST['semaforo'] ?? ''))); // VERDE/AMARILLO/ROJO/RESPONDIDO
+        $format   = strtolower(trim((string)($_POST['format'] ?? 'html')));
+
+        if ($agentId !== '' && !ctype_digit($agentId)) $agentId = '';
+        $agentIdInt = $agentId !== '' ? (int)$agentId : null;
+
+        if (!in_array($format, ['html', 'csv', 'excel'], true)) $format = 'html';
+
+        // Dataset base (misma fuente que export)
+        $rows = $this->repo->exportSlaDataset($start, $end, null);
+
+        // Filtros adicionales sin tocar repo (no rompe)
+        $rows = $this->filterRows($rows, $status, $agentIdInt, $semaforo);
+
+        // Export si aplica (reusa export() para auditoría y storage)
+        if ($format === 'csv' || $format === 'excel') {
+            $_GET['type'] = 'sla';
+            $_GET['format'] = ($format === 'excel') ? 'xlsx' : 'csv';
+            $_GET['start'] = $start;
+            $_GET['end'] = $end;
+            $this->export();
+            return;
+        }
+
+        // Summary para results.php
+        $summary = $this->buildSummary($rows);
+
+        $this->render('reports/results.php', [
+            'data' => $rows,
+            'summary' => $summary,
+            'params' => [
+                'start_date' => $start,
+                'end_date' => $end,
+                'status' => $status,
+                'agent_id' => $agentIdInt ? (string)$agentIdInt : '',
+                'semaforo' => $semaforo,
+                'format' => $format,
+            ],
+            'csrfToken' => \App\Auth\Csrf::token(),
+            'config' => $this->config,
+        ]);
+    }
+
     public function export(): void
     {
         // GET /reports/export?type=sla&start=YYYY-MM-DD&end=YYYY-MM-DD&format=csv|xlsx&mailbox_id=#
@@ -102,7 +166,6 @@ final class ReportsController
                     'format' => 'xlsx',
                 ];
 
-                // ✅ Insert con status/finished_at/row_count
                 $this->repo->insertGeneratedReport(
                     $userId,
                     'excel_' . $type,
@@ -151,11 +214,6 @@ final class ReportsController
         exit;
     }
 
-    /**
-     * ✅ Descarga segura + valida status (PRO)
-     * - bloquea si no está READY
-     * - autoriza dueño o admin
-     */
     public function download(): void
     {
         $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
@@ -175,7 +233,7 @@ final class ReportsController
         $user = Auth::user() ?? [];
         $userId = (int)($user['id'] ?? 0);
 
-        // ✅ Autorización: dueño o admin
+        // dueño o admin
         $ownerId = (int)($r['generated_by'] ?? ($r['created_by'] ?? 0));
         $roleCode = strtoupper((string)($user['role_code'] ?? $user['role'] ?? ''));
         $isAdmin = in_array($roleCode, ['ADMIN', 'SUPERADMIN', 'ADMINISTRADOR'], true);
@@ -186,7 +244,6 @@ final class ReportsController
             exit;
         }
 
-        // ✅ Estado del reporte
         $status = strtoupper((string)($r['status'] ?? 'PENDING'));
         if ($status !== 'READY') {
             http_response_code(409);
@@ -210,7 +267,6 @@ final class ReportsController
             exit;
         }
 
-        // contador solo si todo está OK
         $this->repo->incrementDownloadCount($id);
 
         $filename = basename($fullPath);
@@ -244,7 +300,7 @@ final class ReportsController
         }
         if ($reportsBase === false) return null;
 
-        // Path absoluto (compat)
+        // absoluto
         if ($this->isAbsolutePath($storedPath)) {
             $real = realpath($storedPath);
             if ($real === false) return null;
@@ -256,7 +312,7 @@ final class ReportsController
             return $real;
         }
 
-        // Path relativo => restringir a storage/reports
+        // relativo
         $storedPath = str_replace(['\\', '//'], ['/', '/'], $storedPath);
         $storedPath = ltrim($storedPath, '/');
 
@@ -358,5 +414,110 @@ final class ReportsController
     {
         $id = (int)$this->pdo->lastInsertId();
         return $id > 0 ? $id : 0;
+    }
+
+    /* ===========================
+       Helpers (no rompen)
+       =========================== */
+
+    private function filterRows(array $rows, string $status, ?int $agentId, string $semaforo): array
+    {
+        $status = $status !== '' ? strtoupper($status) : '';
+        $semaforo = $semaforo !== '' ? strtoupper($semaforo) : '';
+
+        return array_values(array_filter($rows, function ($r) use ($status, $agentId, $semaforo) {
+            if (!is_array($r)) return false;
+
+            if ($status !== '') {
+                $code = strtoupper((string)($r['status_code'] ?? $r['status_name'] ?? ''));
+                $codeNorm = str_replace(' ', '_', $code);
+                if ($codeNorm !== $status) return false;
+            }
+
+            if ($agentId !== null) {
+                $aid = (int)($r['assigned_user_id'] ?? 0);
+                if ($aid !== $agentId) return false;
+            }
+
+            if ($semaforo !== '') {
+                $sf = strtoupper((string)($r['current_sla_state'] ?? $r['semaforo'] ?? $r['sla_state'] ?? ''));
+                if ($sf !== $semaforo) return false;
+            }
+
+            return true;
+        }));
+    }
+
+    private function buildSummary(array $rows): array
+    {
+        $total = count($rows);
+        $responded = 0;
+        $pending = 0;
+
+        $sumFirstRespHours = 0.0;
+        $cntFirstResp = 0;
+
+        $byStatus = [];
+        $bySemaforo = [];
+
+        foreach ($rows as $r) {
+            if (!is_array($r)) continue;
+
+            $isResponded = (int)($r['is_responded'] ?? 0) === 1;
+            if ($isResponded) $responded++; else $pending++;
+
+            // Promedio 1ra respuesta: si el dataset ya trae campo nuevo, úsalo.
+            if (isset($r['horas_hasta_1ra_respuesta']) && is_numeric($r['horas_hasta_1ra_respuesta'])) {
+                $sumFirstRespHours += (float)$r['horas_hasta_1ra_respuesta'];
+                $cntFirstResp++;
+            } else {
+                $recv = $r['received_at'] ?? null;
+                $fr = $r['first_response_at'] ?? null;
+                if ($recv && $fr) {
+                    $ts1 = strtotime((string)$recv);
+                    $ts2 = strtotime((string)$fr);
+                    if ($ts1 !== false && $ts2 !== false && $ts2 >= $ts1) {
+                        $sumFirstRespHours += (($ts2 - $ts1) / 3600);
+                        $cntFirstResp++;
+                    }
+                }
+            }
+
+            $scode = (string)($r['status_code'] ?? '');
+            $sname = (string)($r['status_name'] ?? $scode);
+            if ($scode === '') $scode = $sname !== '' ? $sname : 'SIN_ESTADO';
+
+            if (!isset($byStatus[$scode])) $byStatus[$scode] = ['name' => $sname, 'count' => 0];
+            $byStatus[$scode]['count']++;
+
+            $sf = strtoupper((string)($r['current_sla_state'] ?? $r['semaforo'] ?? $r['sla_state'] ?? ''));
+            if ($sf === '') $sf = 'N/A';
+
+            if (!isset($bySemaforo[$sf])) {
+                $color = match ($sf) {
+                    'VERDE' => 'success',
+                    'AMARILLO' => 'warning',
+                    'ROJO' => 'danger',
+                    'RESPONDIDO', 'CERRADO' => 'primary',
+                    default => 'secondary'
+                };
+                $bySemaforo[$sf] = ['count' => 0, 'color' => $color];
+            }
+            $bySemaforo[$sf]['count']++;
+        }
+
+        uasort($byStatus, fn($a, $b) => ($b['count'] ?? 0) <=> ($a['count'] ?? 0));
+        uasort($bySemaforo, fn($a, $b) => ($b['count'] ?? 0) <=> ($a['count'] ?? 0));
+
+        $avg = $cntFirstResp > 0 ? round($sumFirstRespHours / $cntFirstResp, 1) : 0;
+
+        return [
+            'total_cases' => $total,
+            'responded' => $responded,
+            'pending' => $pending,
+            'avg_response_hours' => $avg,
+            'by_status' => $byStatus,
+            'by_semaforo' => $bySemaforo,
+        ];
     }
 }

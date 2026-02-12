@@ -6,11 +6,56 @@ use function App\Config\url;
 
 function esc($v): string { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 function n($v): int { return (int)($v ?? 0); }
+function fnum($v, int $dec = 1): string {
+  if ($v === null || $v === '') return '—';
+  if (!is_numeric($v)) return esc((string)$v);
+  return number_format((float)$v, $dec, '.', '');
+}
+
+/**
+ * ✅ Recomendación aplicada (SIN romper):
+ * - Si existe business_minutes (tracking hábil), lo usamos para mostrar "Tiempo" en horas hábiles.
+ * - Si no existe, caemos a minutes_since_creation (compat).
+ * - Si no existe, caemos a days_since_creation / dias_desde_creacion.
+ */
+function computeTimeLabel(array $row): string {
+  // 1) Preferir horas hábiles (business_minutes)
+  $biz = $row['business_minutes'] ?? null;
+  if ($biz !== null && $biz !== '' && is_numeric($biz)) {
+    $bizMins = (int)$biz;
+    if ($bizMins > 0) return fnum($bizMins / 60, 1) . ' h (hábiles)';
+    return '0.0 h (hábiles)';
+  }
+
+  // 2) Compat: minutos desde creación (minutes_since_creation)
+  $mins = $row['minutes_since_creation'] ?? null;
+  if ($mins !== null && $mins !== '' && is_numeric($mins)) {
+    $m = (int)$mins;
+    if ($m > 0) return fnum($m / 60, 1) . ' h';
+  }
+
+  // 3) Compat: días (puede venir en español o inglés)
+  $dias = $row['dias_desde_creacion'] ?? ($row['days_since_creation'] ?? null);
+  if ($dias !== null && $dias !== '' && is_numeric($dias)) {
+    $d = (int)$dias;
+    if ($d > 0) return $d . ' días';
+  }
+
+  // 4) Compat extra: algunas vistas usan "minutes_since_creation" o "minutes_since_received"
+  $mins2 = $row['minutes_since_received'] ?? null;
+  if ($mins2 !== null && $mins2 !== '' && is_numeric($mins2)) {
+    $m2 = (int)$mins2;
+    if ($m2 > 0) return fnum($m2 / 60, 1) . ' h';
+  }
+
+  return '—';
+}
 
 $total = is_array($data ?? null) ? count($data) : 0;
 $csrfToken = $csrfToken ?? \App\Auth\Csrf::token();
 
-$userName = Auth::user()['full_name'] ?? Auth::user()['username'] ?? 'Sistema';
+$user = Auth::user();
+$userName = $user['full_name'] ?? $user['username'] ?? 'Sistema';
 ?>
 
 <div class="report-results">
@@ -141,10 +186,16 @@ $userName = Auth::user()['full_name'] ?? Auth::user()['username'] ?? 'Sistema';
                   $subject = $row['subject'] ?? '';
                   $sender = $row['sender_email'] ?? ($row['requester_email'] ?? '');
                   $statusName = $row['status_name'] ?? ($row['status_code'] ?? '');
-                  $assigned = $row['assigned_to'] ?? ($row['assigned_user_id'] ?? 'Sin asignar');
 
-                  $semaforo = $row['semaforo'] ?? ($row['current_sla_state'] ?? '');
-                  $semaforoColor = match ((string)$semaforo) {
+                  // assigned_to (vistas métricas) o assigned_user (export) o assigned_user_id (crudo)
+                  $assigned = $row['assigned_to']
+                    ?? ($row['assigned_user'] ?? ($row['assigned_user_id'] ?? 'Sin asignar'));
+
+                  // semáforo puede venir como semaforo/current_sla_state/sla_state
+                  $semaforo = $row['semaforo'] ?? ($row['current_sla_state'] ?? ($row['sla_state'] ?? ''));
+                  $semaforo = (string)$semaforo;
+
+                  $semaforoColor = match ($semaforo) {
                     'VERDE' => 'success',
                     'AMARILLO' => 'warning',
                     'ROJO' => 'danger',
@@ -152,12 +203,14 @@ $userName = Auth::user()['full_name'] ?? Auth::user()['username'] ?? 'Sistema';
                     default => 'secondary',
                   };
 
-                  $mins = n($row['minutes_since_creation'] ?? 0);
-                  $dias = n($row['dias_desde_creacion'] ?? 0);
-                  $timeLabel = $mins > 0 ? (round($mins/60, 1) . ' h') : ($dias > 0 ? ($dias . ' días') : '—');
+                  // ✅ etiqueta de tiempo con fallback (business_minutes -> minutes_since_creation -> days)
+                  $timeLabel = computeTimeLabel($row);
 
-                  $createdAt = $row['created_at'] ?? null;
-                  $dueAt = $row['sla_due_at'] ?? null;
+                  // ✅ “Creación” (reloj operativo): prioriza received_at, luego created_at
+                  $createdAt = $row['received_at'] ?? ($row['created_at'] ?? null);
+
+                  // “Vence”: tracking (sla_due_at) o due_at (cases)
+                  $dueAt = $row['sla_due_at'] ?? ($row['due_at'] ?? null);
                 ?>
                 <tr>
                   <td class="fw-semibold"><?= esc((string)$id) ?></td>
@@ -166,7 +219,7 @@ $userName = Auth::user()['full_name'] ?? Auth::user()['username'] ?? 'Sistema';
                   <td><span class="badge bg-secondary"><?= esc((string)$statusName) ?></span></td>
                   <td><?= esc((string)$assigned) ?></td>
                   <td class="text-nowrap"><?= $createdAt ? esc(date('d/m/Y', strtotime((string)$createdAt))) : '—' ?></td>
-                  <td><span class="badge bg-<?= esc($semaforoColor) ?>"><?= esc((string)$semaforo) ?></span></td>
+                  <td><span class="badge bg-<?= esc($semaforoColor) ?>"><?= esc($semaforo ?: '—') ?></span></td>
                   <td><span class="badge bg-light text-dark"><?= esc($timeLabel) ?></span></td>
                   <td class="text-nowrap"><?= $dueAt ? esc((string)$dueAt) : '—' ?></td>
                   <td class="text-end">
