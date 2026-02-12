@@ -5,7 +5,6 @@ use function App\Config\url;
 
 $users = $users ?? [];
 $roles = $roles ?? [];
-$flash = $flash ?? null;
 $_csrf = $_csrf ?? '';
 $search = $search ?? '';
 $isActive = $isActive ?? null;
@@ -13,14 +12,31 @@ $roleId = $roleId ?? null;
 $pagination = $pagination ?? [];
 $stats = $stats ?? [];
 
-$totalPages = $pagination['totalPages'] ?? 1;
-$currentPage = $pagination['page'] ?? 1;
-$hasPrev = $pagination['hasPrev'] ?? false;
-$hasNext = $pagination['hasNext'] ?? false;
+$totalPages  = (int)($pagination['totalPages'] ?? 1);
+$currentPage = (int)($pagination['page'] ?? 1);
+$hasPrev     = (bool)($pagination['hasPrev'] ?? false);
+$hasNext     = (bool)($pagination['hasNext'] ?? false);
+$perPage     = (int)($pagination['perPage'] ?? 20);
+$total       = (int)($pagination['total'] ?? 0);
+
+// Helpers de paginación: evita "active=&role_id=" cuando están vacíos
+$qs = static function(array $overrides = []) use ($search, $isActive, $roleId): string {
+    $q = [];
+    if ($overrides !== []) {
+        // si te pasan page y otros, lo respetamos
+        $q = $overrides;
+    }
+    // Mantener filtros actuales salvo que sobreescriban
+    if (!array_key_exists('search', $q) && $search !== '') $q['search'] = $search;
+    if (!array_key_exists('active', $q) && $isActive !== null) $q['active'] = (string)$isActive;
+    if (!array_key_exists('role_id', $q) && $roleId !== null) $q['role_id'] = (string)$roleId;
+
+    return http_build_query($q);
+};
 ?>
 
 <div class="container-fluid py-3">
-    
+
     <!-- Encabezado -->
     <div class="d-flex justify-content-between align-items-center mb-4">
         <div>
@@ -29,45 +45,16 @@ $hasNext = $pagination['hasNext'] ?? false;
             </h1>
             <p class="text-muted mb-0">Administra los usuarios del sistema ICBF Mail</p>
         </div>
-        
+
         <div class="d-flex gap-2">
-            <a href="<?= esc(url('/admin/users/create')) ?>" 
-               class="btn btn-success">
+            <a href="<?= esc(url('/admin/users/create')) ?>" class="btn btn-success">
                 <i class="bi bi-person-plus me-1"></i>Nuevo Usuario
             </a>
-            <a href="<?= esc(url('/admin/users/import')) ?>" 
-               class="btn btn-outline-primary">
+            <a href="<?= esc(url('/admin/users/import')) ?>" class="btn btn-outline-primary">
                 <i class="bi bi-upload me-1"></i>Importar
             </a>
         </div>
     </div>
-
-    <!-- Flash Messages -->
-    <?php if ($flash): ?>
-        <?php
-            $type = $flash['type'] ?? 'info';
-            $msg = $flash['message'] ?? '';
-            $cls = match($type) {
-                'success' => 'alert-success',
-                'error' => 'alert-danger',
-                'warning' => 'alert-warning',
-                'info' => 'alert-info',
-                default => 'alert-secondary'
-            };
-            $icon = match($type) {
-                'success' => 'bi-check-circle-fill',
-                'error' => 'bi-exclamation-triangle-fill',
-                'warning' => 'bi-exclamation-triangle-fill',
-                'info' => 'bi-info-circle-fill',
-                default => 'bi-info-circle'
-            };
-        ?>
-        <div class="alert <?= $cls ?> alert-dismissible fade show" role="alert">
-            <i class="bi <?= $icon ?> me-2"></i>
-            <?= nl2br(esc($msg)) ?>
-            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-        </div>
-    <?php endif; ?>
 
     <!-- Estadísticas Rápidas -->
     <div class="row mb-4">
@@ -86,7 +73,7 @@ $hasNext = $pagination['hasNext'] ?? false;
                 </div>
             </div>
         </div>
-        
+
         <div class="col-md-3 col-sm-6 mb-3">
             <div class="card border-0 bg-success bg-opacity-10">
                 <div class="card-body">
@@ -102,7 +89,7 @@ $hasNext = $pagination['hasNext'] ?? false;
                 </div>
             </div>
         </div>
-        
+
         <div class="col-md-3 col-sm-6 mb-3">
             <div class="card border-0 bg-info bg-opacity-10">
                 <div class="card-body">
@@ -118,7 +105,7 @@ $hasNext = $pagination['hasNext'] ?? false;
                 </div>
             </div>
         </div>
-        
+
         <div class="col-md-3 col-sm-6 mb-3">
             <div class="card border-0 bg-warning bg-opacity-10">
                 <div class="card-body">
@@ -145,13 +132,13 @@ $hasNext = $pagination['hasNext'] ?? false;
             <form method="get" action="<?= esc(url('/admin/users')) ?>" class="row g-3">
                 <div class="col-md-4">
                     <label class="form-label">Buscar</label>
-                    <input type="text" 
-                           class="form-control" 
-                           name="search" 
+                    <input type="text"
+                           class="form-control"
+                           name="search"
                            value="<?= esc($search) ?>"
                            placeholder="Documento, usuario, email o nombre">
                 </div>
-                
+
                 <div class="col-md-3">
                     <label class="form-label">Estado</label>
                     <select class="form-select" name="active">
@@ -160,27 +147,27 @@ $hasNext = $pagination['hasNext'] ?? false;
                         <option value="0" <?= $isActive === 0 ? 'selected' : '' ?>>Inactivo</option>
                     </select>
                 </div>
-                
+
                 <div class="col-md-3">
                     <label class="form-label">Rol</label>
                     <select class="form-select" name="role_id">
                         <option value="">Todos los roles</option>
                         <?php foreach ($roles as $r): ?>
-                            <option value="<?= esc($r['id']) ?>" 
+                            <option value="<?= esc($r['id']) ?>"
                                 <?= $roleId === (int)$r['id'] ? 'selected' : '' ?>>
                                 <?= esc($r['code'] . ' - ' . $r['name']) ?>
                             </option>
                         <?php endforeach; ?>
                     </select>
                 </div>
-                
+
                 <div class="col-md-2 d-flex align-items-end">
                     <div class="d-flex gap-2">
                         <button type="submit" class="btn btn-primary">
                             <i class="bi bi-search me-1"></i>Filtrar
                         </button>
                         <?php if ($search || $isActive !== null || $roleId !== null): ?>
-                            <a href="<?= esc(url('/admin/users')) ?>" class="btn btn-outline-secondary">
+                            <a href="<?= esc(url('/admin/users')) ?>" class="btn btn-outline-secondary" title="Limpiar filtros">
                                 <i class="bi bi-x-circle"></i>
                             </a>
                         <?php endif; ?>
@@ -195,27 +182,29 @@ $hasNext = $pagination['hasNext'] ?? false;
         <div class="card-header bg-light d-flex justify-content-between align-items-center">
             <h6 class="mb-0">
                 <i class="bi bi-table me-2"></i>Lista de Usuarios
-                <span class="badge bg-secondary ms-2"><?= esc($pagination['total'] ?? 0) ?></span>
+                <span class="badge bg-secondary ms-2"><?= esc($total) ?></span>
             </h6>
-            
+
             <div class="d-flex align-items-center gap-2">
-                <a href="<?= esc(url('/admin/users/export-template')) ?>" 
+                <a href="<?= esc(url('/admin/users/export-template')) ?>"
                    class="btn btn-sm btn-outline-secondary">
                     <i class="bi bi-download me-1"></i>Plantilla
                 </a>
-                
-                <form method="post" 
-                      action="<?= esc(url('/admin/users/export')) ?>" 
-                      class="d-inline"
-                      onsubmit="return confirm('¿Exportar todos los usuarios a Excel?')">
+
+                <form method="post" action="<?= esc(url('/admin/users/export')) ?>" class="d-inline">
                     <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
-                    <button type="submit" class="btn btn-sm btn-outline-primary">
+                    <button type="submit"
+                            class="btn btn-sm btn-outline-primary"
+                            data-confirm="true"
+                            data-confirm-title="Exportar usuarios"
+                            data-confirm-text="¿Exportar todos los usuarios a Excel?"
+                            data-confirm-icon="question">
                         <i class="bi bi-file-excel me-1"></i>Exportar
                     </button>
                 </form>
             </div>
         </div>
-        
+
         <div class="card-body p-0">
             <div class="table-responsive">
                 <table class="table table-hover align-middle mb-0">
@@ -234,40 +223,40 @@ $hasNext = $pagination['hasNext'] ?? false;
                     <tbody>
                         <?php foreach ($users as $u): ?>
                             <?php
-                                $userRoles = !empty($u['roles']) 
-                                    ? array_map('trim', explode(',', $u['roles']))
+                                $userRoles = !empty($u['roles'])
+                                    ? array_map('trim', explode(',', (string)$u['roles']))
                                     : [];
                             ?>
                             <tr>
                                 <td class="ps-3">
                                     <small class="text-muted">#<?= esc($u['id']) ?></small>
                                 </td>
-                                
+
                                 <td>
-                                    <?php if ($u['document']): ?>
+                                    <?php if (!empty($u['document'])): ?>
                                         <span class="fw-semibold"><?= esc($u['document']) ?></span>
                                     <?php else: ?>
                                         <span class="text-muted">—</span>
                                     <?php endif; ?>
                                 </td>
-                                
+
                                 <td>
                                     <div class="fw-semibold"><?= esc($u['username']) ?></div>
-                                    <?php if ($u['assign_enabled'] == 1): ?>
+                                    <?php if ((int)($u['assign_enabled'] ?? 0) === 1): ?>
                                         <span class="badge bg-info bg-opacity-10 text-info border border-info border-opacity-25 badge-sm">
                                             <i class="bi bi-person-check me-1"></i>Asignable
                                         </span>
                                     <?php endif; ?>
                                 </td>
-                                
+
                                 <td><?= esc($u['full_name']) ?></td>
-                                
+
                                 <td>
                                     <a href="mailto:<?= esc($u['email']) ?>" class="text-decoration-none">
                                         <?= esc($u['email']) ?>
                                     </a>
                                 </td>
-                                
+
                                 <td>
                                     <?php if (empty($userRoles)): ?>
                                         <span class="badge bg-light text-dark border">Sin roles</span>
@@ -287,9 +276,9 @@ $hasNext = $pagination['hasNext'] ?? false;
                                         <?php endforeach; ?>
                                     <?php endif; ?>
                                 </td>
-                                
+
                                 <td class="text-center">
-                                    <?php if ((int)($u['is_active']) === 1): ?>
+                                    <?php if ((int)($u['is_active'] ?? 0) === 1): ?>
                                         <span class="badge bg-success">
                                             <i class="bi bi-check-circle me-1"></i>Activo
                                         </span>
@@ -299,50 +288,55 @@ $hasNext = $pagination['hasNext'] ?? false;
                                         </span>
                                     <?php endif; ?>
                                 </td>
-                                
+
                                 <td class="text-center">
-                                    <div class="btn-group btn-group-sm" role="group">
-                                        <a href="<?= esc(url('/admin/users/edit/' . $u['id'])) ?>" 
+                                    <div class="btn-group btn-group-sm" role="group" aria-label="Acciones de usuario">
+                                        <a href="<?= esc(url('/admin/users/edit/' . $u['id'])) ?>"
                                            class="btn btn-outline-primary"
                                            title="Editar">
                                             <i class="bi bi-pencil"></i>
                                         </a>
-                                        
-                                        <?php if ((int)($u['is_active']) === 1): ?>
-                                            <form method="post" 
-                                                  action="<?= esc(url('/admin/users/toggle-active/' . $u['id'])) ?>"
-                                                  class="d-inline"
-                                                  onsubmit="return confirm('¿Desactivar este usuario?')">
-                                                <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
-                                                <button type="submit" 
+
+                                        <form method="post"
+                                              action="<?= esc(url('/admin/users/toggle-active/' . $u['id'])) ?>"
+                                              class="d-inline">
+                                            <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
+
+                                            <?php if ((int)($u['is_active'] ?? 0) === 1): ?>
+                                                <button type="submit"
                                                         class="btn btn-outline-warning"
-                                                        title="Desactivar">
+                                                        title="Desactivar"
+                                                        data-confirm="true"
+                                                        data-confirm-title="Cambiar estado"
+                                                        data-confirm-text="¿Desactivar este usuario?"
+                                                        data-confirm-icon="warning">
                                                     <i class="bi bi-pause"></i>
                                                 </button>
-                                            </form>
-                                        <?php else: ?>
-                                            <form method="post" 
-                                                  action="<?= esc(url('/admin/users/toggle-active/' . $u['id'])) ?>"
-                                                  class="d-inline"
-                                                  onsubmit="return confirm('¿Activar este usuario?')">
-                                                <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
-                                                <button type="submit" 
+                                            <?php else: ?>
+                                                <button type="submit"
                                                         class="btn btn-outline-success"
-                                                        title="Activar">
+                                                        title="Activar"
+                                                        data-confirm="true"
+                                                        data-confirm-title="Cambiar estado"
+                                                        data-confirm-text="¿Activar este usuario?"
+                                                        data-confirm-icon="question">
                                                     <i class="bi bi-play"></i>
                                                 </button>
-                                            </form>
-                                        <?php endif; ?>
-                                        
-                                        <form method="post" 
+                                            <?php endif; ?>
+                                        </form>
+
+                                        <form method="post"
                                               action="<?= esc(url('/admin/users/delete/' . $u['id'])) ?>"
-                                              class="d-inline"
-                                              onsubmit="return confirm('¿Eliminar permanentemente este usuario? Esta acción no se puede deshacer.')">
+                                              class="d-inline">
                                             <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
-                                            <button type="submit" 
+                                            <button type="submit"
                                                     class="btn btn-outline-danger"
                                                     title="Eliminar"
-                                                    <?= $u['id'] === ($_SESSION['user_id'] ?? null) ? 'disabled' : '' ?>>
+                                                    data-confirm="true"
+                                                    data-confirm-title="Eliminar usuario"
+                                                    data-confirm-text="¿Eliminar permanentemente este usuario? Esta acción no se puede deshacer."
+                                                    data-confirm-icon="warning"
+                                                    <?= ((int)$u['id'] === (int)($_SESSION['user_id'] ?? 0)) ? 'disabled' : '' ?>>
                                                 <i class="bi bi-trash"></i>
                                             </button>
                                         </form>
@@ -350,7 +344,7 @@ $hasNext = $pagination['hasNext'] ?? false;
                                 </td>
                             </tr>
                         <?php endforeach; ?>
-                        
+
                         <?php if (empty($users)): ?>
                             <tr>
                                 <td colspan="8" class="text-center py-5">
@@ -366,23 +360,27 @@ $hasNext = $pagination['hasNext'] ?? false;
                 </table>
             </div>
         </div>
-        
+
         <!-- Paginación -->
         <?php if ($totalPages > 1): ?>
             <div class="card-footer bg-light">
                 <div class="d-flex justify-content-between align-items-center">
                     <div class="text-muted small">
-                        Mostrando <?= esc(($currentPage - 1) * ($pagination['perPage'] ?? 20) + 1) ?> 
-                        a <?= esc(min($currentPage * ($pagination['perPage'] ?? 20), $pagination['total'] ?? 0)) ?> 
-                        de <?= esc($pagination['total'] ?? 0) ?> usuarios
+                        <?php if ($total > 0): ?>
+                            Mostrando <?= esc((($currentPage - 1) * $perPage) + 1) ?>
+                            a <?= esc(min($currentPage * $perPage, $total)) ?>
+                            de <?= esc($total) ?> usuarios
+                        <?php else: ?>
+                            Mostrando 0 usuarios
+                        <?php endif; ?>
                     </div>
-                    
+
                     <nav aria-label="Paginación de usuarios">
                         <ul class="pagination pagination-sm mb-0">
                             <?php if ($hasPrev): ?>
                                 <li class="page-item">
-                                    <a class="page-link" 
-                                       href="<?= esc(url('/admin/users?page=' . ($currentPage - 1) . '&search=' . urlencode($search) . '&active=' . $isActive . '&role_id=' . $roleId)) ?>">
+                                    <a class="page-link"
+                                       href="<?= esc(url('/admin/users?' . $qs(['page' => $currentPage - 1]))) ?>">
                                         <i class="bi bi-chevron-left"></i>
                                     </a>
                                 </li>
@@ -391,30 +389,26 @@ $hasNext = $pagination['hasNext'] ?? false;
                                     <span class="page-link"><i class="bi bi-chevron-left"></i></span>
                                 </li>
                             <?php endif; ?>
-                            
+
                             <?php for ($i = 1; $i <= $totalPages; $i++): ?>
-                                <?php if ($i == 1 || $i == $totalPages || abs($i - $currentPage) <= 2): ?>
+                                <?php if ($i === 1 || $i === $totalPages || abs($i - $currentPage) <= 2): ?>
                                     <li class="page-item <?= $i === $currentPage ? 'active' : '' ?>">
-                                        <a class="page-link" 
-                                           href="<?= esc(url('/admin/users?page=' . $i . '&search=' . urlencode($search) . '&active=' . $isActive . '&role_id=' . $roleId)) ?>">
+                                        <a class="page-link"
+                                           href="<?= esc(url('/admin/users?' . $qs(['page' => $i]))) ?>">
                                             <?= $i ?>
                                         </a>
                                     </li>
-                                <?php elseif ($i == 2 && $currentPage > 4): ?>
-                                    <li class="page-item disabled">
-                                        <span class="page-link">...</span>
-                                    </li>
-                                <?php elseif ($i == $totalPages - 1 && $currentPage < $totalPages - 3): ?>
-                                    <li class="page-item disabled">
-                                        <span class="page-link">...</span>
-                                    </li>
+                                <?php elseif ($i === 2 && $currentPage > 4): ?>
+                                    <li class="page-item disabled"><span class="page-link">...</span></li>
+                                <?php elseif ($i === $totalPages - 1 && $currentPage < $totalPages - 3): ?>
+                                    <li class="page-item disabled"><span class="page-link">...</span></li>
                                 <?php endif; ?>
                             <?php endfor; ?>
-                            
+
                             <?php if ($hasNext): ?>
                                 <li class="page-item">
-                                    <a class="page-link" 
-                                       href="<?= esc(url('/admin/users?page=' . ($currentPage + 1) . '&search=' . urlencode($search) . '&active=' . $isActive . '&role_id=' . $roleId)) ?>">
+                                    <a class="page-link"
+                                       href="<?= esc(url('/admin/users?' . $qs(['page' => $currentPage + 1]))) ?>">
                                         <i class="bi bi-chevron-right"></i>
                                     </a>
                                 </li>
@@ -432,130 +426,34 @@ $hasNext = $pagination['hasNext'] ?? false;
 
 </div>
 
-<!-- Modal de confirmación -->
-<div class="modal fade" id="confirmModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-sm">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Confirmar acción</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <p id="confirmMessage"></p>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
-                <form id="confirmForm" method="post" style="display: inline;">
-                    <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
-                    <button type="submit" class="btn btn-danger">Confirmar</button>
-                </form>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Modal para errores de importación -->
-<div class="modal fade" id="importErrorsModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="bi bi-exclamation-triangle text-warning me-2"></i>
-                    Errores de Importación
-                </h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <?php if (!empty($_SESSION['_import_errors'])): ?>
-                    <div class="alert alert-warning">
-                        <p>Se encontraron los siguientes errores durante la importación:</p>
-                    </div>
-                    <ul class="list-group">
-                        <?php foreach ($_SESSION['_import_errors'] as $error): ?>
-                            <li class="list-group-item list-group-item-danger">
-                                <i class="bi bi-x-circle me-2"></i><?= esc($error) ?>
-                            </li>
-                        <?php endforeach; ?>
-                    </ul>
-                    <?php unset($_SESSION['_import_errors']); ?>
-                <?php else: ?>
-                    <div class="text-center py-4">
-                        <i class="bi bi-check-circle display-4 text-success mb-3"></i>
-                        <h5>No hay errores para mostrar</h5>
-                    </div>
-                <?php endif; ?>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
-            </div>
-        </div>
-    </div>
-</div>
-
 <script>
-// Confirmación mejorada para acciones
-if (window.location.hash === '#password-generated') {
-    const userId = new URLSearchParams(window.location.search).get('user_id');
-    const storedPassword = sessionStorage.getItem('generated_password_' + userId);
-    
-    if (storedPassword) {
-        Swal.fire({
-            title: 'Contraseña Generada',
-            html: `La contraseña temporal es: <code>${storedPassword}</code><br><br>
-                  <small>Guarda esta contraseña de manera segura.</small>`,
-            icon: 'info',
-            confirmButtonText: 'Copiar al Portapapeles',
-            showCancelButton: true,
-            cancelButtonText: 'Cerrar'
-        }).then((result) => {
-            if (result.isConfirmed) {
-                navigator.clipboard.writeText(storedPassword);
-                Swal.fire('Copiado!', 'Contraseña copiada al portapapeles.', 'success');
-            }
-            sessionStorage.removeItem('generated_password_' + userId);
-        });
-    }
-}
-
-// Confirmación mejorada para eliminación
-document.addEventListener('DOMContentLoaded', function() {
-    // Confirmación con SweetAlert
-    document.querySelectorAll('form[data-confirm]').forEach(form => {
-        form.addEventListener('submit', function(e) {
-            e.preventDefault();
-            const message = this.getAttribute('data-confirm');
-            const form = this;
-            
-            Swal.fire({
-                title: '¿Estás seguro?',
-                text: message,
-                icon: 'warning',
-                showCancelButton: true,
-                confirmButtonColor: '#d33',
-                cancelButtonColor: '#3085d6',
-                confirmButtonText: 'Sí, continuar',
-                cancelButtonText: 'Cancelar'
-            }).then((result) => {
-                if (result.isConfirmed) {
-                    form.submit();
-                }
-            });
-        });
-    });
-    
-    // Auto-focus en búsqueda
-    const searchInput = document.querySelector('input[name="search"]');
-    if (searchInput && !searchInput.value) {
-        searchInput.focus();
-    }
-    
-    // Filtro rápido por rol
-    document.querySelectorAll('[data-filter-role]').forEach(btn => {
-        btn.addEventListener('click', function() {
-            const roleId = this.getAttribute('data-filter-role');
-            document.querySelector('select[name="role_id"]').value = roleId;
-            document.querySelector('form[method="get"]').submit();
-        });
-    });
+document.addEventListener('DOMContentLoaded', function () {
+  // Auto-focus en búsqueda
+  const searchInput = document.querySelector('input[name="search"]');
+  if (searchInput && !searchInput.value) searchInput.focus();
 });
+
+// ✅ Password generated (tu lógica original)
+if (window.location.hash === '#password-generated') {
+  const userId = new URLSearchParams(window.location.search).get('user_id');
+  const storedPassword = sessionStorage.getItem('generated_password_' + userId);
+
+  if (storedPassword) {
+    Swal.fire({
+      title: 'Contraseña Generada',
+      html: `La contraseña temporal es: <code>${storedPassword}</code><br><br>
+            <small>Guarda esta contraseña de manera segura.</small>`,
+      icon: 'info',
+      confirmButtonText: 'Copiar al Portapapeles',
+      showCancelButton: true,
+      cancelButtonText: 'Cerrar'
+    }).then((result) => {
+      if (result.isConfirmed) {
+        navigator.clipboard.writeText(storedPassword);
+        Swal.fire('Copiado!', 'Contraseña copiada al portapapeles.', 'success');
+      }
+      sessionStorage.removeItem('generated_password_' + userId);
+    });
+  }
+}
 </script>

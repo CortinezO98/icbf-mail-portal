@@ -14,7 +14,7 @@ $rolesCount = is_array($roles) ? count($roles) : 0;
   position: sticky;
   bottom: 0;
   background: #fff;
-  z-index: 999; /* 🔥 subimos para que no lo tape nada */
+  z-index: 999;
   padding: 12px 0 0;
   margin-top: 16px;
   box-shadow: 0 -10px 20px rgba(0,0,0,.06);
@@ -27,10 +27,9 @@ $rolesCount = is_array($roles) ? count($roles) : 0;
   pointer-events: none;
   background: linear-gradient(180deg, rgba(255,255,255,0), rgba(255,255,255,1));
 }
-
 /* ✅ Evita que el sticky tape el final del contenido */
 body.page-app main#mainContent{
-  padding-bottom: 80px; /* ajusta si quieres */
+  padding-bottom: 80px;
 }
 </style>
 
@@ -45,7 +44,6 @@ body.page-app main#mainContent{
       <p class="text-muted mb-0">Completa el formulario para registrar un nuevo usuario en el sistema</p>
     </div>
 
-    <!-- ✅ Acciones ARRIBA (siempre visibles sin scroll) -->
     <div class="d-flex gap-2">
       <a href="<?= esc(url('/admin/users')) ?>" class="btn btn-outline-secondary">
         <i class="bi bi-arrow-left me-1"></i>Volver a la lista
@@ -53,17 +51,7 @@ body.page-app main#mainContent{
     </div>
   </div>
 
-  <?php if ($rolesCount === 0): ?>
-    <div class="alert alert-warning d-flex align-items-start gap-2" role="alert">
-      <i class="bi bi-exclamation-triangle-fill"></i>
-      <div>
-        <div class="fw-semibold">No hay roles disponibles</div>
-        <div class="small">
-          No se puede crear un usuario sin roles. Verifica que la tabla <code>roles</code> tenga registros.
-        </div>
-      </div>
-    </div>
-  <?php endif; ?>
+  <!-- ❌ Eliminado alert Bootstrap de roles: ahora se muestra con SweetAlert al cargar (ver script) -->
 
   <div class="row">
     <div class="col-lg-8 col-xl-6 mx-auto">
@@ -189,8 +177,6 @@ body.page-app main#mainContent{
                     <i class="bi bi-clipboard me-1"></i>Copiar
                   </button>
                 </div>
-
-                <div id="passwordAlertHost" class="mt-2"></div>
               </div>
 
               <div class="col-md-6">
@@ -268,8 +254,6 @@ body.page-app main#mainContent{
                 <?php endforeach; ?>
               </select>
 
-
-
               <div class="invalid-feedback">Selecciona al menos un rol.</div>
               <div class="form-text">Ctrl (Cmd en Mac) para seleccionar múltiples</div>
 
@@ -312,6 +296,8 @@ body.page-app main#mainContent{
         </div>
       </div>
 
+      <!-- Puedes dejar esto porque NO es un "aviso flash", es contenido informativo fijo.
+           Si quieres 100% cero alerts Bootstrap en toda la pantalla, dímelo y lo paso a Card normal. -->
       <div class="alert alert-info mt-4">
         <div class="d-flex">
           <div class="flex-shrink-0"><i class="bi bi-info-circle-fill"></i></div>
@@ -335,33 +321,34 @@ body.page-app main#mainContent{
 document.addEventListener('DOMContentLoaded', function() {
   const form = document.getElementById('userForm');
   const submitBtn = document.getElementById('submitBtn');
-  const submitTop = document.getElementById('submitTop');
 
   const generatePasswordBtn = document.getElementById('generatePassword');
   const copyPasswordBtn = document.getElementById('copyPassword');
   const passwordInput = document.getElementById('password');
   const togglePasswordBtn = document.getElementById('togglePassword');
-  const alertHost = document.getElementById('passwordAlertHost');
 
   const rolesSelect = document.getElementById('role_ids');
   const rolesSelectAll = document.getElementById('rolesSelectAll');
   const rolesClear = document.getElementById('rolesClear');
 
-  function clearPasswordAlert() { if (alertHost) alertHost.innerHTML = ''; }
-  function showPasswordAlert(password) {
-    if (!alertHost) return;
-    clearPasswordAlert();
-    const div = document.createElement('div');
-    div.className = 'alert alert-success alert-dismissible fade show';
-    div.innerHTML = `
-      <i class="bi bi-check-circle me-2"></i>
-      Contraseña generada: <code>${password}</code>
-      <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-    `;
-    alertHost.appendChild(div);
+  // Fallback por si Swal no está cargado (no rompe el flujo)
+  const SwalSafe = (window.Swal && typeof window.Swal.fire === 'function')
+    ? window.Swal
+    : { fire: (opts) => { console.log('Swal missing:', opts); } };
+
+  const rolesCount = <?= (int)$rolesCount ?>;
+
+  // ✅ Aviso si NO hay roles (solo SweetAlert)
+  if (rolesCount === 0) {
+    SwalSafe.fire({
+      icon: 'warning',
+      title: 'No hay roles disponibles',
+      text: 'No se puede crear un usuario sin roles. Verifica que la tabla roles tenga registros.',
+    });
   }
 
-  generatePasswordBtn?.addEventListener('click', function() {
+  // ✅ Generar contraseña segura (SweetAlert + botón Copiar)
+  function generateStrongPassword() {
     const lower = 'abcdefghijklmnopqrstuvwxyz';
     const upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
     const nums  = '0123456789';
@@ -375,32 +362,63 @@ document.addEventListener('DOMContentLoaded', function() {
     pwd += symb[Math.floor(Math.random() * symb.length)];
     for (let i = 0; i < 8; i++) pwd += all[Math.floor(Math.random() * all.length)];
     pwd = pwd.split('').sort(() => Math.random() - 0.5).join('');
+    return pwd;
+  }
+
+  generatePasswordBtn?.addEventListener('click', function() {
+    const pwd = generateStrongPassword();
 
     passwordInput.value = pwd;
     passwordInput.type = 'text';
-    togglePasswordBtn && (togglePasswordBtn.innerHTML = '<i class="bi bi-eye-slash"></i>');
+    if (togglePasswordBtn) togglePasswordBtn.innerHTML = '<i class="bi bi-eye-slash"></i>';
     if (copyPasswordBtn) copyPasswordBtn.disabled = false;
-    showPasswordAlert(pwd);
+
+    SwalSafe.fire({
+      icon: 'success',
+      title: 'Contraseña generada',
+      html: `Contraseña: <code>${pwd}</code><br><small>Guárdala de manera segura.</small>`,
+      showCancelButton: true,
+      confirmButtonText: 'Copiar',
+      cancelButtonText: 'Cerrar',
+    }).then(async (res) => {
+      if (res.isConfirmed) {
+        try {
+          await navigator.clipboard.writeText(pwd);
+          SwalSafe.fire({ icon:'success', title:'Copiado', text:'Contraseña copiada al portapapeles.', timer:1200, showConfirmButton:false });
+        } catch (e) {
+          // fallback copy
+          passwordInput.focus();
+          passwordInput.select();
+          document.execCommand('copy');
+          SwalSafe.fire({ icon:'success', title:'Copiado', text:'Contraseña copiada.', timer:1200, showConfirmButton:false });
+        }
+      }
+    });
   });
 
+  // ✅ Copiar (SweetAlert)
   copyPasswordBtn?.addEventListener('click', async function() {
     const val = (passwordInput?.value || '').trim();
     if (!val) return;
     try {
       await navigator.clipboard.writeText(val);
-      window.Swal?.fire({ icon:'success', title:'Copiado', text:'Contraseña copiada', timer:1200, showConfirmButton:false });
+      SwalSafe.fire({ icon:'success', title:'Copiado', text:'Contraseña copiada.', timer:1200, showConfirmButton:false });
     } catch (e) {
+      passwordInput.focus();
       passwordInput.select();
       document.execCommand('copy');
+      SwalSafe.fire({ icon:'success', title:'Copiado', text:'Contraseña copiada.', timer:1200, showConfirmButton:false });
     }
   });
 
+  // Mostrar/ocultar contraseña
   togglePasswordBtn?.addEventListener('click', function() {
     const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
     passwordInput.setAttribute('type', type);
     this.innerHTML = type === 'password' ? '<i class="bi bi-eye"></i>' : '<i class="bi bi-eye-slash"></i>';
   });
 
+  // Roles select all / clear
   rolesSelectAll?.addEventListener('click', function() {
     if (!rolesSelect) return;
     for (const opt of rolesSelect.options) opt.selected = true;
@@ -411,27 +429,51 @@ document.addEventListener('DOMContentLoaded', function() {
     for (const opt of rolesSelect.options) opt.selected = false;
   });
 
+  // ✅ Submit: validación + SweetAlert (sin romper funcionalidad)
   form?.addEventListener('submit', function(event) {
+    // Si no hay roles, no enviar
     if (rolesSelect && rolesSelect.disabled) {
       event.preventDefault();
       event.stopPropagation();
+      SwalSafe.fire({
+        icon: 'warning',
+        title: 'No se puede crear',
+        text: 'No hay roles disponibles para asignar al usuario.',
+      });
       return;
     }
 
+    // Validación nativa
     if (!form.checkValidity()) {
       event.preventDefault();
       event.stopPropagation();
+      form.classList.add('was-validated');
+
+      SwalSafe.fire({
+        icon: 'error',
+        title: 'Revisa el formulario',
+        text: 'Hay campos obligatorios o inválidos. Corrige y vuelve a intentar.',
+      });
+      return;
     }
 
-    form.classList.add('was-validated');
+    // ✅ Form OK: mostrar "creando..." y dejar enviar normal
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Creando usuario...';
+    }
 
-    if (form.checkValidity()) {
-      if (submitBtn) {
-        submitBtn.disabled = true;
-        submitBtn.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Creando usuario...';
+    SwalSafe.fire({
+      title: 'Creando usuario...',
+      text: 'Por favor espera.',
+      allowOutsideClick: false,
+      allowEscapeKey: false,
+      didOpen: () => {
+        if (window.Swal) window.Swal.showLoading();
       }
-      if (submitTop) submitTop.disabled = true;
-    }
+    });
+
+    // NO hacemos preventDefault aquí: el form sigue su curso normal (misma funcionalidad)
   });
 });
 </script>

@@ -317,8 +317,13 @@ final class UsersAdminRepo
 
     public function deleteUser(int $id): bool
     {
+        $startedHere = false;
+
         try {
-            $this->pdo->beginTransaction();
+            if (!$this->pdo->inTransaction()) {
+                $this->pdo->beginTransaction();
+                $startedHere = true;
+            }
 
             $st = $this->pdo->prepare("DELETE FROM user_roles WHERE user_id = :id");
             $st->execute([':id' => $id]);
@@ -326,21 +331,31 @@ final class UsersAdminRepo
             $st = $this->pdo->prepare("DELETE FROM users WHERE id = :id");
             $result = $st->execute([':id' => $id]);
 
-            $this->pdo->commit();
+            if ($startedHere) {
+                $this->pdo->commit();
+            }
+
             return $result;
 
         } catch (PDOException $e) {
-            if ($this->pdo->inTransaction()) {
+            if ($startedHere && $this->pdo->inTransaction()) {
                 $this->pdo->rollBack();
             }
             throw $e;
         }
     }
 
+
     public function setUserRoles(int $userId, array $roleIds): void
     {
+        $startedHere = false;
+        $roleIds = array_values(array_unique(array_filter(array_map('intval', $roleIds), fn($v) => $v > 0)));
+
         try {
-            $this->pdo->beginTransaction();
+            if (!$this->pdo->inTransaction()) {
+                $this->pdo->beginTransaction();
+                $startedHere = true;
+            }
 
             $del = $this->pdo->prepare("DELETE FROM user_roles WHERE user_id = :uid");
             $del->execute([':uid' => $userId]);
@@ -351,9 +366,6 @@ final class UsersAdminRepo
                 );
 
                 foreach ($roleIds as $rid) {
-                    $rid = (int)$rid;
-                    if ($rid <= 0) continue;
-
                     $ins->execute([
                         ':uid' => $userId,
                         ':rid' => $rid,
@@ -361,15 +373,19 @@ final class UsersAdminRepo
                 }
             }
 
-            $this->pdo->commit();
+            if ($startedHere) {
+                $this->pdo->commit();
+            }
 
-        } catch (PDOException $e) {
-            if ($this->pdo->inTransaction()) {
+        } catch (\PDOException $e) {
+            if ($startedHere && $this->pdo->inTransaction()) {
                 $this->pdo->rollBack();
             }
             throw $e;
         }
     }
+
+
 
     public function importUsersFromArray(array $users): array
     {
@@ -380,13 +396,24 @@ final class UsersAdminRepo
             'created_ids' => [],
         ];
 
+        $startedHere = false;
+
         try {
-            $this->pdo->beginTransaction();
+            if (!$this->pdo->inTransaction()) {
+                $this->pdo->beginTransaction();
+                $startedHere = true;
+            }
 
             foreach ($users as $index => $userData) {
+                $rowNum = $index + 1;
+                $sp = "sp_user_import_" . $rowNum;
+                if ($startedHere) {
+                    $this->pdo->exec("SAVEPOINT {$sp}");
+                }
+
                 try {
                     if (empty($userData['username']) || empty($userData['email']) || empty($userData['full_name'])) {
-                        throw new \Exception("Faltan campos obligatorios en fila " . ($index + 1));
+                        throw new \Exception("Faltan campos obligatorios en fila {$rowNum}");
                     }
 
                     if ($this->findByUsername((string)$userData['username'])) {
@@ -416,23 +443,36 @@ final class UsersAdminRepo
 
                     $results['success']++;
                     $results['created_ids'][] = $userId;
+                    if ($startedHere) {
+                        $this->pdo->exec("RELEASE SAVEPOINT {$sp}");
+                    }
 
-                } catch (\Exception $e) {
+                } catch (\Throwable $e) {
                     $results['failed']++;
-                    $results['errors'][] = "Fila " . ($index + 1) . ": " . $e->getMessage();
+                    $results['errors'][] = "Fila {$rowNum}: " . $e->getMessage();
+                    if ($startedHere) {
+                        $this->pdo->exec("ROLLBACK TO SAVEPOINT {$sp}");
+                        $this->pdo->exec("RELEASE SAVEPOINT {$sp}");
+                    } else {
+
+                    }
                 }
             }
 
-            $this->pdo->commit();
+            if ($startedHere) {
+                $this->pdo->commit();
+            }
+
             return $results;
 
-        } catch (\Exception $e) {
-            if ($this->pdo->inTransaction()) {
+        } catch (\Throwable $e) {
+            if ($startedHere && $this->pdo->inTransaction()) {
                 $this->pdo->rollBack();
             }
             throw $e;
         }
     }
+
 
     public function getStatistics(): array
     {

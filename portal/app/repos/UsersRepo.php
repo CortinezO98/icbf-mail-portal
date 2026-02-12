@@ -11,15 +11,24 @@ final class UsersRepo
 
     public function findByUsernameOrEmail(string $login): ?array
     {
+        $login = trim($login);
+
         $sql = "
             SELECT *
             FROM users
-            WHERE (username = :login OR email = :login)
+            WHERE (username = :login_u OR email = :login_e)
               AND is_active = 1
             LIMIT 1
         ";
+
         $st = $this->pdo->prepare($sql);
-        $st->execute([':login' => $login]);
+
+        // ✅ IMPORTANTE: dos placeholders distintos (evita HY093)
+        $st->execute([
+            ':login_u' => $login,
+            ':login_e' => $login,
+        ]);
+
         $row = $st->fetch(PDO::FETCH_ASSOC);
         return $row ?: null;
     }
@@ -64,7 +73,7 @@ final class UsersRepo
             ORDER BY u.full_name ASC
         ";
         $st = $this->pdo->query($sql);
-        return $st ? $st->fetchAll(PDO::FETCH_ASSOC) : [];
+        return $st ? ($st->fetchAll(PDO::FETCH_ASSOC) ?: []) : [];
     }
 
     public function pickLeastLoadedAgentId(): ?int

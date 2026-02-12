@@ -22,13 +22,18 @@ final class MetricsRepo
         return 'c.received_at';
     }
 
-    private function baseOpenWhere(?int $assignedUserId, array &$params): string
+    /**
+     * ✅ IMPORTANTE (HY093 fix):
+     * - NO reutilizamos placeholders nombrados.
+     * - Permitimos definir el nombre del placeholder a usar.
+     */
+    private function baseOpenWhere(?int $assignedUserId, array &$params, string $uidPlaceholder = ':uid_open'): string
     {
         $w = [];
         $w[] = "cs.is_final = 0"; // abierto
         if ($assignedUserId !== null) {
-            $w[] = "c.assigned_user_id = :uid";
-            $params[':uid'] = $assignedUserId;
+            $w[] = "c.assigned_user_id = {$uidPlaceholder}";
+            $params[$uidPlaceholder] = $assignedUserId;
         }
         return $w ? ("WHERE " . implode(" AND ", $w)) : "";
     }
@@ -105,7 +110,15 @@ final class MetricsRepo
     public function realtimeSummary(?int $assignedUserId = null): array
     {
         $params = [];
-        $whereOpen = $this->baseOpenWhere($assignedUserId, $params);
+
+        // ✅ placeholder único para el WHERE principal
+        $whereOpen = $this->baseOpenWhere($assignedUserId, $params, ':uid_open');
+
+        // ✅ placeholder único para el subquery
+        $respondedFilter = ($assignedUserId !== null) ? " AND c2.assigned_user_id = :uid_resp " : "";
+        if ($assignedUserId !== null) {
+            $params[':uid_resp'] = $assignedUserId;
+        }
 
         $sql = "
             SELECT
@@ -128,7 +141,7 @@ final class MetricsRepo
 
                 (SELECT COUNT(*) FROM cases c2
                  WHERE c2.is_responded = 1
-                 " . ($assignedUserId !== null ? " AND c2.assigned_user_id = :uid " : "") . "
+                 {$respondedFilter}
                 ) AS responded_total,
 
                 ROUND(AVG(CASE
@@ -430,8 +443,24 @@ final class MetricsRepo
 
     public function getSemaforoDistribution(?int $userId = null): array
     {
-        $andUser = $userId ? " AND c.assigned_user_id = :user_id " : "";
-        $params = $userId ? [':user_id' => $userId] : [];
+        // ✅ HY093 fix: el mismo placeholder no puede repetirse en UNIONs
+        $params = [];
+
+        $andUser1 = $userId ? " AND c.assigned_user_id = :user_id1 " : "";
+        $andUser2 = $userId ? " AND c.assigned_user_id = :user_id2 " : "";
+        $andUser3 = $userId ? " AND c.assigned_user_id = :user_id3 " : "";
+        $andUser4 = $userId ? " AND c.assigned_user_id = :user_id4 " : "";
+        $andUser5 = $userId ? " AND c.assigned_user_id = :user_id5 " : "";
+        $andUser6 = $userId ? " AND c.assigned_user_id = :user_id6 " : "";
+
+        if ($userId) {
+            $params[':user_id1'] = $userId;
+            $params[':user_id2'] = $userId;
+            $params[':user_id3'] = $userId;
+            $params[':user_id4'] = $userId;
+            $params[':user_id5'] = $userId;
+            $params[':user_id6'] = $userId;
+        }
 
         $sql = "
             SELECT
@@ -447,7 +476,7 @@ final class MetricsRepo
             AND c.is_responded = 0
             AND cst.case_id IS NOT NULL
             AND cst.current_sla_state = 'ROJO'
-            {$andUser}
+            {$andUser1}
 
             UNION ALL
 
@@ -464,7 +493,7 @@ final class MetricsRepo
             AND c.is_responded = 0
             AND cst.case_id IS NOT NULL
             AND cst.current_sla_state = 'AMARILLO'
-            {$andUser}
+            {$andUser2}
 
             UNION ALL
 
@@ -481,7 +510,7 @@ final class MetricsRepo
             AND c.is_responded = 0
             AND cst.case_id IS NOT NULL
             AND cst.current_sla_state = 'VERDE'
-            {$andUser}
+            {$andUser3}
 
             UNION ALL
 
@@ -489,13 +518,13 @@ final class MetricsRepo
                 'EN_PROCESO' AS estado,
                 COUNT(*) AS total,
                 'Casos en atención activa' AS descripcion,
-                '#fd7e14' AS color,  /* Naranja */
+                '#fd7e14' AS color,
                 'bi-gear-fill' AS icono
             FROM cases c
             JOIN case_statuses cs ON cs.id = c.status_id
             WHERE cs.code = 'EN_PROCESO'
             AND cs.is_final = 0
-            {$andUser}
+            {$andUser4}
 
             UNION ALL
 
@@ -503,11 +532,11 @@ final class MetricsRepo
                 'RESPONDIDOS' AS estado,
                 COUNT(*) AS total,
                 'Casos ya contestados' AS descripcion,
-                '#3b82f6' AS color,  /* Azul */
+                '#3b82f6' AS color,
                 'bi-chat-square-text-fill' AS icono
             FROM cases c
             WHERE c.is_responded = 1
-            {$andUser}
+            {$andUser5}
 
             UNION ALL
 
@@ -515,19 +544,19 @@ final class MetricsRepo
                 'CERRADOS' AS estado,
                 COUNT(*) AS total,
                 'Casos finalizados' AS descripcion,
-                '#6c757d' AS color,  /* Gris */
+                '#6c757d' AS color,
                 'bi-check2-all' AS icono
             FROM cases c
             JOIN case_statuses cs ON cs.id = c.status_id
             WHERE cs.is_final = 1
-            {$andUser}
+            {$andUser6}
 
-            ORDER BY FIELD(estado, 
-                'ROJO', 
-                'AMARILLO', 
-                'VERDE', 
-                'EN_PROCESO', 
-                'RESPONDIDOS', 
+            ORDER BY FIELD(estado,
+                'ROJO',
+                'AMARILLO',
+                'VERDE',
+                'EN_PROCESO',
+                'RESPONDIDOS',
                 'CERRADOS'
             )
         ";
@@ -775,7 +804,6 @@ final class MetricsRepo
         return $st->fetchAll() ?: [];
     }
 
-
     public function getAdditionalStates(?int $assignedUserId = null): array
     {
         $params = [];
@@ -797,6 +825,4 @@ final class MetricsRepo
         $stmt->execute($params);
         return $stmt->fetch() ?: ['en_proceso' => 0, 'respondido' => 0, 'cerrados' => 0];
     }
-
-
 }

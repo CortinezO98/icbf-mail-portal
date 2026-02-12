@@ -3,11 +3,42 @@ declare(strict_types=1);
 
 use function App\Config\url;
 
-$user = $user ?? [];
+$editUser = $editUser ?? ($user ?? []);
+$user = $editUser;
 $roles = $roles ?? [];
 $_csrf = $_csrf ?? '';
 
 $userRoles = $user['role_ids'] ?? [];
+
+/**
+ * ✅ Parse robusto para DATETIME con o sin microsegundos (NOW(6))
+ * Ej: "2026-02-12 13:40:10.000000" o "2026-02-12 13:40:10"
+ */
+function fmt_db_dt($value, string $outFormat): ?string
+{
+    if ($value === null) return null;
+    $value = trim((string)$value);
+    if ($value === '') return null;
+
+    // 1) Intentar con microsegundos
+    $dt = \DateTimeImmutable::createFromFormat('Y-m-d H:i:s.u', $value);
+    if ($dt instanceof \DateTimeImmutable) {
+        return $dt->format($outFormat);
+    }
+
+    // 2) Intentar sin microsegundos
+    $dt = \DateTimeImmutable::createFromFormat('Y-m-d H:i:s', $value);
+    if ($dt instanceof \DateTimeImmutable) {
+        return $dt->format($outFormat);
+    }
+
+    // 3) Fallback: quitar microsegundos manualmente y usar strtotime
+    $value2 = preg_replace('/\.\d{1,6}$/', '', $value);
+    $ts = $value2 ? strtotime($value2) : false;
+    if ($ts === false) return null;
+
+    return date($outFormat, $ts);
+}
 ?>
 
 <div class="container-fluid py-3">
@@ -201,7 +232,6 @@ $userRoles = $user['role_ids'] ?? [];
                         </div>
                         
                         <!-- Información del sistema -->
-                        <!-- Información del sistema -->
                         <div class="alert alert-light border mt-3">
                             <div class="row small">
                                 <div class="col-md-6">
@@ -209,11 +239,9 @@ $userRoles = $user['role_ids'] ?? [];
                                     <div class="mb-2">
                                         <i class="bi bi-calendar me-1 text-muted"></i>
                                         <strong>Último acceso:</strong>
-                                        <?php
-                                            $lastLogin = $user['last_login_at'] ?? null;
-                                            if (!empty($lastLogin) && strtotime((string)$lastLogin) !== false):
-                                        ?>
-                                            <?= esc(date('d/m/Y H:i', strtotime((string)$lastLogin))) ?>
+                                        <?php $formatted = fmt_db_dt($user['last_login_at'] ?? null, 'd/m/Y H:i'); ?>
+                                        <?php if ($formatted !== null): ?>
+                                            <?= esc($formatted) ?>
                                         <?php else: ?>
                                             <span class="text-muted">Nunca</span>
                                         <?php endif; ?>
@@ -222,11 +250,9 @@ $userRoles = $user['role_ids'] ?? [];
                                     <div>
                                         <i class="bi bi-calendar-plus me-1 text-muted"></i>
                                         <strong>Creado:</strong>
-                                        <?php
-                                            $created = $user['created_at'] ?? null;
-                                            if (!empty($created) && strtotime((string)$created) !== false):
-                                        ?>
-                                            <?= esc(date('d/m/Y', strtotime((string)$created))) ?>
+                                        <?php $formatted = fmt_db_dt($user['created_at'] ?? null, 'd/m/Y'); ?>
+                                        <?php if ($formatted !== null): ?>
+                                            <?= esc($formatted) ?>
                                         <?php else: ?>
                                             <span class="text-muted">-</span>
                                         <?php endif; ?>
@@ -238,11 +264,9 @@ $userRoles = $user['role_ids'] ?? [];
                                     <div>
                                         <i class="bi bi-calendar-check me-1 text-muted"></i>
                                         <strong>Actualizado:</strong>
-                                        <?php
-                                            $updated = $user['updated_at'] ?? null;
-                                            if (!empty($updated) && strtotime((string)$updated) !== false):
-                                        ?>
-                                            <?= esc(date('d/m/Y', strtotime((string)$updated))) ?>
+                                        <?php $formatted = fmt_db_dt($user['updated_at'] ?? null, 'd/m/Y H:i'); ?>
+                                        <?php if ($formatted !== null): ?>
+                                            <?= esc($formatted) ?>
                                         <?php else: ?>
                                             <span class="text-muted">-</span>
                                         <?php endif; ?>
@@ -315,7 +339,7 @@ $userRoles = $user['role_ids'] ?? [];
                                             class="btn btn-outline-danger" 
                                             data-bs-toggle="modal" 
                                             data-bs-target="#deleteModal"
-                                            <?= $user['id'] === ($_SESSION['user_id'] ?? null) ? 'disabled' : '' ?>>
+                                            <?= ($user['id'] ?? null) === ($_SESSION['user_id'] ?? null) ? 'disabled' : '' ?>>
                                         <i class="bi bi-trash me-1"></i>Eliminar
                                     </button>
                                 </div>
@@ -394,7 +418,7 @@ $userRoles = $user['role_ids'] ?? [];
                     <i class="bi bi-x-circle me-1"></i>Cancelar
                 </button>
                 
-                <?php if ($user['id'] !== ($_SESSION['user_id'] ?? null)): ?>
+                <?php if (($user['id'] ?? null) !== ($_SESSION['user_id'] ?? null)): ?>
                 <form method="post" 
                       action="<?= esc(url('/admin/users/delete/' . ($user['id'] ?? ''))) ?>">
                     <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">

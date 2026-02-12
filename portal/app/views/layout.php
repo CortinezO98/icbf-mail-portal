@@ -53,7 +53,6 @@ if (Auth::check()) {
 
             // Guardamos en sesión para no consultar BD en cada request
             $_SESSION['user']['roles'] = $userRoles;
-
         } catch (\Throwable $e) {
             $userRoles = [];
         }
@@ -316,20 +315,21 @@ $enableSemaforoRoutes = false;
 
 <script>
 /**
- * ✅ Flash -> SweetAlert (soporta HTML y texto)
+ * ✅ Flash + Errores de importación + Confirmaciones globales
  */
 window.addEventListener('DOMContentLoaded', function () {
+
+  // 1) Flash (Swal) - soporta HTML y texto
   <?php if (!empty($flash) && is_array($flash)): ?>
     const type = <?= json_encode($flash['type'] ?? 'info') ?>;
     const message = <?= json_encode($flash['message'] ?? '') ?>;
 
     const iconMap = { success: 'success', error: 'error', warning: 'warning', info: 'info' };
     const icon = iconMap[type] || 'info';
-
     const looksHtml = /<\/?[a-z][\s\S]*>/i.test(message);
 
     const payload = {
-      icon: icon,
+      icon,
       title: (icon === 'success' ? 'Listo' : (icon === 'error' ? 'Error' : 'Atención')),
       confirmButtonText: 'Aceptar'
     };
@@ -337,13 +337,56 @@ window.addEventListener('DOMContentLoaded', function () {
     if (looksHtml) payload.html = message;
     else payload.text = message;
 
-    if (window.Swal && typeof Swal.fire === 'function') Swal.fire(payload);
-    else alert(message);
+    const fireFlash = () => (window.Swal ? Swal.fire(payload) : Promise.resolve(alert(message)));
+  <?php else: ?>
+    const fireFlash = () => Promise.resolve();
   <?php endif; ?>
+
+  // 2) Errores de importación (modal)
+  const importErrors = <?php echo json_encode($_SESSION['_import_errors'] ?? [], JSON_UNESCAPED_UNICODE); ?>;
+  const importTotal  = <?php echo (int)($_SESSION['_import_errors_total'] ?? 0); ?>;
+
+  const fireImportErrors = () => {
+    if (!Array.isArray(importErrors) || importErrors.length === 0) return Promise.resolve();
+
+    const escapeHtml = (s) => String(s)
+      .replaceAll('&','&amp;').replaceAll('<','&lt;')
+      .replaceAll('>','&gt;').replaceAll('"','&quot;')
+      .replaceAll("'","&#039;");
+
+    const items = importErrors.map(e => `<li style="margin-bottom:6px;">${escapeHtml(e)}</li>`).join('');
+
+    const footer = (importTotal > importErrors.length)
+      ? `<div style="margin-top:10px; font-size:12px; opacity:.75;">
+           Mostrando ${importErrors.length} de ${importTotal} errores.
+         </div>`
+      : '';
+
+    if (!window.Swal) {
+      alert(importErrors.join("\n"));
+      return Promise.resolve();
+    }
+
+    return Swal.fire({
+      icon: 'warning',
+      title: 'Errores de importación',
+      html: `
+        <div style="text-align:left; max-height:260px; overflow:auto; padding-right:6px;">
+          <ol style="padding-left:18px; margin:0;">
+            ${items}
+          </ol>
+          ${footer}
+        </div>
+      `,
+      confirmButtonText: 'Cerrar'
+    });
+  };
+
+  fireFlash().then(() => fireImportErrors());
 });
 
 /**
- * ✅ Confirmaciones globales para forms y links.
+ * ✅ Confirmaciones globales para forms y links con data-confirm="true"
  */
 document.addEventListener('click', function (e) {
   const el = e.target.closest('[data-confirm="true"]');
@@ -356,6 +399,8 @@ document.addEventListener('click', function (e) {
   const form = el.closest('form');
   if (form) {
     e.preventDefault();
+    if (!window.Swal) return form.submit();
+
     Swal.fire({
       icon,
       title,
@@ -363,6 +408,7 @@ document.addEventListener('click', function (e) {
       showCancelButton: true,
       confirmButtonText: 'Sí, continuar',
       cancelButtonText: 'Cancelar',
+      reverseButtons: true
     }).then((r) => {
       if (r.isConfirmed) form.submit();
     });
@@ -372,6 +418,8 @@ document.addEventListener('click', function (e) {
   const href = el.dataset.confirmHref || el.getAttribute('href');
   if (href && href !== '#') {
     e.preventDefault();
+    if (!window.Swal) return (window.location.href = href);
+
     Swal.fire({
       icon,
       title,
@@ -379,12 +427,18 @@ document.addEventListener('click', function (e) {
       showCancelButton: true,
       confirmButtonText: 'Sí, continuar',
       cancelButtonText: 'Cancelar',
+      reverseButtons: true
     }).then((r) => {
       if (r.isConfirmed) window.location.href = href;
     });
   }
 });
 </script>
+
+<?php
+// Limpia errores de importación (solo después de mostrarlos)
+unset($_SESSION['_import_errors'], $_SESSION['_import_errors_total']);
+?>
 
 </body>
 </html>

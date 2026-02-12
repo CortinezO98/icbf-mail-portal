@@ -192,7 +192,7 @@ final class UsersAdminController
         $roles = $this->repo->listRoles();
 
         $this->render('admin/users/edit.php', [
-            'user' => $user,
+            'editUser' => $user,
             'roles' => $roles,
             '_csrf' => Csrf::token(),
         ]);
@@ -581,15 +581,15 @@ final class UsersAdminController
                 }
             }
 
-            $message = "Importación completada: <strong>{$successCount}</strong> usuarios creados exitosamente.";
-            if ($errorCount > 0) $message .= " <strong>{$errorCount}</strong> errores encontrados.";
+            $message = "Importación completada: {$successCount} usuarios creados.";
+            if ($errorCount > 0) $message .= " {$errorCount} con error.";
 
             if (!empty($errors)) {
                 $_SESSION['_import_errors'] = array_slice($errors, 0, 10);
-                $message .= ' <a href="#" data-bs-toggle="modal" data-bs-target="#importErrorsModal">Ver errores</a>';
+                $_SESSION['_import_errors_total'] = count($errors); 
             }
 
-            $this->flash('success', $message);
+            $this->flash($errorCount > 0 ? 'warning' : 'success', $message);
             $this->redirect('/admin/users');
         } catch (Exception $e) {
             $this->flash('error', 'Error en importación: ' . $e->getMessage());

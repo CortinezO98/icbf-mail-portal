@@ -2,10 +2,12 @@
 declare(strict_types=1);
 
 use function App\Config\url;
-?>
 
+// Variables que deben venir del controller (evita notices)
+$_csrf = $_csrf ?? '';
+?>
 <div class="container-fluid py-3">
-    
+
     <!-- Encabezado -->
     <div class="d-flex justify-content-between align-items-center mb-4">
         <div>
@@ -14,7 +16,7 @@ use function App\Config\url;
             </h1>
             <p class="text-muted mb-0">Importa múltiples usuarios desde archivo Excel o CSV</p>
         </div>
-        
+
         <div>
             <a href="<?= esc(url('/admin/users')) ?>" class="btn btn-outline-secondary">
                 <i class="bi bi-arrow-left me-1"></i>Volver
@@ -24,7 +26,7 @@ use function App\Config\url;
 
     <div class="row">
         <div class="col-lg-8 mx-auto">
-            
+
             <!-- Pasos del proceso -->
             <div class="card shadow-sm mb-4">
                 <div class="card-header bg-light">
@@ -39,7 +41,7 @@ use function App\Config\url;
                             <h6 class="mb-1">1. Descargar Plantilla</h6>
                             <p class="text-muted small">Usa el formato correcto</p>
                         </div>
-                        
+
                         <div class="col-md-3 mb-3">
                             <div class="bg-primary bg-opacity-10 rounded-circle p-3 mx-auto mb-2" style="width: 70px; height: 70px;">
                                 <i class="bi bi-pencil display-6 text-primary"></i>
@@ -47,7 +49,7 @@ use function App\Config\url;
                             <h6 class="mb-1">2. Llenar Datos</h6>
                             <p class="text-muted small">Completa la información</p>
                         </div>
-                        
+
                         <div class="col-md-3 mb-3">
                             <div class="bg-primary bg-opacity-10 rounded-circle p-3 mx-auto mb-2" style="width: 70px; height: 70px;">
                                 <i class="bi bi-upload display-6 text-primary"></i>
@@ -55,7 +57,7 @@ use function App\Config\url;
                             <h6 class="mb-1">3. Subir Archivo</h6>
                             <p class="text-muted small">Verifica los datos</p>
                         </div>
-                        
+
                         <div class="col-md-3 mb-3">
                             <div class="bg-primary bg-opacity-10 rounded-circle p-3 mx-auto mb-2" style="width: 70px; height: 70px;">
                                 <i class="bi bi-check-all display-6 text-primary"></i>
@@ -70,20 +72,21 @@ use function App\Config\url;
             <!-- Formulario de importación -->
             <div class="card shadow-sm">
                 <div class="card-body p-4">
-                    
+
                     <!-- Plantilla -->
                     <div class="mb-4">
                         <h5 class="mb-3">
-                            <i class="bi bi-file-earmark-excel text-success me-2"></i>Plantilla Excel
+                            <i class="bi bi-file-earmark-excel text-success me-2"></i>Plantilla
                         </h5>
+
                         <div class="alert alert-info">
                             <div class="d-flex">
                                 <div class="flex-shrink-0">
                                     <i class="bi bi-info-circle-fill"></i>
                                 </div>
                                 <div class="flex-grow-1 ms-3">
-                                    <h6 class="alert-heading mb-2">Formato requerido:</h6>
-                                    <p class="mb-2">Descarga la plantilla con el formato correcto para asegurar una importación exitosa.</p>
+                                    <h6 class="alert-heading mb-2">Formato requerido</h6>
+                                    <p class="mb-2">Descarga la plantilla para asegurar una importación exitosa.</p>
                                     <p class="mb-0">
                                         <strong>Columnas obligatorias:</strong> Username, Email, Nombre Completo<br>
                                         <strong>Opcionales:</strong> Documento, Roles (separados por coma)
@@ -91,10 +94,10 @@ use function App\Config\url;
                                 </div>
                             </div>
                         </div>
-                        
-                        <a href="<?= esc(url('/admin/users/export-template')) ?>" 
+
+                        <a href="<?= esc(url('/admin/users/export-template')) ?>"
                            class="btn btn-success">
-                            <i class="bi bi-download me-2"></i>Descargar Plantilla Excel
+                            <i class="bi bi-download me-2"></i>Descargar Plantilla
                         </a>
                     </div>
 
@@ -127,24 +130,25 @@ use function App\Config\url;
                         </ul>
                     </div>
 
-                    <!-- Formulario de subida -->
+                    <!-- Subir archivo -->
                     <div class="mb-4">
                         <h5 class="mb-3">
                             <i class="bi bi-cloud-arrow-up text-primary me-2"></i>Subir Archivo
                         </h5>
-                        
-                        <form method="post" 
-                              action="<?= esc(url('/admin/users/import')) ?>" 
+
+                        <form method="post"
+                              action="<?= esc(url('/admin/users/import')) ?>"
                               enctype="multipart/form-data"
-                              class="needs-validation" novalidate>
+                              class="needs-validation"
+                              novalidate>
                             <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
-                            
+
                             <div class="mb-3">
                                 <label for="excelFile" class="form-label">Archivo Excel/CSV</label>
-                                <input class="form-control" 
-                                       type="file" 
+                                <input class="form-control"
+                                       type="file"
                                        id="excelFile"
-                                       name="excel_file" 
+                                       name="excel_file"
                                        accept=".xlsx,.xls,.csv"
                                        required>
                                 <div class="invalid-feedback">
@@ -154,13 +158,14 @@ use function App\Config\url;
                                     Formatos aceptados: .xlsx, .xls, .csv (Máximo 5MB)
                                 </div>
                             </div>
-                            
+
                             <div class="mb-3">
                                 <div class="form-check">
-                                    <input class="form-check-input" 
-                                           type="checkbox" 
+                                    <input class="form-check-input"
+                                           type="checkbox"
                                            name="send_welcome_email"
-                                           id="sendWelcomeEmail">
+                                           id="sendWelcomeEmail"
+                                           value="1">
                                     <label class="form-check-label" for="sendWelcomeEmail">
                                         Enviar email de bienvenida con credenciales temporales
                                     </label>
@@ -169,13 +174,15 @@ use function App\Config\url;
                                     Los usuarios recibirán un email con sus credenciales de acceso.
                                 </div>
                             </div>
-                            
+
                             <div class="mb-4">
                                 <div class="form-check">
-                                    <input class="form-check-input" 
-                                           type="checkbox" 
+                                    <input class="form-check-input"
+                                           type="checkbox"
                                            name="skip_duplicates"
-                                           id="skipDuplicates" checked>
+                                           id="skipDuplicates"
+                                           value="1"
+                                           checked>
                                     <label class="form-check-label" for="skipDuplicates">
                                         Omitir usuarios duplicados (por email o username)
                                     </label>
@@ -184,7 +191,7 @@ use function App\Config\url;
                                     Los usuarios existentes no serán sobrescritos.
                                 </div>
                             </div>
-                            
+
                             <div class="d-grid gap-2">
                                 <button type="submit" class="btn btn-primary btn-lg">
                                     <i class="bi bi-upload me-2"></i>Iniciar Importación
@@ -197,14 +204,17 @@ use function App\Config\url;
                     </div>
 
                     <!-- Validación previa -->
-                    <div class="alert alert-warning">
+                    <div class="alert alert-warning mb-0">
                         <div class="d-flex">
                             <div class="flex-shrink-0">
                                 <i class="bi bi-exclamation-triangle-fill"></i>
                             </div>
                             <div class="flex-grow-1 ms-3">
                                 <h6 class="alert-heading">Validación previa</h6>
-                                <p class="mb-0">El sistema validará automáticamente los datos antes de importar. Se mostrará un resumen con los usuarios que se crearán y cualquier error encontrado.</p>
+                                <p class="mb-0">
+                                    El sistema validará automáticamente los datos antes de importar.
+                                    Se mostrará un resumen con los usuarios que se crearán y cualquier error encontrado.
+                                </p>
                             </div>
                         </div>
                     </div>
@@ -218,56 +228,55 @@ use function App\Config\url;
 </div>
 
 <script>
-// Validación del formulario
+// Validación del formulario (Bootstrap) + validación de archivo
 document.addEventListener('DOMContentLoaded', function() {
-    const forms = document.querySelectorAll('.needs-validation');
-    
-    Array.from(forms).forEach(form => {
-        form.addEventListener('submit', function(event) {
-            if (!form.checkValidity()) {
-                event.preventDefault();
-                event.stopPropagation();
-            }
-            
-            form.classList.add('was-validated');
-            
-            // Validar archivo
-            const fileInput = form.querySelector('input[type="file"]');
-            if (fileInput && fileInput.files.length > 0) {
-                const file = fileInput.files[0];
-                const maxSize = 5 * 1024 * 1024; // 5MB
-                const allowedTypes = [
-                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    'application/vnd.ms-excel',
-                    'text/csv',
-                    'application/vnd.ms-excel.sheet.macroEnabled.12',
-                    'application/vnd.ms-excel.sheet.binary.macroEnabled.12'
-                ];
-                
-                if (file.size > maxSize) {
-                    alert('El archivo es demasiado grande (máximo 5MB)');
-                    event.preventDefault();
-                }
-                
-                if (!allowedTypes.includes(file.type) && 
-                    !file.name.match(/\.(xlsx|xls|csv)$/i)) {
-                    alert('Tipo de archivo no permitido. Use .xlsx, .xls o .csv');
-                    event.preventDefault();
-                }
-            }
-        }, false);
+  const forms = document.querySelectorAll('.needs-validation');
+
+  Array.from(forms).forEach(form => {
+    form.addEventListener('submit', function(event) {
+      const fileInput = form.querySelector('input[type="file"]');
+      let fileOk = true;
+
+      if (fileInput && fileInput.files.length > 0) {
+        const file = fileInput.files[0];
+        const maxSize = 5 * 1024 * 1024; // 5MB
+
+        // Algunos browsers no mandan MIME confiable; por eso validamos también por extensión
+        const extOk = /\.(xlsx|xls|csv)$/i.test(file.name || '');
+        const mimeOk = [
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'application/vnd.ms-excel',
+          'text/csv',
+          'application/vnd.ms-excel.sheet.macroEnabled.12',
+          'application/vnd.ms-excel.sheet.binary.macroEnabled.12'
+        ].includes(file.type);
+
+        if (file.size > maxSize) {
+          fileOk = false;
+          alert('El archivo es demasiado grande (máximo 5MB).');
+        } else if (!mimeOk && !extOk) {
+          fileOk = false;
+          alert('Tipo de archivo no permitido. Use .xlsx, .xls o .csv.');
+        }
+      }
+
+      if (!form.checkValidity() || !fileOk) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+
+      form.classList.add('was-validated');
+    }, false);
+  });
+
+  // Mostrar nombre de archivo
+  const fileInput = document.getElementById('excelFile');
+  if (fileInput) {
+    fileInput.addEventListener('change', function() {
+      const fileName = this.files[0]?.name || 'Ningún archivo seleccionado';
+      const label = document.querySelector('label[for="excelFile"]');
+      if (label) label.textContent = `Archivo: ${fileName}`;
     });
-    
-    // Mostrar nombre de archivo
-    const fileInput = document.getElementById('excelFile');
-    if (fileInput) {
-        fileInput.addEventListener('change', function() {
-            const fileName = this.files[0]?.name || 'Ningún archivo seleccionado';
-            const label = this.previousElementSibling;
-            if (label && label.tagName === 'LABEL') {
-                label.textContent = `Archivo: ${fileName}`;
-            }
-        });
-    }
+  }
 });
 </script>
