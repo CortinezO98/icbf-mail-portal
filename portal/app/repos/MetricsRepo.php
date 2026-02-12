@@ -99,6 +99,7 @@ final class MetricsRepo
 
     /* ============================================================
        DASHBOARD (misma interfaz, mismo output, solo mejor semáforo)
+       - Eliminamos fallbacks por días (solo tracking)
        ============================================================ */
 
     public function realtimeSummary(?int $assignedUserId = null): array
@@ -106,53 +107,30 @@ final class MetricsRepo
         $params = [];
         $whereOpen = $this->baseOpenWhere($assignedUserId, $params);
 
-        // Semáforo: preferimos tracking. Fallback por días (NO se rompe si tracking no está listo)
-        $fallbackSemaforo = "
-            CASE
-                WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) <= 1 THEN 'VERDE'
-                WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) BETWEEN 2 AND 3 THEN 'AMARILLO'
-                ELSE 'ROJO'
-            END
-        ";
-
         $sql = "
             SELECT
                 COUNT(*) AS open_total,
 
-                -- Distribución por estado (solo abiertos)
                 SUM(CASE WHEN cs.code='NUEVO' THEN 1 ELSE 0 END) AS st_nuevo,
                 SUM(CASE WHEN cs.code='ASIGNADO' THEN 1 ELSE 0 END) AS st_asignado,
                 SUM(CASE WHEN cs.code='EN_PROCESO' THEN 1 ELSE 0 END) AS st_enproceso,
                 SUM(CASE WHEN cs.code='RESPONDIDO' THEN 1 ELSE 0 END) AS st_respondido,
 
-                -- Semáforo (solo abiertos y NO respondidos)
-                SUM(CASE
-                    WHEN c.is_responded = 0 AND COALESCE(cst.current_sla_state, {$fallbackSemaforo}) = 'VERDE'
-                    THEN 1 ELSE 0
-                END) AS sla_verde,
+                -- ✅ Semáforo ANS real (solo abiertos NO respondidos + tracking presente)
+                SUM(CASE WHEN c.is_responded = 0 AND cst.case_id IS NOT NULL AND cst.current_sla_state = 'VERDE' THEN 1 ELSE 0 END) AS sla_verde,
+                SUM(CASE WHEN c.is_responded = 0 AND cst.case_id IS NOT NULL AND cst.current_sla_state = 'AMARILLO' THEN 1 ELSE 0 END) AS sla_amarillo,
+                SUM(CASE WHEN c.is_responded = 0 AND cst.case_id IS NOT NULL AND cst.current_sla_state = 'ROJO' THEN 1 ELSE 0 END) AS sla_rojo,
 
-                SUM(CASE
-                    WHEN c.is_responded = 0 AND COALESCE(cst.current_sla_state, {$fallbackSemaforo}) = 'AMARILLO'
-                    THEN 1 ELSE 0
-                END) AS sla_amarillo,
+                SUM(CASE WHEN c.is_responded = 0 AND cst.case_id IS NOT NULL AND COALESCE(cst.breached,0) = 1 THEN 1 ELSE 0 END) AS breached_cases,
 
-                SUM(CASE
-                    WHEN c.is_responded = 0 AND COALESCE(cst.current_sla_state, {$fallbackSemaforo}) = 'ROJO'
-                    THEN 1 ELSE 0
-                END) AS sla_rojo,
+                -- ✅ control / monitoreo
+                SUM(CASE WHEN c.is_responded = 0 AND cst.case_id IS NULL THEN 1 ELSE 0 END) AS missing_tracking_open,
 
-                -- Breached (solo abiertos y NO respondidos)
-                SUM(CASE
-                    WHEN c.is_responded = 0 AND COALESCE(cst.breached, 0) = 1 THEN 1 ELSE 0
-                END) AS breached_cases,
-
-                -- Respondidos totales
                 (SELECT COUNT(*) FROM cases c2
                  WHERE c2.is_responded = 1
                  " . ($assignedUserId !== null ? " AND c2.assigned_user_id = :uid " : "") . "
                 ) AS responded_total,
 
-                -- Tiempo promedio de primera respuesta (solo respondidos)
                 ROUND(AVG(CASE
                     WHEN c.is_responded = 1 AND c.first_response_at IS NOT NULL
                     THEN TIMESTAMPDIFF(HOUR, {$this->clockField()}, c.first_response_at)
@@ -174,11 +152,19 @@ final class MetricsRepo
             $row['total_open'] = $row['open_total'];
         }
 
+        $row['semaforo_hint'] = 'Semáforo calculado por horas hábiles (L–V 08:00–17:00) + festivos.';
+        $row['semaforo_legend'] = [
+            'VERDE' => '0 a < 5 horas hábiles',
+            'AMARILLO' => '5 a 12 horas hábiles',
+            'ROJO' => '> 12 horas hábiles',
+        ];
+
         return $row;
     }
 
     public function realtimeByAgent(): array
     {
+        // ✅ Sin fallback a VERDE: contamos solo donde hay tracking
         $sql = "
             SELECT
                 u.id AS user_id,
@@ -191,11 +177,11 @@ final class MetricsRepo
                 SUM(CASE WHEN cs.code='ASIGNADO' THEN 1 ELSE 0 END) AS st_asignado,
                 SUM(CASE WHEN cs.code='EN_PROCESO' THEN 1 ELSE 0 END) AS st_enproceso,
 
-                SUM(CASE WHEN c.is_responded = 0 AND COALESCE(cst.current_sla_state,'VERDE') = 'VERDE' THEN 1 ELSE 0 END) AS verde,
-                SUM(CASE WHEN c.is_responded = 0 AND COALESCE(cst.current_sla_state,'VERDE') = 'AMARILLO' THEN 1 ELSE 0 END) AS amarillo,
-                SUM(CASE WHEN c.is_responded = 0 AND COALESCE(cst.current_sla_state,'VERDE') = 'ROJO' THEN 1 ELSE 0 END) AS rojo,
+                SUM(CASE WHEN c.is_responded = 0 AND cst.case_id IS NOT NULL AND cst.current_sla_state = 'VERDE' THEN 1 ELSE 0 END) AS verde,
+                SUM(CASE WHEN c.is_responded = 0 AND cst.case_id IS NOT NULL AND cst.current_sla_state = 'AMARILLO' THEN 1 ELSE 0 END) AS amarillo,
+                SUM(CASE WHEN c.is_responded = 0 AND cst.case_id IS NOT NULL AND cst.current_sla_state = 'ROJO' THEN 1 ELSE 0 END) AS rojo,
 
-                SUM(CASE WHEN c.is_responded = 0 AND COALESCE(cst.breached,0) = 1 THEN 1 ELSE 0 END) AS breached,
+                SUM(CASE WHEN c.is_responded = 0 AND cst.case_id IS NOT NULL AND COALESCE(cst.breached,0) = 1 THEN 1 ELSE 0 END) AS breached,
 
                 ROUND(
                     SUM(CASE WHEN c.is_responded = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0),
@@ -302,20 +288,20 @@ final class MetricsRepo
 
         $sql = "
             SELECT
-            c.id AS case_id,
-            c.received_at,
-            cs.pauses_sla,
+                c.id AS case_id,
+                c.received_at,
+                cs.pauses_sla,
 
-            cst.sla_ignored,
-            cst.sla_started_at,
-            cst.business_minutes,
-            cst.sla_due_at
+                cst.sla_ignored,
+                cst.sla_started_at,
+                cst.business_minutes,
+                cst.sla_due_at
 
             FROM cases c
             JOIN case_statuses cs ON cs.id = c.status_id
             JOIN case_sla_tracking cst ON cst.case_id = c.id
             WHERE cs.is_final = 0
-            AND c.id > :after
+              AND c.id > :after
             ORDER BY c.id ASC
             LIMIT :lim
         ";
@@ -331,12 +317,12 @@ final class MetricsRepo
         $upd = $this->pdo->prepare("
             UPDATE case_sla_tracking
             SET
-            sla_started_at = :sla_started_at,
-            business_minutes = :business_minutes,
-            current_sla_state = :state,
-            sla_due_at = :sla_due_at,
-            breached = :breached,
-            last_updated = NOW(6)
+                sla_started_at = :sla_started_at,
+                business_minutes = :business_minutes,
+                current_sla_state = :state,
+                sla_due_at = :sla_due_at,
+                breached = :breached,
+                last_updated = NOW(6)
             WHERE case_id = :case_id
         ");
 
@@ -372,25 +358,16 @@ final class MetricsRepo
 
             $receivedAt = $this->dtBogota($receivedAtStr);
 
-            /**
-             * ✅ Start base calculado SIEMPRE desde received_at (ya aplica festivos)
-             * Esto nos permite autocorregir SLA corruptos de corridas anteriores.
-             */
+            // ✅ Start base calculado SIEMPRE desde received_at
             $baseStart = $clock->normalizeStart($receivedAt);
-
             $slaStart = $baseStart;
 
             // Si ya había sla_started_at, lo respetamos SOLO si es razonable
             if (!empty($r['sla_started_at'])) {
                 try {
                     $existing = $this->dtBogota((string)$r['sla_started_at']);
-
-                    // Re-normalizamos el existente por si cae fuera de horario o en festivo
                     $existingNorm = $clock->normalizeStart($existing);
 
-                    // Heurística anti-contaminación:
-                    // - si existing es anterior al received_at => inválido
-                    // - si existing está demasiado después del received_at => probablemente quedó mal (tu caso de Febrero)
                     $diffSeconds = $existing->getTimestamp() - $receivedAt->getTimestamp();
 
                     if ($existing < $receivedAt || $diffSeconds > 86400) { // > 24h
@@ -399,7 +376,6 @@ final class MetricsRepo
                         $slaStart = $existingNorm;
                     }
                 } catch (\Throwable) {
-                    // si parsea mal, usamos baseStart
                     $slaStart = $baseStart;
                 }
             }
@@ -411,7 +387,7 @@ final class MetricsRepo
             $state    = $this->semaforoFromBusinessMinutes($bizMins);
             $breached = ($bizMins > 720) ? 1 : 0;
 
-            // ✅ IMPORTANTÍSIMO: recalcular SIEMPRE el due_at hábil
+            // ✅ recalcular SIEMPRE el due_at hábil
             $dueAt = $clock->addBusinessMinutes($slaStart, 720)->format('Y-m-d H:i:s');
 
             $upd->execute([
@@ -454,14 +430,6 @@ final class MetricsRepo
         $andUser = $userId ? " AND c.assigned_user_id = :user_id " : "";
         $params = $userId ? [':user_id' => $userId] : [];
 
-        $fallbackSemaforo = "
-            CASE
-                WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) <= 1 THEN 'VERDE'
-                WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) BETWEEN 2 AND 3 THEN 'AMARILLO'
-                ELSE 'ROJO'
-            END
-        ";
-
         $sql = "
             SELECT
                 'ROJO' AS estado,
@@ -474,7 +442,8 @@ final class MetricsRepo
             LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
             WHERE cs.is_final = 0
               AND c.is_responded = 0
-              AND COALESCE(cst.current_sla_state, {$fallbackSemaforo}) = 'ROJO'
+              AND cst.case_id IS NOT NULL
+              AND cst.current_sla_state = 'ROJO'
               {$andUser}
 
             UNION ALL
@@ -490,7 +459,8 @@ final class MetricsRepo
             LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
             WHERE cs.is_final = 0
               AND c.is_responded = 0
-              AND COALESCE(cst.current_sla_state, {$fallbackSemaforo}) = 'AMARILLO'
+              AND cst.case_id IS NOT NULL
+              AND cst.current_sla_state = 'AMARILLO'
               {$andUser}
 
             UNION ALL
@@ -506,7 +476,8 @@ final class MetricsRepo
             LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
             WHERE cs.is_final = 0
               AND c.is_responded = 0
-              AND COALESCE(cst.current_sla_state, {$fallbackSemaforo}) = 'VERDE'
+              AND cst.case_id IS NOT NULL
+              AND cst.current_sla_state = 'VERDE'
               {$andUser}
 
             UNION ALL
@@ -538,14 +509,6 @@ final class MetricsRepo
 
         $andUser = $userId ? " AND c.assigned_user_id = :user_id " : "";
 
-        $fallbackSemaforo = "
-            CASE
-                WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) <= 1 THEN 'VERDE'
-                WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) BETWEEN 2 AND 3 THEN 'AMARILLO'
-                ELSE 'ROJO'
-            END
-        ";
-
         $sql = "
             SELECT
                 c.id,
@@ -564,11 +527,11 @@ final class MetricsRepo
                 COALESCE(cst.days_since_creation, TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW())) AS dias_desde_recibido,
                 COALESCE(cst.minutes_since_creation, TIMESTAMPDIFF(MINUTE, {$this->clockField()}, NOW())) AS minutes_since_creation,
 
-                -- NUEVO: métricas hábiles
+                -- métricas hábiles
                 cst.sla_started_at,
                 cst.business_minutes,
 
-                COALESCE(cst.current_sla_state, {$fallbackSemaforo}) AS semaforo_actual,
+                cst.current_sla_state AS semaforo_actual,
 
                 COALESCE(cst.breached, 0) AS breached,
                 cst.sla_due_at,
@@ -582,10 +545,15 @@ final class MetricsRepo
 
             WHERE cs.is_final = 0
               AND c.is_responded = 0
-              AND COALESCE(cst.current_sla_state, {$fallbackSemaforo}) = :semaforo
+              AND cst.case_id IS NOT NULL
+              AND cst.current_sla_state = :semaforo
               {$andUser}
 
-            ORDER BY c.received_at ASC
+            ORDER BY
+              CASE WHEN cst.sla_due_at IS NULL THEN 1 ELSE 0 END ASC,
+              cst.sla_due_at ASC,
+              cst.business_minutes DESC,
+              c.received_at ASC
             LIMIT :limit
         ";
 
@@ -637,38 +605,41 @@ final class MetricsRepo
                 (SELECT COUNT(*) FROM cases) AS total_casos,
 
                 (SELECT COUNT(*)
-                FROM cases c
-                JOIN case_statuses cs ON cs.id = c.status_id
-                WHERE cs.is_final = 0
+                 FROM cases c
+                 JOIN case_statuses cs ON cs.id = c.status_id
+                 WHERE cs.is_final = 0
                 ) AS abiertos,
 
                 (SELECT COUNT(*) FROM cases WHERE is_responded = 1) AS respondidos,
 
                 (SELECT COUNT(*)
-                FROM cases c
-                JOIN case_statuses cs ON cs.id = c.status_id
-                LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
-                WHERE cs.is_final = 0
-                    AND c.is_responded = 0
-                    AND COALESCE(cst.current_sla_state,'VERDE') = 'VERDE'
+                 FROM cases c
+                 JOIN case_statuses cs ON cs.id = c.status_id
+                 LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
+                 WHERE cs.is_final = 0
+                   AND c.is_responded = 0
+                   AND cst.case_id IS NOT NULL
+                   AND cst.current_sla_state = 'VERDE'
                 ) AS verde,
 
                 (SELECT COUNT(*)
-                FROM cases c
-                JOIN case_statuses cs ON cs.id = c.status_id
-                LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
-                WHERE cs.is_final = 0
-                    AND c.is_responded = 0
-                    AND COALESCE(cst.current_sla_state,'VERDE') = 'AMARILLO'
+                 FROM cases c
+                 JOIN case_statuses cs ON cs.id = c.status_id
+                 LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
+                 WHERE cs.is_final = 0
+                   AND c.is_responded = 0
+                   AND cst.case_id IS NOT NULL
+                   AND cst.current_sla_state = 'AMARILLO'
                 ) AS amarillo,
 
                 (SELECT COUNT(*)
-                FROM cases c
-                JOIN case_statuses cs ON cs.id = c.status_id
-                LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
-                WHERE cs.is_final = 0
-                    AND c.is_responded = 0
-                    AND COALESCE(cst.current_sla_state,'VERDE') = 'ROJO'
+                 FROM cases c
+                 JOIN case_statuses cs ON cs.id = c.status_id
+                 LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
+                 WHERE cs.is_final = 0
+                   AND c.is_responded = 0
+                   AND cst.case_id IS NOT NULL
+                   AND cst.current_sla_state = 'ROJO'
                 ) AS rojo,
 
                 ROUND(AVG(CASE
@@ -727,5 +698,40 @@ final class MetricsRepo
         ";
 
         return $this->pdo->query($sql)->fetchAll() ?: [];
+    }
+
+    public function getSemaforoStatusBreakdown(string $semaforo, ?int $userId = null): array
+    {
+        $semaforo = strtoupper(trim($semaforo));
+        if (!in_array($semaforo, ['VERDE','AMARILLO','ROJO'], true)) return [];
+
+        $andUser = $userId ? " AND c.assigned_user_id = :user_id " : "";
+        $params = [];
+        if ($userId) $params[':user_id'] = $userId;
+
+        $sql = "
+            SELECT
+                cs.code AS status_code,
+                cs.name AS status_name,
+                COUNT(*) AS total
+            FROM cases c
+            JOIN case_statuses cs ON cs.id = c.status_id
+            LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
+            WHERE cs.is_final = 0
+              AND c.is_responded = 0
+              AND cst.case_id IS NOT NULL
+              AND cst.current_sla_state = :semaforo
+              {$andUser}
+            GROUP BY cs.code, cs.name
+            ORDER BY total DESC
+        ";
+
+        $st = $this->pdo->prepare($sql);
+        $st->bindValue(':semaforo', $semaforo);
+        foreach ($params as $k => $v) {
+            $st->bindValue($k, $v, PDO::PARAM_INT);
+        }
+        $st->execute();
+        return $st->fetchAll() ?: [];
     }
 }

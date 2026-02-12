@@ -106,6 +106,10 @@ final class DashboardController
         // Agente: solo lo suyo. Supervisor/Admin: global.
         $uid = $isSupervisor ? null : (int)Auth::id();
 
+        // ✅ NUEVO (recomendación): refresh corto para que el tablero sea real-time
+        // Importante: se llama aquí (cada request) pero con TTL + lock para no sobrecargar.
+        $this->refreshSlaTrackingShortTtl();
+
         // Métricas principales
         $summary = $this->metrics->realtimeSummary($uid);
         if (!is_array($summary)) $summary = [];
@@ -155,6 +159,9 @@ final class DashboardController
         $isSupervisor = Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN');
         $uid = $isSupervisor ? null : (int)Auth::id();
 
+        // ✅ NUEVO (recomendación): asegura que el listado sea real-time
+        $this->refreshSlaTrackingShortTtl();
+
         $estado = strtolower(trim($estado));
         $valid = ['verde', 'amarillo', 'rojo'];
         if (!in_array($estado, $valid, true)) {
@@ -178,5 +185,66 @@ final class DashboardController
         extract($params, EXTR_SKIP);
         $viewPath = dirname(__DIR__) . '/views/' . $view;
         include dirname(__DIR__) . '/views/layout.php';
+    }
+
+    private function refreshSlaTrackingShortTtl(): void
+    {
+        // ✅ Refresh frecuente pero controlado (no cada request)
+        $locksDir = dirname(__DIR__, 2) . '/storage/locks';
+        if (!is_dir($locksDir)) {
+            @mkdir($locksDir, 0777, true);
+        }
+
+        $lockFile = $locksDir . '/sla_refresh.lock';
+
+        $ttl = 120; // 2 minutos
+        $lastRun = 0;
+
+        if (is_file($lockFile)) {
+            $raw = @file_get_contents($lockFile);
+            if ($raw !== false) $lastRun = (int)trim($raw);
+        }
+
+        if (time() - $lastRun < $ttl) {
+            return; // aún fresco
+        }
+
+        $fp = @fopen($lockFile, 'c+');
+        if (!$fp) return;
+
+        try {
+            if (!@flock($fp, LOCK_EX | LOCK_NB)) {
+                fclose($fp);
+                return;
+            }
+
+            @rewind($fp);
+            $raw2 = @stream_get_contents($fp);
+            $lastRun2 = (int)trim((string)$raw2);
+
+            if (time() - $lastRun2 < $ttl) {
+                @flock($fp, LOCK_UN);
+                fclose($fp);
+                return;
+            }
+
+            try {
+                // Asegura tracking + recalcula hábil
+                $this->metrics->initializeSlaTracking();
+                $this->metrics->updateSlaTracking();
+            } catch (\Throwable $e) {
+                error_log("SLA Refresh Error: " . $e->getMessage());
+            }
+
+            @ftruncate($fp, 0);
+            @rewind($fp);
+            @fwrite($fp, (string)time());
+
+            @flock($fp, LOCK_UN);
+            fclose($fp);
+        } catch (\Throwable) {
+            try { @flock($fp, LOCK_UN); } catch (\Throwable) {}
+            try { fclose($fp); } catch (\Throwable) {}
+        }
     }
 }
