@@ -7,6 +7,7 @@ use PDO;
 use Exception;
 use App\Auth\Csrf;
 use App\Repos\UsersAdminRepo;
+use App\Repos\EmailQueueRepo;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
@@ -15,11 +16,13 @@ use PhpOffice\PhpSpreadsheet\Reader\Csv;
 final class UsersAdminController
 {
     private UsersAdminRepo $repo;
+    private EmailQueueRepo $mailQueue;
     private int $defaultPerPage = 20;
 
     public function __construct(private PDO $pdo, private array $config)
     {
         $this->repo = new UsersAdminRepo($pdo);
+        $this->mailQueue = new EmailQueueRepo($pdo);
     }
 
     /**
@@ -111,6 +114,9 @@ final class UsersAdminController
         // CSRF
         Csrf::validate($post['_csrf'] ?? null);
 
+        // ✅ checkbox: encolar email
+        $sendWelcome = (string)($post['send_welcome_email'] ?? '') === '1';
+
         // ✅ Normaliza role_ids (a veces llega como string)
         $roleIds = $post['role_ids'] ?? [];
         if (!is_array($roleIds)) {
@@ -141,7 +147,7 @@ final class UsersAdminController
         $hash = password_hash($password, PASSWORD_DEFAULT);
 
         $isActive = (int)($post['is_active'] ?? 1);
-        $assignEnabled = (int)($post['assign_enabled'] ?? 1);
+        $assignEnabled = isset($post['assign_enabled']) ? 1 : 0;
 
         // Limpieza final role_ids => int > 0
         $roleIds = array_values(array_filter(array_map('intval', $roleIds), fn($v) => $v > 0));
@@ -167,10 +173,50 @@ final class UsersAdminController
 
             $this->pdo->commit();
 
-            // Nota: tu layout usa Swal.text, no HTML. No metas <code> aquí.
+            // ✅ ENCOLAR (después del commit)
+            $mailQueued = false;
+
+            if ($sendWelcome) {
+                $loginUrl = \App\Config\url('/login');
+                $fromName = (string)($this->config['mail']['from_name'] ?? 'ICBF Mail');
+                $subject  = 'Bienvenido al Sistema ICBF Mail';
+
+                $bodyHtml = "
+                  <html><body style='font-family: Arial, sans-serif; color:#111;'>
+                    <h2>Bienvenido al Sistema de Gestión de Correo ICBF</h2>
+                    <p>Tu cuenta ha sido creada exitosamente.</p>
+                    <div style='background:#f8f9fa; padding:14px; border-radius:6px; border:1px solid #e9ecef; margin:14px 0;'>
+                      <div><strong>Usuario:</strong> " . htmlspecialchars($data['username'], ENT_QUOTES, 'UTF-8') . "</div>
+                      <div><strong>Contraseña temporal:</strong> " . htmlspecialchars($password, ENT_QUOTES, 'UTF-8') . "</div>
+                      <div><strong>Acceso:</strong> <a href='" . htmlspecialchars($loginUrl, ENT_QUOTES, 'UTF-8') . "'>" . htmlspecialchars($loginUrl, ENT_QUOTES, 'UTF-8') . "</a></div>
+                    </div>
+                    <p><em>Por seguridad, cambia tu contraseña en tu primer acceso.</em></p>
+                    <p>Saludos,<br>" . htmlspecialchars($fromName, ENT_QUOTES, 'UTF-8') . "</p>
+                  </body></html>
+                ";
+
+                try {
+                    $this->mailQueue->enqueue(
+                        'WELCOME',
+                        $data['email'],
+                        $data['full_name'] ?? null,
+                        $subject,
+                        $bodyHtml,
+                        5
+                    );
+                    $mailQueued = true;
+                } catch (\Throwable $e) {
+                    error_log('Mail enqueue failed (create user): ' . $e->getMessage());
+                }
+            }
+
+            $extra = $sendWelcome
+                ? ($mailQueued ? " Email encolado para envío a {$data['email']}." : " No se pudo encolar el email (revisa logs/BD).")
+                : " (No se encoló email).";
+
             $this->flash(
                 'success',
-                "Usuario creado exitosamente. Contraseña temporal: {$password} (Guárdala de manera segura)"
+                "Usuario creado exitosamente. Contraseña temporal: {$password} (Guárdala de manera segura).{$extra}"
             );
             $this->redirect('/admin/users');
         } catch (Exception $e) {
@@ -476,8 +522,8 @@ final class UsersAdminController
             $errors = [];
             $createdUsers = [];
 
-            $skipDuplicates = isset($_POST['skip_duplicates']) && $_POST['skip_duplicates'] === 'on';
-            $sendWelcome = isset($_POST['send_welcome_email']) && $_POST['send_welcome_email'] === 'on';
+            $skipDuplicates = (string)($_POST['skip_duplicates'] ?? '') === '1';
+            $sendWelcome    = (string)($_POST['send_welcome_email'] ?? '') === '1';
 
             for ($i = 1; $i < count($rows); $i++) {
                 $rowData = [];
@@ -567,7 +613,8 @@ final class UsersAdminController
                         'id' => $userId,
                         'username' => $rowData['username'],
                         'email' => $rowData['email'],
-                        'password' => $password
+                        'password' => $password,
+                        'full_name' => $rowData['full_name'],
                     ];
                 } catch (Exception $e) {
                     $errorCount++;
@@ -575,9 +622,32 @@ final class UsersAdminController
                 }
             }
 
+            // ✅ ENCOLAR masivo (en vez de mail())
             if ($sendWelcome && !empty($createdUsers)) {
+                $loginUrl = \App\Config\url('/login');
+                $fromName = (string)($this->config['mail']['from_name'] ?? 'ICBF Mail');
+                $subject  = 'Bienvenido al Sistema ICBF Mail';
+
                 foreach ($createdUsers as $user) {
-                    $this->sendWelcomeEmail($user['email'], $user['username'], $user['password']);
+                    $bodyHtml = "
+                      <html><body style='font-family: Arial, sans-serif; color:#111;'>
+                        <h2>Bienvenido al Sistema de Gestión de Correo ICBF</h2>
+                        <p>Tu cuenta ha sido creada exitosamente.</p>
+                        <div style='background:#f8f9fa; padding:14px; border-radius:6px; border:1px solid #e9ecef; margin:14px 0;'>
+                          <div><strong>Usuario:</strong> " . htmlspecialchars($user['username'], ENT_QUOTES, 'UTF-8') . "</div>
+                          <div><strong>Contraseña temporal:</strong> " . htmlspecialchars($user['password'], ENT_QUOTES, 'UTF-8') . "</div>
+                          <div><strong>Acceso:</strong> <a href='" . htmlspecialchars($loginUrl, ENT_QUOTES, 'UTF-8') . "'>" . htmlspecialchars($loginUrl, ENT_QUOTES, 'UTF-8') . "</a></div>
+                        </div>
+                        <p><em>Por seguridad, cambia tu contraseña en tu primer acceso.</em></p>
+                        <p>Saludos,<br>" . htmlspecialchars($fromName, ENT_QUOTES, 'UTF-8') . "</p>
+                      </body></html>
+                    ";
+
+                    try {
+                        $this->mailQueue->enqueue('WELCOME', $user['email'], null, $subject, $bodyHtml, 5);
+                    } catch (\Throwable $e) {
+                        error_log("Mail enqueue failed (import) for {$user['email']}: " . $e->getMessage());
+                    }
                 }
             }
 
@@ -586,7 +656,7 @@ final class UsersAdminController
 
             if (!empty($errors)) {
                 $_SESSION['_import_errors'] = array_slice($errors, 0, 10);
-                $_SESSION['_import_errors_total'] = count($errors); 
+                $_SESSION['_import_errors_total'] = count($errors);
             }
 
             $this->flash($errorCount > 0 ? 'warning' : 'success', $message);
@@ -597,6 +667,10 @@ final class UsersAdminController
         }
     }
 
+    /**
+     * 📌 CONSERVADO (compatibilidad): envío directo por mail()
+     * Ya NO se usa en create/import si estás en modo cola.
+     */
     private function sendWelcomeEmail(string $email, string $username, string $password): bool
     {
         $subject = 'Bienvenido al Sistema ICBF Mail';
@@ -801,24 +875,39 @@ final class UsersAdminController
 
     private function generateTemporaryPassword(): string
     {
-        $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*';
-        $password = '';
+        $prefix = 'IqICBF';
 
-        $password .= chr(rand(65, 90));
-        $password .= chr(rand(97, 122));
-        $password .= (string)rand(0, 9);
-        $password .= '!@#$%^&*'[rand(0, 7)];
+        // MAYÚSCULAS sin letras confusas (O/I/S/B)
+        $letters = 'ACDEFGHJKLMNPQRTUVWXYZ';
 
-        for ($i = 0; $i < 6; $i++) {
-            $password .= $chars[rand(0, strlen($chars) - 1)];
+        // Números sin confusos (0/1/5/8)
+        $digits = '234679';
+
+        // Símbolo fijo para dictado (elige uno)
+        $symbol = '@';
+
+        // 3 letras
+        $block = '';
+        for ($i = 0; $i < 3; $i++) {
+            $block .= $letters[random_int(0, strlen($letters) - 1)];
         }
 
-        return str_shuffle($password);
+        // 3 números
+        $nums = '';
+        for ($i = 0; $i < 3; $i++) {
+            $nums .= $digits[random_int(0, strlen($digits) - 1)];
+        }
+
+        return "{$prefix}-{$block}-{$nums}{$symbol}";
     }
+
 
     private function validatePasswordStrength(string $password): bool
     {
-        return (bool)preg_match('/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/', $password);
+        return (bool)preg_match(
+            '/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@])[-A-Za-z\d@]{8,}$/',
+            $password
+        );
     }
 
     private function mapRoleCodesToIds(array $roleCodes): array

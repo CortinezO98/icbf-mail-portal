@@ -217,6 +217,19 @@ body.page-app main#mainContent{
                   <div class="form-text">Permitir asignarle casos automáticamente</div>
                 </div>
               </div>
+              <!-- Enviar email de bienvenida -->
+                <div class="mb-3">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" role="switch"
+                            id="send_welcome_email" name="send_welcome_email" value="1" checked>
+                        <label class="form-check-label" for="send_welcome_email">
+                        <i class="bi bi-envelope-check me-1"></i>Enviar email de bienvenida
+                        </label>
+                    </div>
+                    <div class="form-text">
+                        Enviará al correo el usuario y la contraseña temporal.
+                    </div>
+                </div>
             </div>
 
             <!-- Roles y Permisos -->
@@ -347,23 +360,32 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
 
-  // ✅ Generar contraseña segura (SweetAlert + botón Copiar)
-  function generateStrongPassword() {
-    const lower = 'abcdefghijklmnopqrstuvwxyz';
-    const upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-    const nums  = '0123456789';
-    const symb  = '!@#$%^&*';
-    const all   = lower + upper + nums + symb;
+  function generateStrongPassword(groups = 1, groupLen = 4) {
+    const prefix = 'IqICBF';
 
-    let pwd = '';
-    pwd += upper[Math.floor(Math.random() * upper.length)];
-    pwd += lower[Math.floor(Math.random() * lower.length)];
-    pwd += nums[Math.floor(Math.random() * nums.length)];
-    pwd += symb[Math.floor(Math.random() * symb.length)];
-    for (let i = 0; i < 8; i++) pwd += all[Math.floor(Math.random() * all.length)];
-    pwd = pwd.split('').sort(() => Math.random() - 0.5).join('');
-    return pwd;
-  }
+    // Evita caracteres confusos para dictar por teléfono
+    const upper  = 'ACDEFGHJKLMNPQRTUVWXYZ';  
+    const lower  = 'acdefghjkmnpqrtuvwxyz';    
+    const digits = '234679';                  
+    const symbol = '@';                       
+
+    const parts = [];
+    for (let g = 0; g < groups; g++) {
+        let chunk = '';
+        for (let i = 0; i < groupLen; i++) {
+        const set = (Math.random() < 0.5) ? upper : lower;
+        chunk += set[Math.floor(Math.random() * set.length)];
+        }
+        parts.push(chunk);
+    }
+
+    let nums = '';
+    for (let i = 0; i < 3; i++) {
+        nums += digits[Math.floor(Math.random() * digits.length)];
+    }
+
+    return `${prefix}-${parts.join('-')}-${nums}${symbol}`;
+    }
 
   generatePasswordBtn?.addEventListener('click', function() {
     const pwd = generateStrongPassword();

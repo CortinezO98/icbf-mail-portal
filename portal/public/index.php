@@ -16,6 +16,8 @@ require_once __DIR__ . '/../app/repos/MetricsRepo.php';
 require_once __DIR__ . '/../app/repos/ReportsRepo.php';
 require_once __DIR__ . '/../app/repos/UsersAdminRepo.php';
 require_once __DIR__ . '/../app/repos/CaseEventsRepo.php';
+require_once __DIR__ . '/../app/repos/EmailQueueRepo.php';
+
 
 require_once __DIR__ . '/../app/controllers/AuthController.php';
 require_once __DIR__ . '/../app/controllers/CasesController.php';
