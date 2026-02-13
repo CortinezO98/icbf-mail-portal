@@ -173,36 +173,25 @@ final class UsersAdminController
 
             $this->pdo->commit();
 
-            // ✅ ENCOLAR (después del commit)
+            // ✅ ENCOLAR (después del commit) usando la plantilla profesional (EmailQueueRepo::buildWelcomeHtml)
             $mailQueued = false;
 
             if ($sendWelcome) {
-                $loginUrl = \App\Config\url('/login');
-                $fromName = (string)($this->config['mail']['from_name'] ?? 'ICBF Mail');
-                $subject  = 'Bienvenido al Sistema ICBF Mail';
-
-                $bodyHtml = "
-                  <html><body style='font-family: Arial, sans-serif; color:#111;'>
-                    <h2>Bienvenido al Sistema de Gestión de Correo ICBF</h2>
-                    <p>Tu cuenta ha sido creada exitosamente.</p>
-                    <div style='background:#f8f9fa; padding:14px; border-radius:6px; border:1px solid #e9ecef; margin:14px 0;'>
-                      <div><strong>Usuario:</strong> " . htmlspecialchars($data['username'], ENT_QUOTES, 'UTF-8') . "</div>
-                      <div><strong>Contraseña temporal:</strong> " . htmlspecialchars($password, ENT_QUOTES, 'UTF-8') . "</div>
-                      <div><strong>Acceso:</strong> <a href='" . htmlspecialchars($loginUrl, ENT_QUOTES, 'UTF-8') . "'>" . htmlspecialchars($loginUrl, ENT_QUOTES, 'UTF-8') . "</a></div>
-                    </div>
-                    <p><em>Por seguridad, cambia tu contraseña en tu primer acceso.</em></p>
-                    <p>Saludos,<br>" . htmlspecialchars($fromName, ENT_QUOTES, 'UTF-8') . "</p>
-                  </body></html>
-                ";
+                $loginUrl  = \App\Config\url('/login');
+                $fromName  = (string)($this->config['mail']['from_name'] ?? 'ICBF Mail');
+                $fromEmail = (string)($this->config['mail']['from_email'] ?? 'noreply@icbf.gov.co'); // opcional
 
                 try {
-                    $this->mailQueue->enqueue(
-                        'WELCOME',
-                        $data['email'],
-                        $data['full_name'] ?? null,
-                        $subject,
-                        $bodyHtml,
-                        5
+                    // ✅ MISMA plantilla con logos + card + botón + primeros pasos
+                    $this->mailQueue->enqueueWelcomeEmail(
+                        $data['email'],              // toEmail
+                        $data['full_name'] ?? null,  // toName (saludo)
+                        $data['username'],           // username
+                        $password,                   // tempPassword
+                        $loginUrl,                   // loginUrl
+                        $fromEmail,                  // fromEmail (aunque el HTML no lo use)
+                        $fromName,                   // fromName
+                        5                            // priority
                     );
                     $mailQueued = true;
                 } catch (\Throwable $e) {
@@ -225,6 +214,7 @@ final class UsersAdminController
             $this->redirect('/admin/users/create');
         }
     }
+
 
     public function showEdit(int $id): void
     {
