@@ -13,7 +13,7 @@ venv/
 
 # --- PHP / Composer (si luego se usa) ---
 vendor/
-composer.lock
+# composer.lock
 
 # --- IDE / OS ---
 .vscode/
