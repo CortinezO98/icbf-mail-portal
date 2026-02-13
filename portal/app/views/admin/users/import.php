@@ -3,7 +3,6 @@ declare(strict_types=1);
 
 use function App\Config\url;
 
-// Variables que deben venir del controller (evita notices)
 $_csrf = $_csrf ?? '';
 ?>
 <div class="container-fluid py-3">

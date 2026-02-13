@@ -15,8 +15,6 @@ def build_db_url() -> str:
     host = settings.DB_HOST
     port = settings.DB_PORT
     db = settings.DB_NAME
-
-    # IMPORTANT: encode password for URL safety (handles @ * : / etc.)
     pwd_enc = quote_plus(pwd)
 
     return f"mysql+pymysql://{user}:{pwd_enc}@{host}:{port}/{db}?charset=utf8mb4"

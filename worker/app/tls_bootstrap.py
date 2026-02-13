@@ -9,8 +9,6 @@ def bootstrap_tls_from_os_truststore() -> None:
     en el CA corporativo porque usa certifi. truststore fuerza a usar
     el store del OS.
     """
-    # Permite apagarlo si algún día lo necesitas:
-    # TLS_TRUSTSTORE=0
     if os.getenv("TLS_TRUSTSTORE", "1").strip() in ("0", "false", "False", "no", "NO"):
         logger.warning("TLS truststore disabled by env TLS_TRUSTSTORE=0")
         return

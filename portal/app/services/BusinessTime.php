@@ -16,7 +16,7 @@ final class BusinessTime
         private readonly DateTimeZone $tz,
         private readonly string $startTime, // '08:00:00'
         private readonly string $endTime,   // '17:00:00'
-        private readonly int $workdaysMask  // Mon..Sun bitmask (Mon=2 ... Fri=32)
+        private readonly int $workdaysMask 
     ) {}
 
     public static function fromRow(array $row): self
@@ -30,10 +30,6 @@ final class BusinessTime
         );
     }
 
-    /**
-     * ✅ NUEVO (compatible): inyecta un validador de festivos
-     * callable(DateTimeImmutable $dt): bool
-     */
     public function withHolidayChecker(callable $fn): self
     {
         $clone = clone $this;
@@ -41,7 +37,6 @@ final class BusinessTime
         return $clone;
     }
 
-    /** Regla estándar: “el reloj ANS empieza en el primer minuto hábil posterior a la llegada”. */
     public function normalizeStart(DateTimeImmutable $receivedAt): DateTimeImmutable
     {
         $dt = $receivedAt->setTimezone($this->tz);

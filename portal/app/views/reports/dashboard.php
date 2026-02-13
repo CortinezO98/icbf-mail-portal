@@ -389,7 +389,6 @@ $slaRojoRate = $slaTotal > 0 ? round(($rojo / $slaTotal) * 100, 1) : 0;
   </div>
 </div>
 
-<!-- Estilos adicionales -->
 <style>
 .card {
   transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;

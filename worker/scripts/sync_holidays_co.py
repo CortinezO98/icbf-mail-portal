@@ -12,14 +12,11 @@ import holidays
 
 try:
     from dotenv import load_dotenv, find_dotenv
-except Exception:  # pragma: no cover
+except Exception:  
     load_dotenv = None
     find_dotenv = None
 
 
-# -----------------------------
-# Logging (no filtra credenciales)
-# -----------------------------
 logger = logging.getLogger("sync_holidays")
 _handler = logging.StreamHandler(sys.stdout)
 _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
@@ -27,9 +24,6 @@ logger.addHandler(_handler)
 logger.setLevel(logging.INFO)
 
 
-# -----------------------------
-# Helpers .env
-# -----------------------------
 def load_env() -> None:
     """
     Carga variables desde .env automáticamente.
@@ -53,9 +47,7 @@ def getenv_int(key: str, default: int) -> int:
         return default
 
 
-# -----------------------------
-# Config
-# -----------------------------
+
 @dataclass(frozen=True)
 class DbConfig:
     host: str
@@ -92,9 +84,7 @@ def conn(cfg: DbConfig) -> pymysql.connections.Connection:
     )
 
 
-# -----------------------------
-# Core
-# -----------------------------
+
 def build_rows(country_code: str, years: Iterable[int]) -> List[Tuple[str, str, str]]:
     cal = holidays.country_holidays(country_code, years=list(years))
     rows: List[Tuple[str, str, str]] = []

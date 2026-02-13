@@ -1,5 +1,4 @@
 <?php
-// portal/app/views/admin/users/import_confirm.php
 declare(strict_types=1);
 
 use function App\Config\url;
@@ -170,7 +169,6 @@ document.addEventListener('DOMContentLoaded', function() {
             e.stopPropagation();
         }
         
-        // Cambiar texto del botón durante el envío
         if (submitBtn) {
             submitBtn.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Enviando...';
             submitBtn.disabled = true;

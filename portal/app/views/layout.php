@@ -10,33 +10,15 @@ require_once __DIR__ . '/_helpers.php';
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 $isLogin = str_ends_with($path, '/login') || $path === '/login';
 
-/**
- * ✅ Normalizador de roles
- */
 $normRole = static fn(string $r): string => strtoupper(trim($r));
 
-/**
- * ✅ Usuario en sesión
- */
 $user = Auth::user() ?? [];
 $fullName = (string)($user['full_name'] ?? $user['username'] ?? '');
 
-/**
- * ✅ Roles del usuario logueado:
- * sesión -> fallback BD si vienen vacíos
- * NOTA: aquí usamos $pdo si existe (llega vía extract($params) desde el controller)
- *
- * 🚨 IMPORTANTE:
- * Usamos $userRoles (NO $roles) para no pisar la variable $roles
- * que usan vistas como admin/users/create.php (lista de roles disponibles).
- */
 $userRoles = [];
 if (Auth::check()) {
-    // 1) Roles desde sesión
     $userRoles = Auth::roles() ?: [];
     $userRoles = array_values(array_unique(array_filter(array_map($normRole, $userRoles))));
-
-    // 2) Si vienen vacíos, fallback a BD
     if (empty($userRoles) && isset($pdo) && $pdo instanceof PDO && !empty($user['id'])) {
         try {
             $sql = "
@@ -50,15 +32,12 @@ if (Auth::check()) {
             $st->execute([':uid' => (int)$user['id']]);
             $userRoles = $st->fetchAll(PDO::FETCH_COLUMN) ?: [];
             $userRoles = array_values(array_unique(array_filter(array_map($normRole, $userRoles))));
-
-            // Guardamos en sesión para no consultar BD en cada request
             $_SESSION['user']['roles'] = $userRoles;
         } catch (\Throwable $e) {
             $userRoles = [];
         }
     }
 
-    // 3) Último fallback: string "ADMIN,AGENTE"
     if (empty($userRoles)) {
         $maybe = $user['roles'] ?? $user['roles_label'] ?? null;
         if (is_string($maybe) && trim($maybe) !== '') {
@@ -70,11 +49,6 @@ if (Auth::check()) {
 }
 
 $userRolesLabel = $userRoles ? implode(', ', $userRoles) : '';
-
-/**
- * ✅ Helpers de roles (robustos)
- * Usan $userRoles ya normalizados (sesión o BD).
- */
 $hasRole = static fn(string $code): bool => in_array($normRole($code), $userRoles, true);
 
 $roleIsSupervisor = $hasRole('SUPERVISOR') || $hasRole('ADMIN');
@@ -102,7 +76,6 @@ $enableSemaforoRoutes = false;
     <link href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css"
           rel="stylesheet">
 
-    <!-- ✅ SweetAlert2 -->
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
     <link href="<?= esc(url('/assets/css/app.css?v=2')) ?>" rel="stylesheet">
@@ -186,7 +159,6 @@ $enableSemaforoRoutes = false;
                         </a>
                     </li>
 
-                    <!-- ✅ Dashboard Supervisor/Admin y Agente -->
                     <?php if ($roleIsSupervisor || $roleIsAgent): ?>
                         <li class="nav-item">
                             <a class="nav-link <?= is_active_prefix($path, '/dashboard') ? 'active' : '' ?>"
@@ -198,7 +170,6 @@ $enableSemaforoRoutes = false;
                         </li>
                     <?php endif; ?>
 
-                    <!-- ✅ Reportes solo Supervisor/Admin -->
                     <?php if ($roleIsSupervisor): ?>
                         <li class="nav-item">
                             <a class="nav-link <?= is_active_prefix($path, '/reports') ? 'active' : '' ?>"
@@ -314,12 +285,9 @@ $enableSemaforoRoutes = false;
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.0.0" defer></script>
 
 <script>
-/**
- * ✅ Flash + Errores de importación + Confirmaciones globales
- */
+
 window.addEventListener('DOMContentLoaded', function () {
 
-  // 1) Flash (Swal) - soporta HTML y texto
   <?php if (!empty($flash) && is_array($flash)): ?>
     const type = <?= json_encode($flash['type'] ?? 'info') ?>;
     const message = <?= json_encode($flash['message'] ?? '') ?>;
@@ -342,7 +310,6 @@ window.addEventListener('DOMContentLoaded', function () {
     const fireFlash = () => Promise.resolve();
   <?php endif; ?>
 
-  // 2) Errores de importación (modal)
   const importErrors = <?php echo json_encode($_SESSION['_import_errors'] ?? [], JSON_UNESCAPED_UNICODE); ?>;
   const importTotal  = <?php echo (int)($_SESSION['_import_errors_total'] ?? 0); ?>;
 
@@ -385,9 +352,7 @@ window.addEventListener('DOMContentLoaded', function () {
   fireFlash().then(() => fireImportErrors());
 });
 
-/**
- * ✅ Confirmaciones globales para forms y links con data-confirm="true"
- */
+
 document.addEventListener('click', function (e) {
   const el = e.target.closest('[data-confirm="true"]');
   if (!el) return;
@@ -436,7 +401,6 @@ document.addEventListener('click', function (e) {
 </script>
 
 <?php
-// Limpia errores de importación (solo después de mostrarlos)
 unset($_SESSION['_import_errors'], $_SESSION['_import_errors_total']);
 ?>
 

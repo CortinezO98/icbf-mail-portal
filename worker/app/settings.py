@@ -5,8 +5,6 @@ from typing import Set
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
-# worker/app/settings.py -> worker/
 BASE_DIR = Path(__file__).resolve().parents[1]
 ENV_PATH = BASE_DIR / ".env"
 
@@ -72,10 +70,16 @@ class Settings(BaseSettings):
     DELTA_MAX_PAGES_PER_RUN: int = 25
     DELTA_CONCURRENCY: int = 3   
 
+    DELTA_PRIME_ON_EMPTY_STATE: int = 1
+    DELTA_PRIME_ONLY: int = 0
+
+    DELTA_MAX_MESSAGES: int = 500
+    DELTA_MAX_PAGES: int = 50 
+
     # Admin
     ADMIN_API_KEY: str = ""
 
-    # ---------- helpers ----------
+    # helpers 
     def allowed_ext_set(self) -> Set[str]:
         return {x.strip().lower().lstrip(".") for x in self.ALLOWED_ATTACHMENT_EXT.split(",") if x.strip()}
 
@@ -86,7 +90,6 @@ class Settings(BaseSettings):
         return int(self.MAX_ATTACHMENT_SIZE_MB) * 1024 * 1024
 
     def attachments_path(self) -> Path:
-        # Carpeta fuera del webroot (como definimos en arquitectura)
         return Path(self.ATTACHMENTS_DIR).expanduser()
 
 

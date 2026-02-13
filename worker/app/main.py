@@ -20,7 +20,6 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def on_startup() -> None:
-        # Log seguro (NO imprime secretos)
         logger.warning(
             "STARTUP | env=%s | host=%s | port=%s | mailbox=%s | admin_key_configured=%s | public_base_url=%s | env_file=%s",
             settings.ENV,

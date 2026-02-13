@@ -57,7 +57,7 @@ final class EmailQueueRepo
         $subject = 'Bienvenido al Sistema ICBF Mail';
 
         $bodyHtml = $this->buildWelcomeHtml(
-            $toName,        // 👈 para saludar por nombre si existe
+            $toName,        
             $username,
             $tempPassword,
             $loginUrl,
@@ -74,12 +74,6 @@ final class EmailQueueRepo
         );
     }
 
-    /**
-     * HTML de bienvenida (plantilla profesional tipo "card")
-     * - Tablas + CSS inline (alta compatibilidad Gmail/Outlook)
-     * - Logos del proyecto con URL absoluta
-     * - Preheader oculto para vista previa
-     */
     private function buildWelcomeHtml(
         ?string $toName,
         string $username,

@@ -161,10 +161,7 @@ final class UsersAdminRepo
         return (int)($result['total'] ?? 0);
     }
 
-    /**
-     * ✅ FIX REAL: roles robusto (si faltara name, hace fallback)
-     * En tu BD sí existe name, pero dejamos el fix para no romper en otros entornos.
-     */
+
     public function listRoles(): array
     {
         $cols = $this->getRoleColumns();

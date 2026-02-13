@@ -18,7 +18,6 @@ def utcnow() -> datetime:
 
 
 def _is_removed(item: dict[str, Any]) -> bool:
-    # Delta puede traer "deleted" con @removed
     return isinstance(item, dict) and ("@removed" in item)
 
 
@@ -41,7 +40,6 @@ def _unpack_delta_state(st: Any) -> tuple[str | None, str | None]:
     if not st:
         return None, None
 
-    # Si viene con id adelante (len >= 3 y st[0] es int/decimal), usamos [1],[2]
     try:
         if len(st) >= 3 and (isinstance(st[0], int) or str(st[0]).isdigit()):
             delta_link = str(st[1]) if st[1] else None
@@ -50,7 +48,6 @@ def _unpack_delta_state(st: Any) -> tuple[str | None, str | None]:
     except Exception:
         pass
 
-    # Si viene sin id, asumimos [0],[1]
     try:
         delta_link = str(st[0]) if st[0] else None
         next_link = str(st[1]) if len(st) > 1 and st[1] else None
@@ -99,7 +96,6 @@ async def run_delta_backstop(*, mailbox_email: str | None = None) -> dict[str, A
 
     with get_db_session() as db:
         mailbox_id = repos.get_or_create_mailbox(db, mb)
-        # safe-guard (si ya la creaste manual, no hace daño)
         if hasattr(repos, "ensure_graph_delta_state_table"):
             repos.ensure_graph_delta_state_table(db)
         folders_raw = repos.list_monitored_folders(db, mailbox_id=mailbox_id)
@@ -134,20 +130,29 @@ async def _run_delta_for_folder(
     folder_code: str,
     graph_folder_id: str | None,
 ) -> dict[str, Any]:
-    # Settings (acepta tus nombres y los “nuevos”)
+
     page_size = int(getattr(settings, "DELTA_PAGE_SIZE", 50))
     max_pages = int(getattr(settings, "DELTA_MAX_PAGES_PER_RUN", getattr(settings, "DELTA_MAX_PAGES", 50)))
     max_messages = int(getattr(settings, "DELTA_MAX_MESSAGES", 500))
 
-    # 1) Load state (delta_link / next_link)
     with get_db_session() as db:
         st = repos.get_delta_state(db, mailbox_id=mailbox_id, folder_id=folder_id)
 
     delta_link, next_link = _unpack_delta_state(st)
 
-    # 2) Decide URL inicial:
-    #    resume paging (next_link) > delta_link > initial delta query
-    url = next_link or delta_link  # si quedó a mitad de paginación, next_link manda
+    def _cfg_bool(name: str, default: bool) -> bool:
+        v = getattr(settings, name, default)
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "y", "on")
+        return bool(v)
+
+    is_first_run = (delta_link is None and next_link is None)
+
+    prime_on_empty = _cfg_bool("DELTA_PRIME_ON_EMPTY_STATE", True)
+    prime_only = _cfg_bool("DELTA_PRIME_ONLY", False)
+
+    priming = prime_only or (prime_on_empty and is_first_run)
+    url = next_link or delta_link 
 
     pages = 0
     total_items = 0
@@ -157,22 +162,19 @@ async def _run_delta_for_folder(
     while True:
         if pages >= max_pages:
             break
-        if processed_messages >= max_messages:
+        if not priming and processed_messages >= max_messages:
             break
 
         pages += 1
 
-        # 3) GET delta page
         status: int
         data: dict[str, Any]
 
         if url:
-            # Necesitamos el status para manejar 410 (delta expirado)
-            resp = await graph_client._request("GET", url)  # usa auth+retries del cliente
+            resp = await graph_client._request("GET", url)
             status = resp.status_code
             data = _safe_json(resp)
         else:
-            # Primera vez: construye delta “inicial” con el helper del graph_client
             status, data = await graph_client.messages_delta_page(
                 mailbox_email=mailbox_email,
                 folder_code=folder_code,
@@ -181,7 +183,6 @@ async def _run_delta_for_folder(
                 page_size=page_size,
             )
 
-        # 4) Manejo delta expirado (410)
         if status == 410:
             with get_db_session() as db:
                 repos.reset_delta_state(
@@ -199,7 +200,6 @@ async def _run_delta_for_folder(
                 "note": "deltaLink expired; reset done; run again.",
             }
 
-        # 5) Otros errores
         if status != 200:
             err = str(data)[:500]
             with get_db_session() as db:
@@ -208,7 +208,7 @@ async def _run_delta_for_folder(
                     mailbox_id=mailbox_id,
                     folder_id=folder_id,
                     delta_link=delta_link,
-                    next_link=url,  # dejamos dónde iba para reintentar
+                    next_link=url,  
                     last_sync_at=utcnow(),
                     last_status_code=status,
                     last_error=err,
@@ -231,7 +231,6 @@ async def _run_delta_for_folder(
 
         total_items += len(items)
 
-        # 6) Extraer message ids (skip removed)
         msg_ids: list[str] = []
         for it in items:
             if not isinstance(it, dict):
@@ -242,12 +241,10 @@ async def _run_delta_for_folder(
             if mid:
                 msg_ids.append(str(mid))
 
-        # 7) Procesar ids (reusa pipeline real: dedupe + cases + attachments)
-        if msg_ids:
+        if msg_ids and not priming:
             processed_ok = await _process_message_ids(msg_ids)
             processed_messages += processed_ok
 
-        # 8) Links
         new_next = data.get("@odata.nextLink")
         new_delta = data.get("@odata.deltaLink")
 
@@ -256,7 +253,6 @@ async def _run_delta_for_folder(
 
         next_link = str(new_next) if new_next else None
 
-        # 9) Persist state after every page
         with get_db_session() as db:
             repos.upsert_delta_state(
                 db,
@@ -269,7 +265,6 @@ async def _run_delta_for_folder(
                 last_error=None,
             )
 
-        # 10) Continuar o terminar
         if next_link:
             url = next_link
             continue
@@ -281,6 +276,8 @@ async def _run_delta_for_folder(
         "folder_id": folder_id,
         "folder_code": folder_code,
         "ok": True,
+        "action": ("primed" if priming else "synced"),
+        "priming": bool(priming),
         "pages": pages,
         "total_items": total_items,
         "processed_messages": processed_messages,
@@ -303,8 +300,6 @@ async def _process_message_ids(message_ids: list[str]) -> int:
         nonlocal ok_count
         async with sem:
             try:
-                # IMPORTANTE: este método debe existir en tu sync_service
-                # (tú ya lo estás usando y te funcionó con 50 mensajes)
                 await sync_service.process_message_id_async(mid)
                 ok_count += 1
             except Exception:

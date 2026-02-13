@@ -594,7 +594,7 @@ final class UsersAdminController
 
                         $this->pdo->commit();
                     } catch (Exception $e) {
-                        $this->safeRollback(); // ✅ evita "There is no active transaction"
+                        $this->safeRollback();
                         throw $e;
                     }
 
@@ -611,31 +611,29 @@ final class UsersAdminController
                     $errors[] = "Fila {$rowNum}: " . $e->getMessage();
                 }
             }
+            $queuedCount = 0;
+            $queueFailCount = 0;
 
-            // ✅ ENCOLAR masivo (en vez de mail())
             if ($sendWelcome && !empty($createdUsers)) {
-                $loginUrl = \App\Config\url('/login');
-                $fromName = (string)($this->config['mail']['from_name'] ?? 'ICBF Mail');
-                $subject  = 'Bienvenido al Sistema ICBF Mail';
+                $loginUrl  = \App\Config\url('/login');
+                $fromName  = (string)($this->config['mail']['from_name'] ?? 'ICBF Mail');
+                $fromEmail = (string)($this->config['mail']['from_email'] ?? 'noreply@icbf.gov.co'); 
 
                 foreach ($createdUsers as $user) {
-                    $bodyHtml = "
-                      <html><body style='font-family: Arial, sans-serif; color:#111;'>
-                        <h2>Bienvenido al Sistema de Gestión de Correo ICBF</h2>
-                        <p>Tu cuenta ha sido creada exitosamente.</p>
-                        <div style='background:#f8f9fa; padding:14px; border-radius:6px; border:1px solid #e9ecef; margin:14px 0;'>
-                          <div><strong>Usuario:</strong> " . htmlspecialchars($user['username'], ENT_QUOTES, 'UTF-8') . "</div>
-                          <div><strong>Contraseña temporal:</strong> " . htmlspecialchars($user['password'], ENT_QUOTES, 'UTF-8') . "</div>
-                          <div><strong>Acceso:</strong> <a href='" . htmlspecialchars($loginUrl, ENT_QUOTES, 'UTF-8') . "'>" . htmlspecialchars($loginUrl, ENT_QUOTES, 'UTF-8') . "</a></div>
-                        </div>
-                        <p><em>Por seguridad, cambia tu contraseña en tu primer acceso.</em></p>
-                        <p>Saludos,<br>" . htmlspecialchars($fromName, ENT_QUOTES, 'UTF-8') . "</p>
-                      </body></html>
-                    ";
-
                     try {
-                        $this->mailQueue->enqueue('WELCOME', $user['email'], null, $subject, $bodyHtml, 5);
+                        $this->mailQueue->enqueueWelcomeEmail(
+                            $user['email'],
+                            $user['full_name'] ?? null,
+                            $user['username'],
+                            $user['password'],
+                            $loginUrl,
+                            $fromEmail,
+                            $fromName,
+                            5
+                        );
+                        $queuedCount++;
                     } catch (\Throwable $e) {
+                        $queueFailCount++;
                         error_log("Mail enqueue failed (import) for {$user['email']}: " . $e->getMessage());
                     }
                 }
@@ -643,6 +641,11 @@ final class UsersAdminController
 
             $message = "Importación completada: {$successCount} usuarios creados.";
             if ($errorCount > 0) $message .= " {$errorCount} con error.";
+
+            if ($sendWelcome) {
+                $message .= " Correos encolados: {$queuedCount}.";
+                if ($queueFailCount > 0) $message .= " Fallidos al encolar: {$queueFailCount}.";
+            }
 
             if (!empty($errors)) {
                 $_SESSION['_import_errors'] = array_slice($errors, 0, 10);
@@ -656,6 +659,7 @@ final class UsersAdminController
             $this->redirect('/admin/users/import');
         }
     }
+
 
     /**
      * 📌 CONSERVADO (compatibilidad): envío directo por mail()

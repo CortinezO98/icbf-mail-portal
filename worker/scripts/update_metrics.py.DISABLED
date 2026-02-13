@@ -41,7 +41,6 @@ class SemaforoWorker:
         cursor = self.connection.cursor(dictionary=True)
         
         try:
-            # 1. Inicializar casos nuevos
             init_query = """
                 INSERT IGNORE INTO case_sla_tracking (case_id, days_since_creation, current_sla_state)
                 SELECT 
@@ -62,7 +61,6 @@ class SemaforoWorker:
             cursor.execute(init_query)
             initialized = cursor.rowcount
             
-            # 2. Actualizar tracking existente
             update_query = """
                 UPDATE case_sla_tracking cst
                 JOIN cases c ON c.id = cst.case_id
@@ -80,7 +78,6 @@ class SemaforoWorker:
             cursor.execute(update_query)
             updated = cursor.rowcount
             
-            # 3. Marcar como respondidos los casos que ya tienen respuesta
             respondidos_query = """
                 UPDATE case_sla_tracking cst
                 JOIN cases c ON c.id = cst.case_id
@@ -113,7 +110,6 @@ class SemaforoWorker:
         cursor = self.connection.cursor(dictionary=True)
         
         try:
-            # Distribución del semáforo
             query = """
                 SELECT
                     -- VERDE (0-1 días)
@@ -148,7 +144,6 @@ class SemaforoWorker:
             cursor.execute(query)
             semaforo = cursor.fetchone()
             
-            # Casos críticos (ROJO) detallados
             query = """
                 SELECT
                     c.id,
@@ -169,7 +164,6 @@ class SemaforoWorker:
             cursor.execute(query)
             criticos = cursor.fetchall()
             
-            # Por agente
             query = """
                 SELECT
                     u.id as agent_id,
@@ -216,8 +210,6 @@ class SemaforoWorker:
         try:
             today = datetime.now().date()
             semaforo = metrics.get('semaforo', {})
-            
-            # Insertar métricas diarias
             cursor.execute("""
                 INSERT INTO performance_metrics 
                 (metric_date, metric_type, data_key, data_value)
@@ -236,7 +228,6 @@ class SemaforoWorker:
                 today, semaforo.get('total_abiertos', 0)
             ))
             
-            # Actualizar métricas por agente
             agentes = metrics.get('agentes', [])
             for agente in agentes:
                 cursor.execute("""
@@ -272,13 +263,7 @@ class SemaforoWorker:
         if criticos:
             logger.warning(f"ALERTA: {len(criticos)} casos en estado ROJO (4+ días)")
             
-            # Aquí podrías integrar con:
-            # - Email notifications
-            # - Slack/Teams webhooks
-            # - SMS alerts
-            # - System notifications
-            
-            for caso in criticos[:5]:  # Solo primeros 5 para el log
+            for caso in criticos[:5]: 
                 logger.warning(f"  Caso {caso['case_number']}: {caso['dias_desde_creacion']} días - {caso['assigned_to']}")
     
     def run(self):
@@ -287,20 +272,14 @@ class SemaforoWorker:
             return
             
         try:
-            # 1. Actualizar tracking SLA
             tracking_stats = self.update_sla_tracking()
-            
-            # 2. Calcular métricas del semáforo
             metrics = self.calculate_semaforo_metrics()
-            
-            # 3. Actualizar cache
+
             if metrics:
                 self.update_performance_cache(metrics)
-                
-            # 4. Verificar alertas
+
             self.send_alerts_if_needed(metrics)
-            
-            # Log resumen
+
             semaforo = metrics.get('semaforo', {})
             logger.info(f"Resumen Semáforo: VERDE={semaforo.get('verde',0)} AMARILLO={semaforo.get('amarillo',0)} ROJO={semaforo.get('rojo',0)}")
             

@@ -23,7 +23,6 @@ final class UsersRepo
 
         $st = $this->pdo->prepare($sql);
 
-        // ✅ IMPORTANTE: dos placeholders distintos (evita HY093)
         $st->execute([
             ':login_u' => $login,
             ':login_e' => $login,
@@ -33,11 +32,6 @@ final class UsersRepo
         return $row ?: null;
     }
 
-    /**
-     * ✅ Devuelve array de códigos de rol normalizados (ADMIN, SUPERVISOR, AGENTE)
-     * - FETCH_COLUMN para evitar líos de índices
-     * - DISTINCT + TRIM + UPPER para consistencia
-     */
     public function rolesForUser(int $userId): array
     {
         $sql = "

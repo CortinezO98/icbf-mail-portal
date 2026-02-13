@@ -16,7 +16,6 @@ router = APIRouter()
 
 @router.get("/graph/webhook")
 async def graph_webhook_get(request: Request) -> Response:
-    # Graph reachability validation
     token = request.query_params.get("validationToken")
     if token:
         return Response(content=token, media_type="text/plain", status_code=200)
@@ -25,12 +24,9 @@ async def graph_webhook_get(request: Request) -> Response:
 
 @router.post("/graph/webhook")
 async def graph_webhook_post(request: Request) -> Response:
-    # Graph validationToken can arrive via POST too
     token = request.query_params.get("validationToken")
     if token:
         return Response(content=token, media_type="text/plain", status_code=200)
-
-    # Graph expects quick response. We always respond 202 and process async.
     try:
         raw = await request.body()
         payload = json.loads(raw.decode("utf-8")) if raw else {}
@@ -51,7 +47,6 @@ async def graph_webhook_post(request: Request) -> Response:
     invalid = 0
 
     for n in notifications:
-        # n should be dict
         if not isinstance(n, dict):
             invalid += 1
             continue
@@ -74,7 +69,6 @@ async def graph_webhook_post(request: Request) -> Response:
     )
 
     if valid:
-        # IMPORTANT: sync_service expects {"value": [...]}
         asyncio.create_task(_process_safe({"value": valid}))
     else:
         if invalid:

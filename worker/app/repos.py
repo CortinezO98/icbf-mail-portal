@@ -88,7 +88,6 @@ def auto_assign_case(db: Session, *, case_id: int) -> int | None:
       - users.last_assigned_at
       - case_events: ASSIGNED mode=auto (source WORKER)
     """
-    # Si ya estaba asignado, no lo reasignamos aquí
     row = db.execute(
         text("SELECT assigned_user_id, status_id FROM cases WHERE id = :cid LIMIT 1"),
         {"cid": case_id},
@@ -105,7 +104,6 @@ def auto_assign_case(db: Session, *, case_id: int) -> int | None:
 
     status_asignado_id = get_status_id_by_code(db, "ASIGNADO")
 
-    # Update del caso
     db.execute(
         text("""
             UPDATE cases
@@ -120,7 +118,6 @@ def auto_assign_case(db: Session, *, case_id: int) -> int | None:
         {"uid": agent_id, "sid": status_asignado_id, "cid": case_id},
     )
 
-    # Marcar último asignado (para desempate)
     db.execute(
         text("""
             UPDATE users
@@ -132,7 +129,6 @@ def auto_assign_case(db: Session, *, case_id: int) -> int | None:
         {"uid": agent_id},
     )
 
-    # Evento de trazabilidad (auto)
     insert_case_event(
         db,
         case_id=case_id,
@@ -413,9 +409,8 @@ def load_system_config(db: Session) -> dict[str, str]:
     return {str(k): ("" if v is None else str(v)) for k, v in rows}
 
 
-# ============================================================
+
 # Subscriptions persistence (graph_subscriptions table)
-# ============================================================
 
 def ensure_graph_subscriptions_table(db: Session) -> None:
     db.execute(text("""
@@ -490,9 +485,8 @@ def mark_subscription_status(db: Session, *, subscription_id: str, status: str) 
         LIMIT 1
     """), {"subscription_id": subscription_id, "status": status})
 
-# ============================================================
+
 # Delta state persistence (graph_delta_state table)
-# ============================================================
 
 def ensure_graph_delta_state_table(db: Session) -> None:
     """

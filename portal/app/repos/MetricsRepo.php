@@ -14,19 +14,13 @@ final class MetricsRepo
 
     public function __construct(private PDO $pdo) {}
 
-    /**
-     * Fuente de tiempo operativa: cases.received_at (no created_at).
-     */
+
     private function clockField(): string
     {
         return 'c.received_at';
     }
 
-    /**
-     * ✅ IMPORTANTE (HY093 fix):
-     * - NO reutilizamos placeholders nombrados.
-     * - Permitimos definir el nombre del placeholder a usar.
-     */
+
     private function baseOpenWhere(?int $assignedUserId, array &$params, string $uidPlaceholder = ':uid_open'): string
     {
         $w = [];
@@ -38,18 +32,12 @@ final class MetricsRepo
         return $w ? ("WHERE " . implode(" AND ", $w)) : "";
     }
 
-    /* ============================================================
-       Calendario hábil (sla_calendar) + Festivos (holiday_calendar)
-       - NO rompe si no existe HolidayRepo/tabla: se degrada a L–V
-       ============================================================ */
-
     private function holidayRepo(): ?HolidayRepo
     {
-        // Lazy init para no romper en ambientes donde aún no esté el repo/tabla.
+
         if ($this->holidays !== null) return $this->holidays;
 
         try {
-            // HolidayRepo debe existir en tu proyecto (app/repos/HolidayRepo.php)
             $this->holidays = new HolidayRepo($this->pdo);
             return $this->holidays;
         } catch (\Throwable) {
@@ -69,7 +57,6 @@ final class MetricsRepo
 
         $clock = BusinessTime::fromRow($row);
 
-        // ✅ Festivos CO desde BD (si existe holiday_calendar + HolidayRepo)
         $holidays = $this->holidayRepo();
         if ($holidays !== null) {
             try {
@@ -77,7 +64,6 @@ final class MetricsRepo
                     return $holidays->isHoliday('CO', $dt);
                 });
             } catch (\Throwable) {
-                // Degradar silenciosamente a L–V sin festivos
             }
         }
 
@@ -102,19 +88,12 @@ final class MetricsRepo
         return 'ROJO';
     }
 
-    /* ============================================================
-       DASHBOARD (misma interfaz, mismo output, solo mejor semáforo)
-       - Semáforo SOLO si existe tracking (cst.case_id IS NOT NULL)
-       ============================================================ */
-
     public function realtimeSummary(?int $assignedUserId = null): array
     {
         $params = [];
 
-        // ✅ placeholder único para el WHERE principal
         $whereOpen = $this->baseOpenWhere($assignedUserId, $params, ':uid_open');
 
-        // ✅ placeholder único para el subquery
         $respondedFilter = ($assignedUserId !== null) ? " AND c2.assigned_user_id = :uid_resp " : "";
         if ($assignedUserId !== null) {
             $params[':uid_resp'] = $assignedUserId;
@@ -177,11 +156,7 @@ final class MetricsRepo
 
     public function realtimeByAgent(): array
     {
-        /**
-         * ✅ Semáforo SOLO con tracking
-         * Nota: Para no “romper” el total_open que ya mostrabas, dejamos COUNT(*) como total de abiertos del agente.
-         * El semáforo (verde/amarillo/rojo/breached) se cuenta solo donde exista cst.case_id.
-         */
+
         $sql = "
             SELECT
                 u.id AS user_id,
@@ -218,11 +193,7 @@ final class MetricsRepo
         return $this->pdo->query($sql)->fetchAll() ?: [];
     }
 
-    /**
-     * Inicializa tracking para casos abiertos.
-     * - minutes/days desde received_at (compat)
-     * - Insertamos también sla_started_at/business_minutes/sla_ignored
-     */
+
     public function initializeSlaTracking(): int
     {
         $sql = "
@@ -266,14 +237,9 @@ final class MetricsRepo
         return $stmt->rowCount();
     }
 
-    /**
-     * Update SLA (compat + hábil):
-     * - sigue actualizando minutes_since_creation/days_since_creation
-     * - cálculo hábil paginado para NO quedarse atrás
-     */
+
     public function updateSlaTracking(): int
     {
-        // 1) Compatibilidad (como lo tenías)
         $sqlCompat = "
             UPDATE case_sla_tracking cst
             JOIN cases c ON c.id = cst.case_id
@@ -293,10 +259,7 @@ final class MetricsRepo
         return $touched + $updatedBusiness;
     }
 
-    /**
-     * ✅ update por minutos hábiles, paginado por case_id (evita quedarse en primeros N)
-     * Retorna: [updatedRows, lastCaseId]
-     */
+
     public function updateSlaTrackingBusinessPaged(int $batchSize = 800, int $afterCaseId = 0): array
     {
         $clock = $this->loadBusinessClock();
@@ -374,7 +337,6 @@ final class MetricsRepo
 
             $receivedAt = $this->dtBogota($receivedAtStr);
 
-            // ✅ Start base calculado SIEMPRE desde received_at
             $baseStart = $clock->normalizeStart($receivedAt);
             $slaStart = $baseStart;
 
@@ -396,14 +358,12 @@ final class MetricsRepo
                 }
             }
 
-            // ✅ Re-normaliza final (por si cambió calendario/festivos)
             $slaStart = $clock->normalizeStart($slaStart);
 
             $bizMins  = $clock->diffBusinessMinutes($slaStart, $now);
             $state    = $this->semaforoFromBusinessMinutes($bizMins);
             $breached = ($bizMins > 720) ? 1 : 0;
 
-            // ✅ recalcular SIEMPRE el due_at hábil
             $dueAt = $clock->addBusinessMinutes($slaStart, 720)->format('Y-m-d H:i:s');
 
             $upd->execute([
@@ -421,10 +381,6 @@ final class MetricsRepo
         return [$updated, $lastId];
     }
 
-    /**
-     * ✅ barre TODO iterando batches hasta terminar
-     * (la clave para que no se te queden casos “colgados”)
-     */
     public function updateSlaTrackingBusinessAll(int $batchSize = 800, int $maxLoops = 2000): int
     {
         $totalUpdated = 0;
@@ -434,7 +390,7 @@ final class MetricsRepo
             [$upd, $last] = $this->updateSlaTrackingBusinessPaged($batchSize, $after);
             $totalUpdated += $upd;
 
-            if ($last === $after) break; // no avanzó => fin
+            if ($last === $after) break;
             $after = $last;
         }
 
@@ -443,7 +399,6 @@ final class MetricsRepo
 
     public function getSemaforoDistribution(?int $userId = null): array
     {
-        // ✅ HY093 fix: el mismo placeholder no puede repetirse en UNIONs
         $params = [];
 
         $andUser1 = $userId ? " AND c.assigned_user_id = :user_id1 " : "";
@@ -666,9 +621,7 @@ final class MetricsRepo
 
     public function getExecutiveReport(): array
     {
-        /**
-         * ✅ Sin COALESCE(cst.current_sla_state,'VERDE'): semáforo SOLO con tracking.
-         */
+
         $sql = "
             SELECT
                 (SELECT COUNT(*) FROM cases) AS total_casos,

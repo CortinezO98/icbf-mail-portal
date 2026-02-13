@@ -9,7 +9,6 @@ $rolesCount = is_array($roles) ? count($roles) : 0;
 ?>
 
 <style>
-/* ✅ Sticky footer actions visibles siempre */
 .admin-sticky-actions{
   position: sticky;
   bottom: 0;
@@ -27,7 +26,7 @@ $rolesCount = is_array($roles) ? count($roles) : 0;
   pointer-events: none;
   background: linear-gradient(180deg, rgba(255,255,255,0), rgba(255,255,255,1));
 }
-/* ✅ Evita que el sticky tape el final del contenido */
+
 body.page-app main#mainContent{
   padding-bottom: 80px;
 }
@@ -51,7 +50,6 @@ body.page-app main#mainContent{
     </div>
   </div>
 
-  <!-- ❌ Eliminado alert Bootstrap de roles: ahora se muestra con SweetAlert al cargar (ver script) -->
 
   <div class="row">
     <div class="col-lg-8 col-xl-6 mx-auto">
@@ -289,7 +287,6 @@ body.page-app main#mainContent{
               <?php endif; ?>
             </div>
 
-            <!-- ✅ Botones de acción (sticky) -->
             <div class="admin-sticky-actions border-top">
               <div class="d-flex justify-content-between gap-2 flex-wrap">
                 <a href="<?= esc(url('/admin/users')) ?>" class="btn btn-outline-secondary">
@@ -309,8 +306,6 @@ body.page-app main#mainContent{
         </div>
       </div>
 
-      <!-- Puedes dejar esto porque NO es un "aviso flash", es contenido informativo fijo.
-           Si quieres 100% cero alerts Bootstrap en toda la pantalla, dímelo y lo paso a Card normal. -->
       <div class="alert alert-info mt-4">
         <div class="d-flex">
           <div class="flex-shrink-0"><i class="bi bi-info-circle-fill"></i></div>
@@ -343,15 +338,11 @@ document.addEventListener('DOMContentLoaded', function() {
   const rolesSelect = document.getElementById('role_ids');
   const rolesSelectAll = document.getElementById('rolesSelectAll');
   const rolesClear = document.getElementById('rolesClear');
-
-  // Fallback por si Swal no está cargado (no rompe el flujo)
   const SwalSafe = (window.Swal && typeof window.Swal.fire === 'function')
     ? window.Swal
     : { fire: (opts) => { console.log('Swal missing:', opts); } };
 
   const rolesCount = <?= (int)$rolesCount ?>;
-
-  // ✅ Aviso si NO hay roles (solo SweetAlert)
   if (rolesCount === 0) {
     SwalSafe.fire({
       icon: 'warning',

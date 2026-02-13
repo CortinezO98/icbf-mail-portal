@@ -19,14 +19,11 @@ $hasNext     = (bool)($pagination['hasNext'] ?? false);
 $perPage     = (int)($pagination['perPage'] ?? 20);
 $total       = (int)($pagination['total'] ?? 0);
 
-// Helpers de paginación: evita "active=&role_id=" cuando están vacíos
 $qs = static function(array $overrides = []) use ($search, $isActive, $roleId): string {
     $q = [];
     if ($overrides !== []) {
-        // si te pasan page y otros, lo respetamos
         $q = $overrides;
     }
-    // Mantener filtros actuales salvo que sobreescriban
     if (!array_key_exists('search', $q) && $search !== '') $q['search'] = $search;
     if (!array_key_exists('active', $q) && $isActive !== null) $q['active'] = (string)$isActive;
     if (!array_key_exists('role_id', $q) && $roleId !== null) $q['role_id'] = (string)$roleId;
@@ -428,12 +425,10 @@ $qs = static function(array $overrides = []) use ($search, $isActive, $roleId): 
 
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-  // Auto-focus en búsqueda
   const searchInput = document.querySelector('input[name="search"]');
   if (searchInput && !searchInput.value) searchInput.focus();
 });
 
-// ✅ Password generated (tu lógica original)
 if (window.location.hash === '#password-generated') {
   const userId = new URLSearchParams(window.location.search).get('user_id');
   const storedPassword = sessionStorage.getItem('generated_password_' + userId);

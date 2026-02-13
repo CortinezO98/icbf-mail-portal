@@ -84,7 +84,6 @@ def run_query(cur, params: dict) -> list[dict]:
 
 def write_csv(rows: list[dict], out_path: str) -> int:
     if not rows:
-        # crea vacío con headers mínimos
         with open(out_path, "w", newline="", encoding="utf-8") as f:
             f.write("")
         return 0
@@ -118,7 +117,6 @@ def main():
                 row_count = write_csv(rows, out_path)
                 sha = sha256_file(out_path)
 
-                # Guardar path relativo recomendado
                 storage_path = f"reports/{filename}"
                 mark_ready(cur, report_id, storage_path, row_count, sha)
                 c.commit()

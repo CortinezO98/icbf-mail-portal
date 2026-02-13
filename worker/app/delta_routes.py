@@ -15,3 +15,15 @@ def _require_admin_key(request: Request) -> None:
 async def run_delta(request: Request) -> dict:
     _require_admin_key(request)
     return await run_delta_backstop()
+
+
+@router.post("/graph/delta/prime")
+async def prime_delta(request: Request) -> dict:
+    _require_admin_key(request)
+
+    old = getattr(settings, "DELTA_PRIME_ONLY", 0)
+    try:
+        setattr(settings, "DELTA_PRIME_ONLY", 1)
+        return await run_delta_backstop()
+    finally:
+        setattr(settings, "DELTA_PRIME_ONLY", old)

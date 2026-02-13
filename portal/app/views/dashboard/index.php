@@ -16,11 +16,6 @@ $csrfToken = \App\Auth\Csrf::token();
 $isSupervisor = Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN');
 $isAdmin = Auth::hasRole('ADMIN');
 
-/**
- * Compatibilidad:
- * - Summary "plano": $summary['open_total'], $summary['sla_verde']...
- * - Summary "anidado": $summary['states']['nuevo'], $summary['semaforo']['verde']...
- */
 $openTotal = n($summary['open_total'] ?? ($summary['total_open'] ?? 0));
 
 $stNuevo      = n($summary['st_nuevo'] ?? ($summary['states']['nuevo'] ?? 0));
@@ -32,11 +27,6 @@ $slaVerde     = n($summary['sla_verde'] ?? ($summary['semaforo']['verde'] ?? 0))
 $slaAmarillo  = n($summary['sla_amarillo'] ?? ($summary['semaforo']['amarillo'] ?? 0));
 $slaRojo      = n($summary['sla_rojo'] ?? ($summary['semaforo']['rojo'] ?? 0));
 
-/**
- * KPI breach:
- * - si backend lo trae (ideal): $summary['breached_cases']
- * - si no, fallback: contar en criticalCases los breached=1
- */
 $breached = n($summary['breached_cases'] ?? 0);
 if ($breached === 0 && !empty($criticalCases)) {
     $breached = 0;
@@ -45,7 +35,6 @@ if ($breached === 0 && !empty($criticalCases)) {
     }
 }
 
-// promedio de primera respuesta (horas)
 $avgRespHours = 0.0;
 if (isset($summary['avg_response_hours'])) {
     $avgRespHours = f($summary['avg_response_hours']);
@@ -53,20 +42,13 @@ if (isset($summary['avg_response_hours'])) {
     $avgRespHours = round(f($summary['avg_first_response_min']) / 60, 2);
 }
 
-// porcentajes semáforo
 $totalSLA = $slaVerde + $slaAmarillo + $slaRojo;
 $verdePct = $totalSLA > 0 ? ($slaVerde / $totalSLA) * 100 : 0;
 $amarilloPct = $totalSLA > 0 ? ($slaAmarillo / $totalSLA) * 100 : 0;
 $rojoPct = $totalSLA > 0 ? ($slaRojo / $totalSLA) * 100 : 0;
 
-// tasa respuesta (sobre abiertos del tablero)
 $responseRate = $openTotal > 0 ? round(($stRespondido / $openTotal) * 100, 1) : 0;
 
-/**
- * Hints/leyendas (configurable por backend)
- * Ajuste recomendado: si backend no manda leyenda/hint, dejar claro que ahora es por horas hábiles.
- * (No afecta funcionalidad: solo texto UI.)
- */
 $semaforoHint = $summary['semaforo_hint']
     ?? 'Semáforo calculado por horas hábiles (L–V 08:00–17:00).';
 
@@ -76,11 +58,9 @@ $semaforoLegend = $summary['semaforo_legend'] ?? [
     'ROJO' => '> 12 horas hábiles',
 ];
 
-// Tablas accionables (compatibilidad)
 $criticalCases = $criticalCases ?? $critical ?? [];
 $warningCases  = $warningCases ?? $warning ?? [];
 
-// Helpers para pintar filas
 function caseId(array $c): string {
     return (string)($c['id'] ?? $c['case_id'] ?? '');
 }
@@ -94,11 +74,6 @@ function caseStatus(array $c): string {
     return (string)($c['status_name'] ?? $c['status_code'] ?? '');
 }
 
-/**
- * Ajuste recomendado (SIN romper):
- * - Si business_minutes existe (aunque sea 0) lo mostramos como "h hábiles"
- * - Si no existe, fallback viejo por minutos/días calendario
- */
 function caseTimeLabel(array $c): string {
     if (array_key_exists('business_minutes', $c) && $c['business_minutes'] !== null) {
         $biz = n($c['business_minutes']);

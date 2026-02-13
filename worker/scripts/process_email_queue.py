@@ -224,7 +224,6 @@ def main():
         sent = 0
         failed = 0
 
-        # 3) procesar
         for job in jobs:
             job_id = int(job["id"])
             try:

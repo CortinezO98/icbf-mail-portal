@@ -55,10 +55,7 @@ class GraphClient:
 
         return resp  # type: ignore[return-value]
 
-    # ============================================================
-    # Generic GET by URL (deltaLink / nextLink support) ✅ NUEVO
-    # ============================================================
-
+    # Generic GET by URL (deltaLink / nextLink support)
     async def get_by_url(self, url: str) -> dict[str, Any]:
         """
         Graph deltaLink/nextLink traen URL completa.
@@ -70,16 +67,9 @@ class GraphClient:
             raise RuntimeError(f"Graph get_by_url failed status={resp.status_code}")
         return resp.json()
 
-    # ============================================================
     # Messages + attachments
-    # ============================================================
-
     async def get_message(self, mailbox_email: str, message_id: str) -> dict[str, Any]:
         url = f"{GRAPH_BASE}/users/{mailbox_email}/messages/{message_id}"
-
-        # OJO:
-        # - NO existe "inReplyTo" en Graph v1.0 => NO lo selecciones
-        # - Si necesitas "In-Reply-To", viene como header dentro de internetMessageHeaders
         params = {
             "$select": ",".join(
                 [
@@ -94,7 +84,7 @@ class GraphClient:
                     "replyTo",
                     "body",
                     "internetMessageId",
-                    "internetMessageHeaders",  # ✅ para leer In-Reply-To desde headers
+                    "internetMessageHeaders",  
                     "conversationId",
                     "hasAttachments",
                 ]
@@ -118,8 +108,6 @@ class GraphClient:
             if resp.status_code != 200:
                 logger.error("list_attachments failed: %s %s", resp.status_code, resp.text)
                 raise RuntimeError("Graph list_attachments failed")
-
-            # Validación de content-type (defensa)
             ctype = (resp.headers.get("content-type") or "").lower()
             if "application/json" not in ctype:
                 preview = (resp.text or "")[:800]
@@ -135,7 +123,6 @@ class GraphClient:
                 data = resp.json()
                 return data.get("value", [])
             except json.JSONDecodeError as e:
-                # Body llegó truncado/corrupto -> reintentar
                 preview = (resp.text or "")[:800]
                 logger.warning(
                     "list_attachments JSON decode failed attempt=%s len=%s preview=%r err=%s",
@@ -218,10 +205,7 @@ class GraphClient:
             raise RuntimeError("Graph get_subscription failed")
         return resp.json()
 
-    # ============================
-    # Delta helpers (Backstop)
-    # ============================
-
+    # Delta helpers 
     def _folder_ref(self, *, folder_code: str, graph_folder_id: str | None) -> str:
         if graph_folder_id:
             return graph_folder_id
@@ -248,7 +232,7 @@ class GraphClient:
             delta_url = f"{GRAPH_BASE}/users/{mailbox_email}/mailFolders('{folder_ref}')/messages/delta"
             params = {
                 "$top": str(int(page_size)),
-                "$select": "id",  # ✅ delta minimalista
+                "$select": "id", 
             }
             headers = await self._headers()
             headers["Prefer"] = f"odata.maxpagesize={int(page_size)}"

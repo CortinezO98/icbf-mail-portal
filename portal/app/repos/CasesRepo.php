@@ -9,24 +9,16 @@ final class CasesRepo
 {
     public function __construct(private PDO $pdo) {}
 
-    /**
-     * Compatibilidad:
-     * - Si se llama con 3 args o menos, usa el modo legacy (limit).
-     * - Si se llama con 4 args, usa paginación.
-     *
-     * Nota: se mantiene la firma original para NO romper controllers/vistas existentes.
-     */
+
     public function listInbox(?string $statusCode, ?int $assignedUserId, int $page = 1, int $perPage = 20)
     {
         $numArgs = func_num_args();
 
-        // Legacy: listInbox($status, $assignedUserId, $limit)
         if ($numArgs <= 2) {
             $limit = func_get_arg(2) ?? 200;
             return $this->listInboxLegacy($statusCode, $assignedUserId, (int)$limit);
         }
 
-        // Nuevo: listInbox($status, $assignedUserId, $page, $perPage)
         return $this->listInboxPaginated($statusCode, $assignedUserId, $page, $perPage);
     }
 
@@ -316,7 +308,7 @@ final class CasesRepo
 
     /**
      * Cerrar: RESPONDIDO -> cerrado (observación + radicado obligatorios)
-     * $closedCode: code real del estado final en tu BD (ej: 'CERRADO').
+     * $closedCode: code real del estado final en tu BD.
      * Transacción incluida para atomicidad.
      */
     public function close(int $caseId, int $actorUserId, string $note, string $ticket, string $closedCode): int

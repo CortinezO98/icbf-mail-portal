@@ -1,5 +1,4 @@
 <?php
-// File: portal/app/repos/ReportsRepo.php
 declare(strict_types=1);
 
 namespace App\Repos;
@@ -124,12 +123,7 @@ final class ReportsRepo
         return $st->fetchAll() ?: [];
     }
 
-    /**
-     * ✅ Dataset SLA + tiempos por estado (case_events)
-     * - No rompe: mantiene keys actuales y agrega columnas nuevas.
-     *
-     * Requiere MySQL 8+ (WINDOW FUNCTIONS). Si tu MySQL es 5.7 te lo adapto.
-     */
+
     public function exportSlaDataset(string $startDate, string $endDate, ?int $mailboxId = null): array
     {
         $whereMailbox = $mailboxId ? " AND c.mailbox_id = :mb " : "";
@@ -340,9 +334,6 @@ final class ReportsRepo
         return $st->fetchAll() ?: [];
     }
 
-    /**
-     * ✅ Headers en español para export (CSV/XLSX) sin romper keys internas.
-     */
     public function exportHeaderMap(): array
     {
         return [
@@ -415,10 +406,7 @@ final class ReportsRepo
         ];
     }
 
-    /**
-     * ✅ Orden fijo para CSV/XLSX.
-     * Si una columna no existe en $rows[0], se ignora (no rompe).
-     */
+
     public function exportColumnOrder(): array
     {
         return [
@@ -501,10 +489,7 @@ final class ReportsRepo
         ];
     }
 
-    /**
-     * ✅ FIX HY093: no repetir placeholders
-     * DDL real: generated_reports tiene status/finished_at/row_count/error_message, etc.
-     */
+
     public function insertGeneratedReport(
         int $userId,
         string $reportType,

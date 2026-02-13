@@ -10,29 +10,22 @@ $_csrf = $_csrf ?? '';
 
 $userRoles = $user['role_ids'] ?? [];
 
-/**
- * ✅ Parse robusto para DATETIME con o sin microsegundos (NOW(6))
- * Ej: "2026-02-12 13:40:10.000000" o "2026-02-12 13:40:10"
- */
 function fmt_db_dt($value, string $outFormat): ?string
 {
     if ($value === null) return null;
     $value = trim((string)$value);
     if ($value === '') return null;
 
-    // 1) Intentar con microsegundos
     $dt = \DateTimeImmutable::createFromFormat('Y-m-d H:i:s.u', $value);
     if ($dt instanceof \DateTimeImmutable) {
         return $dt->format($outFormat);
     }
 
-    // 2) Intentar sin microsegundos
     $dt = \DateTimeImmutable::createFromFormat('Y-m-d H:i:s', $value);
     if ($dt instanceof \DateTimeImmutable) {
         return $dt->format($outFormat);
     }
 
-    // 3) Fallback: quitar microsegundos manualmente y usar strtotime
     $value2 = preg_replace('/\.\d{1,6}$/', '', $value);
     $ts = $value2 ? strtotime($value2) : false;
     if ($ts === false) return null;
@@ -438,15 +431,13 @@ document.addEventListener('DOMContentLoaded', function() {
     const submitBtn = document.getElementById('submitBtn');
     const togglePasswordBtn = document.getElementById('togglePassword');
     const passwordInput = document.getElementById('password');
-    
-    // Mostrar/ocultar contraseña
+
     togglePasswordBtn?.addEventListener('click', function() {
         const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
         passwordInput.setAttribute('type', type);
         this.innerHTML = type === 'password' ? '<i class="bi bi-eye"></i>' : '<i class="bi bi-eye-slash"></i>';
     });
-    
-    // Validación del formulario
+
     form?.addEventListener('submit', function(event) {
         if (!form.checkValidity()) {
             event.preventDefault();
@@ -454,15 +445,13 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         
         form.classList.add('was-validated');
-        
-        // Deshabilitar botón para prevenir doble envío
+
         if (submitBtn) {
             submitBtn.disabled = true;
             submitBtn.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Guardando...';
         }
     });
     
-    // Validación en tiempo real del email
     const emailInput = document.getElementById('email');
     emailInput?.addEventListener('blur', function() {
         const email = this.value;
@@ -475,7 +464,6 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
     
-    // Auto-focus en el primer campo
     const firstInput = form?.querySelector('input:not([type="hidden"])');
     firstInput?.focus();
 });

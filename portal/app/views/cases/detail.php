@@ -62,10 +62,7 @@ $isAssignedAgent = Auth::check()
   && !Auth::hasRole('ADMIN')
   && ((int)($case['assigned_user_id'] ?? 0) === (int)Auth::id());
 
-// En general, si eres el asignado (incluye supervisor/admin cuando se autoasignan casos)
 $isCaseOwner = Auth::check() && ((int)($case['assigned_user_id'] ?? 0) === (int)Auth::id());
-
-// Para este flujo: acciones “métricas” SOLO para el AGENTE asignado
 $canAgentFlowActions = $isAssignedAgent;
 
 // Ayudas UI por estado
@@ -74,7 +71,6 @@ $showInProc     = $canAgentFlowActions && $statusCode === 'EN_PROCESO';
 $showEscFinish  = $canAgentFlowActions && $statusCode === 'ESCALATED';
 $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
 
-// Nota: CERRADO => sin acciones
 ?>
 
 <div class="page-title">
@@ -219,10 +215,7 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
 
   <!-- Sidebar -->
   <div class="col-lg-4">
-
-    <!-- ========================================= -->
     <!-- ACCIONES DEL CASO (SOLO AGENTE ASIGNADO)   -->
-    <!-- ========================================= -->
     <?php if ($canAgentFlowActions): ?>
       <div class="card shadow-sm mb-3">
         <div class="card-header fw-semibold">
@@ -354,9 +347,7 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
       </div>
     <?php endif; ?>
 
-    <!-- ========================================= -->
     <!-- ASIGNAR CASO (SOLO SUPERVISOR/ADMIN)      -->
-    <!-- ========================================= -->
     <?php if ($isSupervisor): ?>
       <div class="card mb-3">
         <div class="card-header">Asignar caso</div>

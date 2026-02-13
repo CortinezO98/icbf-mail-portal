@@ -39,17 +39,10 @@ final class Auth
         return isset($_SESSION['user']['id']) ? (int)$_SESSION['user']['id'] : null;
     }
 
-    /**
-     * ✅ Normaliza un role code: trim + strtoupper
-     */
     private static function normRole(string $roleCode): string
     {
         return strtoupper(trim($roleCode));
     }
-
-    /**
-     * ✅ Devuelve roles siempre como array limpio (normalizados, únicos)
-     */
     public static function roles(): array
     {
         $roles = $_SESSION['user']['roles'] ?? [];
@@ -77,18 +70,12 @@ final class Auth
         return $roles;
     }
 
-    /**
-     * ✅ Case-insensitive y tolerante a espacios
-     */
     public static function hasRole(string $roleCode): bool
     {
         $needle = self::normRole($roleCode);
         return in_array($needle, self::roles(), true);
     }
 
-    /**
-     * ✅ Útil para validaciones rápidas
-     */
     public static function hasAnyRole(array $roleCodes): bool
     {
         foreach ($roleCodes as $code) {
@@ -112,9 +99,6 @@ final class Auth
         return self::hasRole('AGENTE');
     }
 
-    /**
-     * ✅ Login guarda roles normalizados
-     */
     public static function login(array $user, array $roleCodes): void
     {
         $normalized = array_values(array_unique(array_filter(array_map(

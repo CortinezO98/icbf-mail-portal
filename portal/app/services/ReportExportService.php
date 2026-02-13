@@ -38,10 +38,6 @@ final class ReportExportService
         exit;
     }
 
-    /**
-     * XLSX real si existe vendor/autoload.php y PhpSpreadsheet.
-     * Si no existe, el controller debe hacer fallback a CSV.
-     */
     public function streamXlsxIfAvailable(string $filename, array $rows): bool
     {
         // portal/app/services -> portal/vendor/autoload.php

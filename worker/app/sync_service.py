@@ -69,7 +69,6 @@ def _extract_message_id(notification: dict[str, Any]) -> str | None:
 
     last = res.rstrip("/").split("/")[-1]
 
-    # soporta messages('ID') o messages(ID)
     if last.startswith("messages(") and last.endswith(")"):
         inner = last[len("messages(") : -1].strip().strip("'").strip('"')
         return inner or None
@@ -101,7 +100,6 @@ def _should_accept(notification: dict[str, Any]) -> bool:
 
 
 def _find_case_by_conversation(db, *, mailbox_id: int, conversation_id: str) -> int | None:
-    # Forma simple sin depender de repos.get_case_by_conversation_id:
     row = db.execute(
         text("""
             SELECT case_id
@@ -116,7 +114,6 @@ def _find_case_by_conversation(db, *, mailbox_id: int, conversation_id: str) -> 
 
 
 def _touch_case_activity(db, *, case_id: int, last_activity_at: datetime) -> None:
-    # También sin depender de repos.touch_case_activity
     db.execute(
         text("""
             UPDATE cases
@@ -165,7 +162,6 @@ async def process_notifications_async(payload_or_list: dict[str, Any] | list[dic
 
     notifications = _normalize_notifications(payload_or_list)
 
-    # filtro extra por clientState (defensa)
     notifications = [n for n in notifications if _should_accept(n)]
 
     if not notifications:
@@ -174,7 +170,6 @@ async def process_notifications_async(payload_or_list: dict[str, Any] | list[dic
 
     logger.info("Processing notifications=%s", len(notifications))
 
-    # mailbox_id una sola vez
     with get_db_session() as db:
         mailbox_id = repos.get_or_create_mailbox(db, settings.MAILBOX_EMAIL)
 
@@ -342,7 +337,6 @@ async def _notify_agent_new_case(*, case_id: int, agent_id: int, case_subject: s
 
     ua = f"worker/{settings.WORKER_INSTANCE_ID}"
 
-    # 1) Validaciones + cooldown dentro de DB (para anti-spam)
     with get_db_session() as db:
         to_email = repos.get_user_email(db, user_id=agent_id)
 
@@ -385,7 +379,6 @@ async def _notify_agent_new_case(*, case_id: int, agent_id: int, case_subject: s
             logger.info("Notify cooldown active agent_id=%s -> skip notify", agent_id)
             return
 
-    # 2) Enviar correo fuera de DB
     portal = (getattr(settings, "PORTAL_BASE_URL", "") or "").rstrip("/")
     link = f"{portal}/cases/{case_id}" if portal else ""
 
@@ -470,7 +463,6 @@ async def _process_attachments(*, mailbox_id: int, provider_message_id: str, mai
 
     prepared: list[dict[str, Any]] = []
 
-    # 1) Preparar (descargar/decodificar/guardar en storage) fuera de DB
     for a in atts:
         odata_type = str(a.get("@odata.type") or "")
         att_id = str(a.get("id") or "")
@@ -526,11 +518,9 @@ async def _process_attachments(*, mailbox_id: int, provider_message_id: str, mai
     if not prepared:
         return
 
-    # 2) Persistir en DB (una sola transacción corta)
     with get_db_session() as db:
         message_pk = repos.get_message_pk(db, mailbox_id, provider_message_id)
 
-        # Evita duplicar adjuntos si ya estaban
         existing_count = _attachments_count(db, message_pk=message_pk)
         if existing_count > 0:
             logger.info(
@@ -564,7 +554,6 @@ async def process_message_id_async(message_id: str) -> None:
         logger.error("MAILBOX_EMAIL missing - cannot process message_id=%s", message_id)
         return
 
-    # mailbox_id una sola vez
     with get_db_session() as db:
         mailbox_id = repos.get_or_create_mailbox(db, settings.MAILBOX_EMAIL)
 
