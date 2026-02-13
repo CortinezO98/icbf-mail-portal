@@ -351,6 +351,47 @@ final class ReportsController
         include dirname(__DIR__) . '/views/layout.php';
     }
 
+    /* ==========================================================
+       ✅ EXPORTS: headers en español sin romper el dataset interno
+       ========================================================== */
+
+    /**
+     * Devuelve [keys, headersES]
+     * - Si existe exportColumnOrder() en el repo: usa ese orden fijo.
+     * - Si no existe: usa el orden natural del dataset.
+     */
+    private function getHeaderMapAndKeys(array $rows): array
+    {
+        if (empty($rows)) {
+            return [[], []];
+        }
+
+        $headerMap = method_exists($this->repo, 'exportHeaderMap')
+            ? (array)$this->repo->exportHeaderMap()
+            : [];
+
+        $rowKeys = array_keys($rows[0]);
+
+        // ✅ Orden fijo si existe en el repo
+        if (method_exists($this->repo, 'exportColumnOrder')) {
+            $ordered = (array)$this->repo->exportColumnOrder();
+
+            // solo columnas presentes en el dataset
+            $keys = array_values(array_filter($ordered, static fn($k) => in_array($k, $rowKeys, true)));
+
+            // agrega al final cualquier columna nueva que el dataset traiga y no esté en el orden fijo
+            foreach ($rowKeys as $k) {
+                if (!in_array($k, $keys, true)) $keys[] = $k;
+            }
+        } else {
+            $keys = $rowKeys;
+        }
+
+        $headers = array_map(static fn($k) => $headerMap[$k] ?? $k, $keys);
+
+        return [$keys, $headers];
+    }
+
     private function saveCsv(string $path, array $rows): void
     {
         $f = fopen($path, 'wb');
@@ -362,15 +403,23 @@ final class ReportsController
             return;
         }
 
-        fputcsv($f, array_keys($rows[0]));
+        [$keys, $headers] = $this->getHeaderMapAndKeys($rows);
+
+        // ✅ headers en español
+        fputcsv($f, $headers);
+
         foreach ($rows as $r) {
-            foreach ($r as $k => $v) {
+            $line = [];
+            foreach ($keys as $k) {
+                $v = $r[$k] ?? '';
                 if (is_array($v) || is_object($v)) {
-                    $r[$k] = json_encode($v, JSON_UNESCAPED_UNICODE);
+                    $v = json_encode($v, JSON_UNESCAPED_UNICODE);
                 }
+                $line[] = $v;
             }
-            fputcsv($f, array_values($r));
+            fputcsv($f, $line);
         }
+
         fclose($f);
     }
 
@@ -383,19 +432,21 @@ final class ReportsController
         if (empty($rows)) {
             $sheet->setCellValue('A1', 'sin_datos');
         } else {
-            $headers = array_keys($rows[0]);
+            [$keys, $headers] = $this->getHeaderMapAndKeys($rows);
 
+            // ✅ headers en español
             $col = 1;
             foreach ($headers as $h) {
                 $sheet->setCellValueByColumnAndRow($col, 1, (string)$h);
                 $col++;
             }
 
+            // ✅ valores recorriendo keys reales (no los headers)
             $rowIdx = 2;
             foreach ($rows as $r) {
                 $col = 1;
-                foreach ($headers as $h) {
-                    $v = $r[$h] ?? '';
+                foreach ($keys as $k) {
+                    $v = $r[$k] ?? '';
                     if (is_array($v) || is_object($v)) {
                         $v = json_encode($v, JSON_UNESCAPED_UNICODE);
                     }
@@ -466,7 +517,6 @@ final class ReportsController
             $isResponded = (int)($r['is_responded'] ?? 0) === 1;
             if ($isResponded) $responded++; else $pending++;
 
-            // Promedio 1ra respuesta: si el dataset ya trae campo nuevo, úsalo.
             if (isset($r['horas_hasta_1ra_respuesta']) && is_numeric($r['horas_hasta_1ra_respuesta'])) {
                 $sumFirstRespHours += (float)$r['horas_hasta_1ra_respuesta'];
                 $cntFirstResp++;

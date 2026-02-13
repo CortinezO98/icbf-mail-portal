@@ -14,11 +14,6 @@ final class ReportsRepo
     {
         $whereMailbox = $mailboxId ? " AND c.mailbox_id = :mb " : "";
 
-        /**
-         * ✅ NO SE ALTERA FUNCIONALIDAD ORIGINAL:
-         * - Se mantienen EXACTOS los KPIs existentes.
-         * - Solo se agregan columnas nuevas (avg_*), si no las usas en la vista, no afectan nada.
-         */
         $sql = "
             SELECT
               COUNT(*) AS total_cases,
@@ -30,7 +25,6 @@ final class ReportsRepo
               SUM(CASE WHEN cst.current_sla_state='AMARILLO' THEN 1 ELSE 0 END) AS sla_amarillo,
               SUM(CASE WHEN cst.current_sla_state='ROJO' THEN 1 ELSE 0 END) AS sla_rojo,
 
-              -- ✅ NUEVO (NO rompe): promedios en HORAS desde received_at
               ROUND(AVG(
                 CASE WHEN c.assigned_at IS NOT NULL
                   THEN TIMESTAMPDIFF(MINUTE, c.received_at, c.assigned_at) / 60
@@ -52,7 +46,6 @@ final class ReportsRepo
                 END
               ), 2) AS avg_close_hours,
 
-              -- ✅ NUEVO (NO rompe): promedio horas hábiles (desde tracking)
               ROUND(AVG(NULLIF(cst.business_minutes,0)) / 60, 2) AS avg_business_hours
 
             FROM cases c
@@ -69,7 +62,6 @@ final class ReportsRepo
         $st->execute();
         $kpis = $st->fetch() ?: [];
 
-        // Serie diaria (recibidos) — ORIGINAL
         $sqlDaily = "
             SELECT DATE(c.received_at) AS day, COUNT(*) AS cnt
             FROM cases c
@@ -86,10 +78,6 @@ final class ReportsRepo
         $st->execute();
         $daily = $st->fetchAll() ?: [];
 
-        /**
-         * ✅ Gaps de adjuntos — ORIGINAL (NO tocar):
-         * - Sigue usando messages.created_at y m.has_attachments = 1
-         */
         $sqlMissing = "
             SELECT COUNT(*) AS missing_attachments
             FROM (
@@ -136,15 +124,16 @@ final class ReportsRepo
         return $st->fetchAll() ?: [];
     }
 
+    /**
+     * ✅ Dataset SLA + tiempos por estado (case_events)
+     * - No rompe: mantiene keys actuales y agrega columnas nuevas.
+     *
+     * Requiere MySQL 8+ (WINDOW FUNCTIONS). Si tu MySQL es 5.7 te lo adapto.
+     */
     public function exportSlaDataset(string $startDate, string $endDate, ?int $mailboxId = null): array
     {
         $whereMailbox = $mailboxId ? " AND c.mailbox_id = :mb " : "";
 
-        /**
-         * ✅ NO SE ALTERA FUNCIONALIDAD ORIGINAL:
-         * - Se mantienen todos los campos que ya devolvías.
-         * - Solo se agregan columnas (tracking extra + horas calculadas).
-         */
         $sql = "
             SELECT
               c.id AS case_id,
@@ -159,6 +148,7 @@ final class ReportsRepo
               u.full_name AS assigned_user,
               c.received_at,
               c.assigned_at,
+              c.in_process_at,
               c.first_response_at,
               c.closed_at,
               c.is_responded,
@@ -172,7 +162,6 @@ final class ReportsRepo
               cst.days_since_creation,
               cst.last_updated,
 
-              -- ✅ NUEVO: tracking extendido (ya existe en tu tabla)
               cst.sla_ignored,
               cst.policy_id,
               cst.warn_yellow_at,
@@ -180,7 +169,6 @@ final class ReportsRepo
               cst.business_minutes,
               cst.sla_started_at,
 
-              -- ✅ NUEVO: métricas de gestión en HORAS (reloj: received_at)
               ROUND(TIMESTAMPDIFF(MINUTE, c.received_at, NOW()) / 60, 2) AS horas_desde_recepcion,
 
               ROUND(
@@ -216,28 +204,306 @@ final class ReportsRepo
                   THEN TIMESTAMPDIFF(MINUTE, c.received_at, cst.sla_due_at) / 60
                   ELSE NULL
                 END
-              , 2) AS horas_sla_total
+              , 2) AS horas_sla_total,
+
+              /* ==============================
+                 ✅ NUEVO: TIEMPOS POR ESTADO
+                 ============================== */
+              COALESCE(t.nuevo_min, 0) AS tiempo_nuevo_min,
+              COALESCE(t.asignado_min, 0) AS tiempo_asignado_min,
+              COALESCE(t.en_proceso_min, 0) AS tiempo_en_proceso_min,
+              COALESCE(t.respondido_min, 0) AS tiempo_respondido_min,
+              COALESCE(t.cerrado_min, 0) AS tiempo_cerrado_min,
+              COALESCE(t.escalado_min, 0) AS tiempo_escalado_min,
+              COALESCE(t.esperando_info_min, 0) AS tiempo_esperando_info_min,
+
+              ROUND(COALESCE(t.nuevo_min,0)/60, 2) AS tiempo_nuevo_h,
+              ROUND(COALESCE(t.asignado_min,0)/60, 2) AS tiempo_asignado_h,
+              ROUND(COALESCE(t.en_proceso_min,0)/60, 2) AS tiempo_en_proceso_h,
+              ROUND(COALESCE(t.respondido_min,0)/60, 2) AS tiempo_respondido_h,
+              ROUND(COALESCE(t.cerrado_min,0)/60, 2) AS tiempo_cerrado_h,
+              ROUND(COALESCE(t.escalado_min,0)/60, 2) AS tiempo_escalado_h,
+              ROUND(COALESCE(t.esperando_info_min,0)/60, 2) AS tiempo_esperando_info_h,
+
+              COALESCE(t.ultimo_evento_at, NULL) AS ultimo_cambio_estado_at,
+              COALESCE(t.min_estado_actual, NULL) AS minutos_en_estado_actual,
+              ROUND(COALESCE(t.min_estado_actual,0)/60, 2) AS horas_en_estado_actual,
+
+              -- ✅ Alias “bonitos” solicitados (no rompe)
+              cs.name AS estado_actual
 
             FROM cases c
             JOIN case_statuses cs ON cs.id = c.status_id
             LEFT JOIN users u ON u.id = c.assigned_user_id
             LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
+
+            /* Subquery de tiempos por estado basada en case_events */
+            LEFT JOIN (
+              WITH
+              base AS (
+                SELECT
+                  c2.id AS case_id,
+                  c2.status_id AS initial_status_id,
+                  c2.received_at AS initial_at,
+                  (
+                    SELECT MIN(e0.created_at)
+                    FROM case_events e0
+                    WHERE e0.case_id = c2.id
+                      AND e0.to_status_id IS NOT NULL
+                  ) AS first_event_at
+                FROM cases c2
+                WHERE DATE(c2.received_at) BETWEEN :s_base AND :e_base
+
+              ),
+              ev AS (
+                SELECT
+                  e.case_id,
+                  e.to_status_id AS status_id,
+                  e.created_at AS at_time,
+                  LEAD(e.created_at) OVER (PARTITION BY e.case_id ORDER BY e.created_at) AS next_time
+                FROM case_events e
+                WHERE e.to_status_id IS NOT NULL
+              ),
+              timeline AS (
+                SELECT
+                  b.case_id,
+                  b.initial_status_id AS status_id,
+                  b.initial_at AS at_time,
+                  b.first_event_at AS next_time
+                FROM base b
+                UNION ALL
+                SELECT
+                  ev.case_id,
+                  ev.status_id,
+                  ev.at_time,
+                  ev.next_time
+                FROM ev
+              ),
+              durations AS (
+                SELECT
+                  case_id,
+                  status_id,
+                  GREATEST(0, TIMESTAMPDIFF(MINUTE, at_time, COALESCE(next_time, NOW(6)))) AS minutes_in_status
+                FROM timeline
+                WHERE at_time IS NOT NULL
+              ),
+              last_ev AS (
+                SELECT
+                  e.case_id,
+                  MAX(e.created_at) AS last_at
+                FROM case_events e
+                WHERE e.to_status_id IS NOT NULL
+                GROUP BY e.case_id
+              )
+              SELECT
+                d.case_id,
+
+                SUM(CASE WHEN csx.code='NUEVO' THEN d.minutes_in_status ELSE 0 END) AS nuevo_min,
+                SUM(CASE WHEN csx.code='ASIGNADO' THEN d.minutes_in_status ELSE 0 END) AS asignado_min,
+                SUM(CASE WHEN csx.code='EN_PROCESO' THEN d.minutes_in_status ELSE 0 END) AS en_proceso_min,
+                SUM(CASE WHEN csx.code='RESPONDIDO' THEN d.minutes_in_status ELSE 0 END) AS respondido_min,
+                SUM(CASE WHEN csx.code='CERRADO' THEN d.minutes_in_status ELSE 0 END) AS cerrado_min,
+                SUM(CASE WHEN csx.code IN('ESCALADO','ESCALATED') THEN d.minutes_in_status ELSE 0 END) AS escalado_min,
+                SUM(CASE WHEN csx.code='ESPERANDO_INFO' THEN d.minutes_in_status ELSE 0 END) AS esperando_info_min,
+
+                le.last_at AS ultimo_evento_at,
+                CASE
+                  WHEN le.last_at IS NOT NULL THEN GREATEST(0, TIMESTAMPDIFF(MINUTE, le.last_at, NOW(6)))
+                  ELSE NULL
+                END AS min_estado_actual
+
+              FROM durations d
+              JOIN case_statuses csx ON csx.id = d.status_id
+              LEFT JOIN last_ev le ON le.case_id = d.case_id
+              GROUP BY d.case_id, le.last_at
+            ) t ON t.case_id = c.id
+
             WHERE DATE(c.received_at) BETWEEN :s AND :e
             $whereMailbox
             ORDER BY c.received_at DESC
         ";
 
         $st = $this->pdo->prepare($sql);
+        // outer WHERE
         $st->bindValue(':s', $startDate);
         $st->bindValue(':e', $endDate);
-        if ($mailboxId) $st->bindValue(':mb', $mailboxId, PDO::PARAM_INT);
+
+        // CTE base
+        $st->bindValue(':s_base', $startDate);
+        $st->bindValue(':e_base', $endDate);
+
+        if ($mailboxId) {
+            $st->bindValue(':mb', $mailboxId, PDO::PARAM_INT);
+        }
+
         $st->execute();
         return $st->fetchAll() ?: [];
     }
 
     /**
-     * ✅ Alineado 1:1 con DESCRIBE generated_reports
-     * ✅ FIX HY093: NO repetir placeholders (:st, :fa) dentro del SQL
+     * ✅ Headers en español para export (CSV/XLSX) sin romper keys internas.
+     */
+    public function exportHeaderMap(): array
+    {
+        return [
+            'case_id' => 'ID Caso',
+            'mailbox_id' => 'ID Buzón',
+            'case_number' => 'Número de Caso',
+            'subject' => 'Asunto',
+            'requester_email' => 'Correo del Solicitante',
+            'requester_name' => 'Nombre del Solicitante',
+
+            'status_code' => 'Código Estado',
+            'status_name' => 'Estado Actual',
+
+            'assigned_user_id' => 'ID Agente Asignado',
+            'assigned_user' => 'Agente Asignado',
+
+            'received_at' => 'Fecha Recepción',
+            'assigned_at' => 'Fecha Asignación',
+            'in_process_at' => 'Fecha Inicio Gestión',
+            'first_response_at' => 'Fecha Primera Respuesta',
+            'closed_at' => 'Fecha Cierre',
+
+            'is_responded' => 'Respondido (1/0)',
+            'due_at' => 'Vencimiento (cases.due_at)',
+            'sla_state' => 'Estado SLA (cases)',
+
+            'current_sla_state' => 'Semáforo SLA',
+            'breached' => 'Incumplió SLA (1/0)',
+            'sla_due_at' => 'Vence SLA (tracking)',
+
+            'minutes_since_creation' => 'Minutos desde Creación (tracking)',
+            'days_since_creation' => 'Días desde Creación (tracking)',
+            'last_updated' => 'Última Actualización SLA (tracking)',
+
+            'sla_ignored' => 'SLA Ignorado (1/0)',
+            'policy_id' => 'ID Política SLA',
+            'warn_yellow_at' => 'Alerta Amarillo (fecha)',
+            'warn_red_at' => 'Alerta Rojo (fecha)',
+            'business_minutes' => 'Minutos Hábiles (tracking)',
+            'sla_started_at' => 'Inicio SLA (tracking)',
+
+            'horas_desde_recepcion' => 'Horas desde Recepción',
+            'horas_hasta_asignacion' => 'Horas hasta Asignación',
+            'horas_hasta_1ra_respuesta' => 'Horas hasta 1ra Respuesta',
+            'horas_hasta_cierre' => 'Horas hasta Cierre',
+            'horas_restantes_sla' => 'Horas Restantes SLA',
+            'horas_sla_total' => 'Horas Totales SLA',
+
+            // Tiempos por estado
+            'tiempo_nuevo_min' => 'Tiempo en NUEVO (min)',
+            'tiempo_asignado_min' => 'Tiempo en ASIGNADO (min)',
+            'tiempo_en_proceso_min' => 'Tiempo en EN PROCESO (min)',
+            'tiempo_respondido_min' => 'Tiempo en RESPONDIDO (min)',
+            'tiempo_cerrado_min' => 'Tiempo en CERRADO (min)',
+            'tiempo_escalado_min' => 'Tiempo en ESCALADO (min)',
+            'tiempo_esperando_info_min' => 'Tiempo en ESPERANDO INFO (min)',
+
+            'tiempo_nuevo_h' => 'Tiempo en NUEVO (h)',
+            'tiempo_asignado_h' => 'Tiempo en ASIGNADO (h)',
+            'tiempo_en_proceso_h' => 'Tiempo en EN PROCESO (h)',
+            'tiempo_respondido_h' => 'Tiempo en RESPONDIDO (h)',
+            'tiempo_cerrado_h' => 'Tiempo en CERRADO (h)',
+            'tiempo_escalado_h' => 'Tiempo en ESCALADO (h)',
+            'tiempo_esperando_info_h' => 'Tiempo en ESPERANDO INFO (h)',
+
+            'ultimo_cambio_estado_at' => 'Último cambio de estado',
+            'minutos_en_estado_actual' => 'Minutos en Estado Actual',
+            'horas_en_estado_actual' => 'Horas en Estado Actual',
+            'estado_actual' => 'Estado Actual (derivado)',
+        ];
+    }
+
+    /**
+     * ✅ Orden fijo para CSV/XLSX.
+     * Si una columna no existe en $rows[0], se ignora (no rompe).
+     */
+    public function exportColumnOrder(): array
+    {
+        return [
+            // Identificación del caso
+            'case_id',
+            'case_number',
+            'mailbox_id',
+
+            // Solicitante
+            'requester_email',
+            'requester_name',
+
+            // Contenido
+            'subject',
+
+            // Estado actual (cases)
+            'status_code',
+            'status_name',
+
+            // Asignación / agente
+            'assigned_user_id',
+            'assigned_user',
+
+            // Fechas principales
+            'received_at',
+            'assigned_at',
+            'in_process_at',
+            'first_response_at',
+            'closed_at',
+
+            // Flags / SLA base (cases)
+            'is_responded',
+            'due_at',
+            'sla_state',
+
+            // SLA tracking
+            'current_sla_state',
+            'breached',
+            'sla_started_at',
+            'sla_due_at',
+            'warn_yellow_at',
+            'warn_red_at',
+            'sla_ignored',
+            'policy_id',
+            'business_minutes',
+            'minutes_since_creation',
+            'days_since_creation',
+            'last_updated',
+
+            // Métricas calculadas (horas)
+            'horas_desde_recepcion',
+            'horas_hasta_asignacion',
+            'horas_hasta_1ra_respuesta',
+            'horas_hasta_cierre',
+            'horas_restantes_sla',
+            'horas_sla_total',
+
+            // Tiempos por estado
+            'tiempo_nuevo_min',
+            'tiempo_asignado_min',
+            'tiempo_en_proceso_min',
+            'tiempo_respondido_min',
+            'tiempo_cerrado_min',
+            'tiempo_escalado_min',
+            'tiempo_esperando_info_min',
+
+            'tiempo_nuevo_h',
+            'tiempo_asignado_h',
+            'tiempo_en_proceso_h',
+            'tiempo_respondido_h',
+            'tiempo_cerrado_h',
+            'tiempo_escalado_h',
+            'tiempo_esperando_info_h',
+
+            // Estado actual + duración
+            'estado_actual',
+            'ultimo_cambio_estado_at',
+            'minutos_en_estado_actual',
+            'horas_en_estado_actual',
+        ];
+    }
+
+    /**
+     * ✅ FIX HY093: no repetir placeholders
+     * DDL real: generated_reports tiene status/finished_at/row_count/error_message, etc.
      */
     public function insertGeneratedReport(
         int $userId,
@@ -251,38 +517,37 @@ final class ReportsRepo
         ?int $rowCount = null,
         ?string $finishedAt = null
     ): void {
+        $status = strtoupper(trim($status));
         $paramsJson = json_encode($params, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         $hash = hash('sha256', $paramsJson ?: '');
 
-        $statusUp = strtoupper(trim($status));
-
-        // ✅ Regla: si READY/FAILED y no viene finishedAt, se marca finalizado ahora (NOW(6) equivalente)
-        if ($finishedAt === null && in_array($statusUp, ['READY', 'FAILED'], true)) {
-            $finishedAt = (new \DateTimeImmutable('now'))->format('Y-m-d H:i:s.u');
+        // finished_at se resuelve en PHP (evita reuso de placeholders en SQL)
+        $finishedAtFinal = $finishedAt;
+        if ($finishedAtFinal === null && ($status === 'READY' || $status === 'FAILED')) {
+            $finishedAtFinal = (new \DateTimeImmutable('now'))->format('Y-m-d H:i:s.u');
         }
 
         $sql = "
-            INSERT INTO generated_reports
-                (report_type, report_date, file_path, download_count, generated_by, created_at,
-                 params, params_hash, period_start, period_end, status, error_message, row_count, finished_at)
-            VALUES
-                (:rt, CURDATE(), :fp, 0, :uid, NOW(6),
-                 :pj, :ph, :ps, :pe, :st, :em, :rc, :finished_at)
+          INSERT INTO generated_reports
+            (report_type, report_date, file_path, download_count, generated_by, created_at, params, params_hash,
+             period_start, period_end, status, error_message, row_count, finished_at)
+          VALUES
+            (:rt, CURDATE(), :fp, 0, :uid, NOW(6), :pj, :ph, :ps, :pe, :st, :em, :rc, :fa)
         ";
 
         $st = $this->pdo->prepare($sql);
         $st->execute([
             ':rt' => $reportType,
             ':fp' => $filePath,
-            ':uid' => $userId,
+            ':uid' => $userId ?: null,
             ':pj' => $paramsJson,
             ':ph' => $hash,
             ':ps' => $periodStart,
             ':pe' => $periodEnd,
-            ':st' => $statusUp,
+            ':st' => $status,
             ':em' => $errorMessage,
             ':rc' => $rowCount,
-            ':finished_at' => $finishedAt, // puede ser NULL
+            ':fa' => $finishedAtFinal,
         ]);
     }
 
@@ -366,7 +631,6 @@ final class ReportsRepo
                 gr.row_count,
                 gr.finished_at,
 
-                -- compat: nombres viejos
                 gr.generated_by AS created_by,
                 u.full_name AS created_by_name,
                 NULL AS updated_at
