@@ -25,3 +25,10 @@ Thumbs.db
 /data/
 /attachments/
 /portal/uploads/
+
+# --- runtime storage (no versionar) ---
+portal/storage/
+portal/storage/**
+
+# pero sí conservar la carpeta vacía si quieres:
+!portal/storage/.gitkeep
