@@ -38,6 +38,7 @@ def create_app() -> FastAPI:
         await stop_background_jobs()
 
     @app.get("/health")
+    @app.head("/health")
     def health() -> dict:
         return {"status": "ok", "env": settings.ENV}
 

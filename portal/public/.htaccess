@@ -1,19 +1,21 @@
 DirectoryIndex index.php
-
 RewriteEngine On
 
-# --- Normaliza: si entran sin slash al final (ej: /public), forzar /public/ ---
+# EXCLUIR el worker por path
+RewriteRule ^worker/ - [L]
+
+# Normaliza directorios con slash final
 RewriteCond %{REQUEST_URI} !/$
 RewriteCond %{REQUEST_FILENAME} -d
 RewriteRule ^ %{REQUEST_URI}/ [R=301,L]
 
-# --- Evita loops al pedir index.php ---
+# Evita loops index.php
 RewriteRule ^index\.php$ - [L]
 
-# --- Servir archivos y carpetas reales tal cual ---
+# Sirve archivos/carpetas reales
 RewriteCond %{REQUEST_FILENAME} -f [OR]
 RewriteCond %{REQUEST_FILENAME} -d
 RewriteRule ^ - [L]
 
-# --- Front controller ---
+# Front controller
 RewriteRule ^ index.php [QSA,L]

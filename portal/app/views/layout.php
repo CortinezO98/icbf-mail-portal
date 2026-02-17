@@ -64,7 +64,8 @@ $enableSemaforoRoutes = false;
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Sistema de gestión de correspondencia ICBF">
     <title>ICBF - Portal de Correos</title>
-
+    <link rel="icon" type="image/png" href="<?= esc(url('/assets/img/logo_icbf.png')) ?>">
+    <link rel="apple-touch-icon" href="<?= esc(url('/assets/img/logo_icbf.png')) ?>">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
           rel="stylesheet"
           integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
