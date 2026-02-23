@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 
+
 namespace App\Controllers;
 
 use PDO;
@@ -693,39 +694,50 @@ final class UsersAdminController
 
     public function exportTemplate(): void
     {
-        $spreadsheet = new Spreadsheet();
-        $sheet = $spreadsheet->getActiveSheet();
+        try {
+            if (!class_exists(\PhpOffice\PhpSpreadsheet\Spreadsheet::class)) {
+                throw new \Exception('PhpSpreadsheet no está instalado o no cargó el autoload.');
+            }
 
-        $headers = ['Documento', 'Username', 'Email', 'Nombre Completo', 'Roles (separados por coma)'];
-        $sheet->fromArray($headers, null, 'A1');
+            $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+            $sheet = $spreadsheet->getActiveSheet();
 
-        $headerStyle = [
-            'font' => ['bold' => true],
-            'fill' => [
-                'fillType' => \PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID,
-                'startColor' => ['rgb' => 'E6E6FA']
-            ]
-        ];
-        $sheet->getStyle('A1:E1')->applyFromArray($headerStyle);
+            $headers = ['Documento', 'Username', 'Email', 'Nombre Completo', 'Roles (separados por coma)'];
+            $sheet->fromArray($headers, null, 'A1');
 
-        $exampleData = [
-            ['1012345678', 'usuario1', 'usuario1@ejemplo.com', 'Juan Pérez', 'AGENTE,SUPERVISOR'],
-            ['1023456789', 'usuario2', 'usuario2@ejemplo.com', 'María García', 'AGENTE'],
-            ['', 'usuario3', 'usuario3@ejemplo.com', 'Carlos López', 'ADMIN'],
-        ];
-        $sheet->fromArray($exampleData, null, 'A2');
+            $headerStyle = [
+                'font' => ['bold' => true],
+                'fill' => [
+                    'fillType' => \PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID,
+                    'startColor' => ['rgb' => 'E6E6FA']
+                ]
+            ];
+            $sheet->getStyle('A1:E1')->applyFromArray($headerStyle);
 
-        foreach (range('A', 'E') as $col) {
-            $sheet->getColumnDimension($col)->setAutoSize(true);
+            $exampleData = [
+                ['1012345678', 'usuario1', 'usuario1@ejemplo.com', 'Juan Pérez', 'AGENTE,SUPERVISOR'],
+                ['1023456789', 'usuario2', 'usuario2@ejemplo.com', 'María García', 'AGENTE'],
+                ['', 'usuario3', 'usuario3@ejemplo.com', 'Carlos López', 'ADMIN'],
+            ];
+            $sheet->fromArray($exampleData, null, 'A2');
+
+            foreach (range('A', 'E') as $col) {
+                $sheet->getColumnDimension($col)->setAutoSize(true);
+            }
+
+            header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            header('Content-Disposition: attachment;filename="plantilla_usuarios.xlsx"');
+            header('Cache-Control: max-age=0');
+            header('Pragma: no-cache');
+
+            $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+            $writer->save('php://output');
+            exit;
+
+        } catch (\Throwable $e) {
+            $this->flash('error', 'Error al descargar plantilla: ' . ($this->config['debug'] ? $e->getMessage() : 'Error interno'));
+            $this->redirect('/admin/users/import');
         }
-
-        header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        header('Content-Disposition: attachment;filename="plantilla_usuarios.xlsx"');
-        header('Cache-Control: max-age=0');
-
-        $writer = new Xlsx($spreadsheet);
-        $writer->save('php://output');
-        exit;
     }
 
     public function exportExcel(): void
