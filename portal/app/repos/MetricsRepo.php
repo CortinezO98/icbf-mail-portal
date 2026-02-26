@@ -14,12 +14,23 @@ final class MetricsRepo
 
     public function __construct(private PDO $pdo) {}
 
-
+    /**
+     * Campo base para métricas de "tiempo desde creación" (compatibilidad).
+     * IMPORTANTE: mantenemos received_at para no romper funcionalidad existente.
+     */
     private function clockField(): string
     {
         return 'c.received_at';
     }
 
+    /**
+     * Campo robusto para iniciar SLA si received_at viene NULL.
+     * Evita semáforos errados por no poder calcular horas hábiles.
+     */
+    private function slaBaseField(): string
+    {
+        return 'COALESCE(c.received_at, c.created_at)';
+    }
 
     private function baseOpenWhere(?int $assignedUserId, array &$params, string $uidPlaceholder = ':uid_open'): string
     {
@@ -34,7 +45,6 @@ final class MetricsRepo
 
     private function holidayRepo(): ?HolidayRepo
     {
-
         if ($this->holidays !== null) return $this->holidays;
 
         try {
@@ -64,6 +74,7 @@ final class MetricsRepo
                     return $holidays->isHoliday('CO', $dt);
                 });
             } catch (\Throwable) {
+                // no romper si falla checker
             }
         }
 
@@ -82,7 +93,7 @@ final class MetricsRepo
 
     private function semaforoFromBusinessMinutes(int $mins): string
     {
-        // <5h / 5-12h / >12h
+        // <5h / 5-12h / >12h (mantengo tu regla original: 12h exactas es AMARILLO)
         if ($mins < 300) return 'VERDE';
         if ($mins <= 720) return 'AMARILLO';
         return 'ROJO';
@@ -156,7 +167,6 @@ final class MetricsRepo
 
     public function realtimeByAgent(): array
     {
-
         $sql = "
             SELECT
                 u.id AS user_id,
@@ -193,7 +203,12 @@ final class MetricsRepo
         return $this->pdo->query($sql)->fetchAll() ?: [];
     }
 
-
+    /**
+     * Crea registros de tracking SIN calcular semáforo por calendario.
+     * El semáforo real se calcula en updateSlaTrackingBusiness* (horas hábiles + festivos).
+     *
+     * Mantiene: INSERT IGNORE, no rompe flujos existentes.
+     */
     public function initializeSlaTracking(): int
     {
         $sql = "
@@ -203,27 +218,16 @@ final class MetricsRepo
                  sla_due_at, breached, last_updated, created_at)
             SELECT
                 c.id AS case_id,
-                NULL AS sla_started_at,
-                NULL AS business_minutes,
+                {$this->slaBaseField()} AS sla_started_at,
+                0 AS business_minutes,
                 0 AS sla_ignored,
-
-                CASE
-                    WHEN cs.pauses_sla = 1 THEN 'VERDE'
-                    WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) <= 1 THEN 'VERDE'
-                    WHEN TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) BETWEEN 2 AND 3 THEN 'AMARILLO'
-                    ELSE 'ROJO'
-                END AS current_sla_state,
+                'VERDE' AS current_sla_state,
 
                 TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()) AS days_since_creation,
                 TIMESTAMPDIFF(MINUTE, {$this->clockField()}, NOW()) AS minutes_since_creation,
 
-                DATE_ADD({$this->clockField()}, INTERVAL 5 DAY) AS sla_due_at,
-
-                CASE
-                    WHEN cs.pauses_sla = 1 THEN 0
-                    WHEN NOW() > DATE_ADD({$this->clockField()}, INTERVAL 5 DAY) THEN 1
-                    ELSE 0
-                END AS breached,
+                NULL AS sla_due_at,
+                0 AS breached,
 
                 NOW(6) AS last_updated,
                 NOW(6) AS created_at
@@ -237,16 +241,17 @@ final class MetricsRepo
         return $stmt->rowCount();
     }
 
-
     public function updateSlaTracking(): int
     {
+        // 1) Compatibilidad: actualiza minutos/días "calendario" (no decide semáforo)
+        // Usamos COALESCE para no generar NULL/negativos cuando received_at venga vacío.
         $sqlCompat = "
             UPDATE case_sla_tracking cst
             JOIN cases c ON c.id = cst.case_id
             JOIN case_statuses cs ON cs.id = c.status_id
             SET
-                cst.minutes_since_creation = TIMESTAMPDIFF(MINUTE, {$this->clockField()}, NOW()),
-                cst.days_since_creation = TIMESTAMPDIFF(DAY, {$this->clockField()}, NOW()),
+                cst.minutes_since_creation = TIMESTAMPDIFF(MINUTE, {$this->slaBaseField()}, NOW()),
+                cst.days_since_creation = TIMESTAMPDIFF(DAY, {$this->slaBaseField()}, NOW()),
                 cst.last_updated = NOW(6)
             WHERE cs.is_final = 0
         ";
@@ -254,12 +259,18 @@ final class MetricsRepo
         $stmt->execute();
         $touched = $stmt->rowCount();
 
-        // 2) Hábil (paginado, barre TODO)
+        // 2) Hábil (paginado, barre TODO) => aquí se decide semáforo real
         $updatedBusiness = $this->updateSlaTrackingBusinessAll(batchSize: 800);
+
         return $touched + $updatedBusiness;
     }
 
-
+    /**
+     * Recalcula SLA hábil para todos los casos abiertos, por lotes.
+     * - Respeta pausas_sla y sla_ignored
+     * - Usa horario hábil, fines de semana y festivos (BusinessTime + HolidayRepo)
+     * - Fallback robusto si received_at es NULL (usa created_at)
+     */
     public function updateSlaTrackingBusinessPaged(int $batchSize = 800, int $afterCaseId = 0): array
     {
         $clock = $this->loadBusinessClock();
@@ -269,6 +280,7 @@ final class MetricsRepo
             SELECT
                 c.id AS case_id,
                 c.received_at,
+                c.created_at,
                 cs.pauses_sla,
 
                 cst.sla_ignored,
@@ -329,14 +341,19 @@ final class MetricsRepo
                 continue;
             }
 
+            // Fallback robusto: received_at -> created_at
             $receivedAtStr = (string)($r['received_at'] ?? '');
-            if ($receivedAtStr === '') {
-                // Si no hay received_at, no podemos calcular hábil
+            $createdAtStr  = (string)($r['created_at'] ?? '');
+
+            $baseStr = $receivedAtStr !== '' ? $receivedAtStr : $createdAtStr;
+            if ($baseStr === '') {
+                // No hay con qué calcular (caso anómalo), no rompemos.
                 continue;
             }
 
-            $receivedAt = $this->dtBogota($receivedAtStr);
+            $receivedAt = $this->dtBogota($baseStr);
 
+            // baseStart normalizado al inicio hábil
             $baseStart = $clock->normalizeStart($receivedAt);
             $slaStart = $baseStart;
 
@@ -344,11 +361,16 @@ final class MetricsRepo
             if (!empty($r['sla_started_at'])) {
                 try {
                     $existing = $this->dtBogota((string)$r['sla_started_at']);
+
+                    // Asegurar normalización y consistencia
                     $existingNorm = $clock->normalizeStart($existing);
 
                     $diffSeconds = $existing->getTimestamp() - $receivedAt->getTimestamp();
 
-                    if ($existing < $receivedAt || $diffSeconds > 86400) { // > 24h
+                    // Reglas de saneamiento:
+                    // - si existing es anterior a receivedAt => inválido
+                    // - si existing está demasiado adelante (>24h) => sospechoso
+                    if ($existing < $receivedAt || $diffSeconds > 86400) {
                         $slaStart = $baseStart;
                     } else {
                         $slaStart = $existingNorm;
@@ -360,10 +382,14 @@ final class MetricsRepo
 
             $slaStart = $clock->normalizeStart($slaStart);
 
+            // Cálculo hábil real (incluye fines de semana/festivos según BusinessTime)
             $bizMins  = $clock->diffBusinessMinutes($slaStart, $now);
+            if ($bizMins < 0) $bizMins = 0;
+
             $state    = $this->semaforoFromBusinessMinutes($bizMins);
             $breached = ($bizMins > 720) ? 1 : 0;
 
+            // due_at hábil: sumar 12h hábiles desde slaStart
             $dueAt = $clock->addBusinessMinutes($slaStart, 720)->format('Y-m-d H:i:s');
 
             $upd->execute([
@@ -621,7 +647,6 @@ final class MetricsRepo
 
     public function getExecutiveReport(): array
     {
-
         $sql = "
             SELECT
                 (SELECT COUNT(*) FROM cases) AS total_casos,
