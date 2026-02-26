@@ -20,13 +20,28 @@ $perPage     = (int)($pagination['perPage'] ?? 20);
 $total       = (int)($pagination['total'] ?? 0);
 
 $qs = static function(array $overrides = []) use ($search, $isActive, $roleId): string {
+
     $q = [];
-    if ($overrides !== []) {
-        $q = $overrides;
+
+    if ($search !== '') {
+        $q['search'] = $search;
     }
-    if (!array_key_exists('search', $q) && $search !== '') $q['search'] = $search;
-    if (!array_key_exists('active', $q) && $isActive !== null) $q['active'] = (string)$isActive;
-    if (!array_key_exists('role_id', $q) && $roleId !== null) $q['role_id'] = (string)$roleId;
+
+    if ($isActive !== null) {
+        $q['active'] = (string)$isActive;
+    }
+
+    if ($roleId !== null && $roleId > 0) {
+        $q['role_id'] = (string)$roleId;
+    }
+
+    foreach ($overrides as $key => $value) {
+        if ($value === null || $value === '') {
+            unset($q[$key]); 
+        } else {
+            $q[$key] = $value; 
+        }
+    }
 
     return http_build_query($q);
 };

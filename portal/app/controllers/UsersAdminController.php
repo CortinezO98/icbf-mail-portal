@@ -43,7 +43,13 @@ final class UsersAdminController
         $page = max(1, (int)($_GET['page'] ?? 1));
         $search = trim((string)($_GET['search'] ?? ''));
         $isActive = isset($_GET['active']) && $_GET['active'] !== '' ? (int)$_GET['active'] : null;
-        $roleId = isset($_GET['role_id']) ? (int)$_GET['role_id'] : null;
+        $roleId = (isset($_GET['role_id']) && $_GET['role_id'] !== '')
+            ? (int)$_GET['role_id']
+            : null;
+
+        if ($roleId !== null && $roleId <= 0) {
+            $roleId = null;
+        }
 
         $users = $this->repo->listUsers($page, $this->defaultPerPage, $search, $isActive, $roleId);
         $total = $this->repo->countUsers($search, $isActive, $roleId);
