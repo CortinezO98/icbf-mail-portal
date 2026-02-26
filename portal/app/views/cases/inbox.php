@@ -144,6 +144,14 @@ $casesCount = count($cases ?? []);
                                href="<?= esc(buildPaginationUrl(1, 'EN_PROCESO')) ?>">
                             <i class="bi bi-circle-fill text-info me-2"></i>En Proceso
                         </a></li>
+                        <li><a class="dropdown-item <?= $status === 'ESPERANDO_INFO' ? 'active' : '' ?>"
+                            href="<?= esc(buildPaginationUrl(1, 'ESPERANDO_INFO')) ?>">
+                            <i class="bi bi-circle-fill text-warning me-2"></i>Esperando información
+                        </a></li>
+                        <li><a class="dropdown-item <?= $status === 'ESCALATED' ? 'active' : '' ?>"
+                            href="<?= esc(buildPaginationUrl(1, 'ESCALATED')) ?>">
+                            <i class="bi bi-circle-fill text-danger me-2"></i>Escalado
+                        </a></li>
                         <li><a class="dropdown-item <?= $status === 'RESPONDIDO' ? 'active' : '' ?>" 
                                href="<?= esc(buildPaginationUrl(1, 'RESPONDIDO')) ?>">
                             <i class="bi bi-circle-fill text-success me-2"></i>Respondidos
@@ -322,8 +330,11 @@ $casesCount = count($cases ?? []);
                             $statusClass = badge_status_class($statusCode);
                             
                             [$slaBadge, $slaLabel] = badge_sla((string)($c['sla_bucket'] ?? $c['sla_state'] ?? ''));
-                            $receivedAt = formatDate($c['received_at'] ?? '');
-                            $lastActivity = formatDate($c['last_activity_at'] ?? '');
+                            $receivedAtRaw = $c['received_at_bogota'] ?? $c['received_at'] ?? '';
+                            $lastActivityRaw = $c['last_activity_at_bogota'] ?? $c['last_activity_at'] ?? '';
+
+                            $receivedAt = formatDate($receivedAtRaw);
+                            $lastActivity = formatDate($lastActivityRaw);
                             
                             // Colores según estado
                             $priorityClass = match($statusCode) {
@@ -405,9 +416,9 @@ $casesCount = count($cases ?? []);
                             <td>
                                 <div class="text-nowrap">
                                     <div class="fw-medium"><?= $receivedAt ?></div>
-                                    <?php if ($c['received_at']): ?>
+                                    <?php if (!empty($receivedAtRaw)): ?>
                                     <div class="text-muted small">
-                                        <?= date('H:i', strtotime($c['received_at'])) ?>
+                                        <?= date('H:i', strtotime($receivedAtRaw)) ?>
                                     </div>
                                     <?php endif; ?>
                                 </div>
@@ -417,9 +428,9 @@ $casesCount = count($cases ?? []);
                                 <div class="d-flex justify-content-between align-items-center">
                                     <div class="text-nowrap">
                                         <div class="fw-medium"><?= $lastActivity ?></div>
-                                        <?php if ($c['last_activity_at']): ?>
+                                        <?php if (!empty($lastActivityRaw)): ?>
                                         <div class="text-muted small">
-                                            <?= date('H:i', strtotime($c['last_activity_at'])) ?>
+                                            <?= date('H:i', strtotime($lastActivityRaw)) ?>
                                         </div>
                                         <?php endif; ?>
                                     </div>

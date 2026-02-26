@@ -30,11 +30,20 @@ final class CasesRepo
         $params = [];
 
         $sql = "SELECT
-                  c.id, c.case_number, c.subject,
-                  c.requester_email, c.requester_name,
-                  c.received_at, c.due_at, c.sla_state, c.last_activity_at,
-                  cs.code AS status_code, cs.name AS status_name,
-                  u.full_name AS assigned_user_name
+                    c.id, c.case_number, c.subject,
+                    c.requester_email, c.requester_name,
+
+                    -- UTC (tal como está en BD)
+                    c.received_at       AS received_at_utc,
+                    c.last_activity_at  AS last_activity_at_utc,
+
+                    -- Hora Bogotá para UI
+                    DATE_SUB(c.received_at, INTERVAL 5 HOUR)      AS received_at_bogota,
+                    DATE_SUB(c.last_activity_at, INTERVAL 5 HOUR) AS last_activity_at_bogota,
+
+                    c.due_at, c.sla_state,
+                    cs.code AS status_code, cs.name AS status_name,
+                    u.full_name AS assigned_user_name
                 FROM cases c
                 JOIN case_statuses cs ON cs.id = c.status_id
                 LEFT JOIN users u ON u.id = c.assigned_user_id";
@@ -78,12 +87,21 @@ final class CasesRepo
                      LEFT JOIN users u ON u.id = c.assigned_user_id";
 
         $sql = "SELECT
-                  c.id, c.case_number, c.subject,
-                  c.requester_email, c.requester_name,
-                  c.received_at, c.due_at, c.sla_state, c.last_activity_at,
-                  c.assigned_user_id,
-                  cs.code AS status_code, cs.name AS status_name,
-                  u.full_name AS assigned_user_name
+                    c.id, c.case_number, c.subject,
+                    c.requester_email, c.requester_name,
+
+                    -- UTC (tal como está en BD)
+                    c.received_at       AS received_at_utc,
+                    c.last_activity_at  AS last_activity_at_utc,
+
+                    -- Hora Bogotá para UI
+                    DATE_SUB(c.received_at, INTERVAL 5 HOUR)      AS received_at_bogota,
+                    DATE_SUB(c.last_activity_at, INTERVAL 5 HOUR) AS last_activity_at_bogota,
+
+                    c.due_at, c.sla_state,
+                    c.assigned_user_id,
+                    cs.code AS status_code, cs.name AS status_name,
+                    u.full_name AS assigned_user_name
                 FROM cases c
                 JOIN case_statuses cs ON cs.id = c.status_id
                 LEFT JOIN users u ON u.id = c.assigned_user_id";
