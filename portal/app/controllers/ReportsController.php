@@ -1,5 +1,4 @@
 <?php
-// File: portal/app/controllers/ReportsController.php
 declare(strict_types=1);
 
 namespace App\Controllers;
@@ -21,6 +20,21 @@ final class ReportsController
     {
         $this->repo = new ReportsRepo($pdo);
         $this->exporter = new ReportExportService();
+    }
+
+    private function portalBasePath(): string
+    {
+        return dirname(__DIR__, 3);
+    }
+
+    private function storagePath(): string
+    {
+        return $this->portalBasePath() . '/storage';
+    }
+
+    private function reportsPath(): string
+    {
+        return $this->storagePath() . '/reports';
     }
 
     public function dashboard(): void
@@ -135,8 +149,9 @@ final class ReportsController
 
         $rows = $this->repo->exportSlaDataset($start, $end, $mailboxId);
 
-        // Guardar el archivo en portal/storage/reports y registrar en generated_reports
-        $reportsDir = dirname(__DIR__, 2) . '/storage/reports';
+        // ✅ Guardar el archivo en portal/storage/reports y registrar en generated_reports
+        // FIX: antes usabas dirname(__DIR__, 2) que daba portal/app (incorrecto)
+        $reportsDir = $this->reportsPath();
         if (!is_dir($reportsDir)) {
             mkdir($reportsDir, 0777, true);
         }
@@ -149,7 +164,8 @@ final class ReportsController
         $userId = (int)(Auth::user()['id'] ?? 0);
 
         if ($format === 'xlsx') {
-            $autoload = dirname(__DIR__, 2) . '/vendor/autoload.php';
+            // ✅ FIX: autoload real está en /portal/vendor/autoload.php
+            $autoload = $this->portalBasePath() . '/vendor/autoload.php';
             if (file_exists($autoload)) {
                 require_once $autoload;
             }
@@ -290,7 +306,8 @@ final class ReportsController
         $storedPath = trim($storedPath);
         if ($storedPath === '') return null;
 
-        $storageBase = realpath(dirname(__DIR__, 2) . '/storage');
+        // ✅ FIX: storage real está en /portal/storage (no /portal/app/storage)
+        $storageBase = realpath($this->storagePath());
         if ($storageBase === false) return null;
 
         $reportsBase = realpath($storageBase . DIRECTORY_SEPARATOR . 'reports');
