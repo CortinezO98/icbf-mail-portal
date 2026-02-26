@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Set
+from datetime import datetime, timezone  
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -16,13 +17,28 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Básico
     APP_NAME: str = "icbf-mail"
     ENV: str = "dev"
     LOG_LEVEL: str = "INFO"
     HOST: str = "127.0.0.1"
     PORT: int = 8001
     WORKER_INSTANCE_ID: str = "worker-01"
+
+    GO_LIVE_AT: str | None = None
+
+    def go_live_dt(self) -> datetime | None:
+        """
+        Convierte GO_LIVE_AT (ISO 8601 con Z o con offset) a datetime UTC naive.
+        Compatible con el estilo de _iso_to_dt en sync_service (UTC y sin tzinfo).
+        """
+        v = (self.GO_LIVE_AT or "").strip()
+        if not v:
+            return None
+        try:
+            dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        except Exception:
+            return None
 
     # DB
     DB_DIALECT: str = "mysql"
@@ -54,7 +70,6 @@ class Settings(BaseSettings):
     GRAPH_CLIENT_STATE: str = ""
     MAILBOX_EMAIL: str = ""
     PUBLIC_BASE_URL: str = ""
-    
 
     # Subscriptions
     AUTO_ENSURE_SUBSCRIPTION: int = 0
@@ -68,18 +83,18 @@ class Settings(BaseSettings):
     DELTA_INTERVAL_MINUTES: int = 10
     DELTA_PAGE_SIZE: int = 50
     DELTA_MAX_PAGES_PER_RUN: int = 25
-    DELTA_CONCURRENCY: int = 3   
+    DELTA_CONCURRENCY: int = 3
 
     DELTA_PRIME_ON_EMPTY_STATE: int = 1
     DELTA_PRIME_ONLY: int = 0
 
     DELTA_MAX_MESSAGES: int = 500
-    DELTA_MAX_PAGES: int = 50 
+    DELTA_MAX_PAGES: int = 50
 
     # Admin
     ADMIN_API_KEY: str = ""
 
-    # helpers 
+    # helpers
     def allowed_ext_set(self) -> Set[str]:
         return {x.strip().lower().lstrip(".") for x in self.ALLOWED_ATTACHMENT_EXT.split(",") if x.strip()}
 

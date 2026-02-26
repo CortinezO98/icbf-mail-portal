@@ -161,7 +161,6 @@ async def process_notifications_async(payload_or_list: dict[str, Any] | list[dic
         return
 
     notifications = _normalize_notifications(payload_or_list)
-
     notifications = [n for n in notifications if _should_accept(n)]
 
     if not notifications:
@@ -200,8 +199,22 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
     cc_emails = _emails(msg.get("ccRecipients"))
     bcc_emails = _emails(msg.get("bccRecipients"))
 
-    received_at = _iso_to_dt(msg.get("receivedDateTime")) or datetime.now(timezone.utc).replace(tzinfo=None)
+    # ✅ Mejor fallback: receivedDateTime -> createdDateTime -> now
+    received_at = (
+        _iso_to_dt(msg.get("receivedDateTime"))
+        or _iso_to_dt(msg.get("createdDateTime"))
+        or datetime.now(timezone.utc).replace(tzinfo=None)
+    )
     sent_at = _iso_to_dt(msg.get("sentDateTime"))
+
+    # ✅ BLOQUEO por GO_LIVE_AT (día cero)
+    go_live = settings.go_live_dt() if hasattr(settings, "go_live_dt") else None
+    if go_live and received_at and received_at < go_live:
+        logger.warning(
+            "Skipping message before GO_LIVE_AT | msg=%s received_at=%s go_live=%s",
+            provider_message_id, received_at, go_live
+        )
+        return
 
     internet_message_id = msg.get("internetMessageId")
     conversation_id = msg.get("conversationId")
@@ -323,7 +336,6 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
 
     if assigned_agent_id and case_id is not None:
         await _notify_agent_new_case(case_id=case_id, agent_id=assigned_agent_id, case_subject=subject)
-    
 
 
 async def _notify_agent_new_case(*, case_id: int, agent_id: int, case_subject: str) -> None:
@@ -447,7 +459,6 @@ async def _notify_agent_new_case(*, case_id: int, agent_id: int, case_subject: s
             )
 
         logger.warning("Notification failed case_id=%s agent_id=%s err=%s", case_id, agent_id, e)
-
 
 
 async def _process_attachments(*, mailbox_id: int, provider_message_id: str, mailbox_email: str, message_id: str) -> None:
