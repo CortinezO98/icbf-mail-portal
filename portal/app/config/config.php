@@ -65,7 +65,7 @@ function load_config(): array
         'debug' => (int)(getenv('PORTAL_DEBUG') ?: 0) === 1,
         'csrf_key' => getenv('PORTAL_CSRF_KEY') ?: 'CHANGE_ME_CSRF_KEY',
 
-        'attachments_dir' => rtrim((string)(getenv('PORTAL_ATTACHMENTS_DIR') ?: ''), "\\/"),
+        'attachments_dir' => rtrim((string)(getenv('PORTAL_ATTACHMENTS_DIR') ?: '/var/lib/icbf-mail-portal/attachments'), "\\/"),
     ];
 }
 

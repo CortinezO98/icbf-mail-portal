@@ -208,7 +208,6 @@ try {
     }
 
     // Attachments download
-    // Attachments download
     if (preg_match('#^/attachments/(\d+)/download$#', $path, $m) && in_array($method, ['GET','HEAD'], true)) {
         \App\Middleware\require_login();
         $attachmentId = (int)$m[1];
