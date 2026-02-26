@@ -69,7 +69,8 @@ class Settings(BaseSettings):
 
     GRAPH_CLIENT_STATE: str = ""
     MAILBOX_EMAIL: str = ""
-    PUBLIC_BASE_URL: str = ""
+    PUBLIC_BASE_URL: str = ""\
+    
 
     # Subscriptions
     AUTO_ENSURE_SUBSCRIPTION: int = 0
@@ -77,6 +78,8 @@ class Settings(BaseSettings):
     SUBSCRIPTION_RESOURCE: str = "users/{MAILBOX_EMAIL}/mailFolders('Inbox')/messages"
     SUBSCRIPTION_LIFETIME_MINUTES: int = 10080
     SUB_RENEW_THRESHOLD_MINUTES: int = 1440
+
+    NOTIFICATIONS_ENABLED: bool = True
 
     # Delta backstop
     DELTA_ENABLED: int = 1

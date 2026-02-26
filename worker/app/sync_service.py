@@ -16,6 +16,9 @@ from app.storage import save_attachment_bytes
 logger = logging.getLogger("app.sync_service")
 
 
+
+
+
 def _iso_to_dt(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -52,6 +55,26 @@ def _header_value(headers: list[dict[str, Any]] | None, name: str) -> str | None
             v = h.get("value")
             return str(v) if v else None
     return None
+
+
+def _is_ndr(subject: str, from_email: str, body_html: str | None, body_text: str | None) -> bool:
+    s = (subject or "").strip().lower()
+    f = (from_email or "").strip().lower()
+    b = ((body_text or "") + " " + (body_html or "")).lower()
+
+    if s.startswith("no se puede entregar:") or s.startswith("undeliverable:"):
+        return True
+
+    if "microsoftexchange" in f or f.startswith("postmaster@"):
+        return True
+
+    if "delivery has failed" in b or "no se pudo entregar" in b:
+        return True
+
+    if "5.2.2" in b or "quotaexceeded" in b or "mailbox full" in b:
+        return True
+
+    return False
 
 
 def _extract_message_id(notification: dict[str, Any]) -> str | None:
@@ -231,6 +254,21 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
 
     has_attachments = 1 if msg.get("hasAttachments") else 0
 
+    # 🔥 FILTRO NDR / UNDELIVERABLE (ANTI REBOTES)
+    if _is_ndr(
+        subject=subject,
+        from_email=str(from_email),
+        body_html=body_html,
+        body_text=body_text,
+    ):
+        logger.warning(
+            "Skipping NDR/Undeliverable message_id=%s subject=%s from=%s",
+            provider_message_id,
+            subject,
+            from_email,
+        )
+        return
+
     case_id: int | None = None
     message_pk_existing: int | None = None
     should_process_attachments_even_if_dedupe = False
@@ -247,13 +285,20 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
             if has_att_db or has_attachments:
                 if _attachments_count(db, message_pk=message_pk_existing) == 0:
                     should_process_attachments_even_if_dedupe = True
-                    logger.warning("Attachments missing in DB for message_id=%s -> will fetch now", provider_message_id)
+                    logger.warning(
+                        "Attachments missing in DB for message_id=%s -> will fetch now",
+                        provider_message_id
+                    )
 
             case_id = case_id_existing
 
         else:
             if conversation_id:
-                case_id = _find_case_by_conversation(db, mailbox_id=mailbox_id, conversation_id=str(conversation_id))
+                case_id = _find_case_by_conversation(
+                    db,
+                    mailbox_id=mailbox_id,
+                    conversation_id=str(conversation_id)
+                )
 
             if case_id:
                 event_type = "MESSAGE_ADDED"
@@ -333,9 +378,11 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
             mailbox_email=mb,
             message_id=message_id,
         )
-
-    if assigned_agent_id and case_id is not None:
+    
+    if settings.NOTIFICATIONS_ENABLED and assigned_agent_id and case_id is not None:
         await _notify_agent_new_case(case_id=case_id, agent_id=assigned_agent_id, case_subject=subject)
+
+
 
 
 async def _notify_agent_new_case(*, case_id: int, agent_id: int, case_subject: str) -> None:
