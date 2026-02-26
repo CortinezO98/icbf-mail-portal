@@ -290,7 +290,7 @@ final class ReportsController
         $storedPath = trim($storedPath);
         if ($storedPath === '') return null;
 
-        $storageBase = realpath(dirname(__DIR__, 3) . '/storage');
+        $storageBase = realpath(dirname(__DIR__, 2) . '/storage');
         if ($storageBase === false) return null;
 
         $reportsBase = realpath($storageBase . DIRECTORY_SEPARATOR . 'reports');
