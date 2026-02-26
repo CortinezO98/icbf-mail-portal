@@ -72,23 +72,36 @@ final class AttachmentsController
 
     private function resolveStoragePath(string $storagePath): string
     {
-        $p = $storagePath;
-
-        $isWindowsAbs = preg_match('/^[A-Za-z]:\\\\/', $p) === 1;
-        $isUnixAbs = str_starts_with($p, '/');
-
-        if ($isWindowsAbs || $isUnixAbs) {
-            return realpath($p) ?: '';
-        }
-
         $base = (string)($this->config['attachments_dir'] ?? '');
         if ($base === '') {
             return '';
         }
-
-        $p = str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $p);
+        $p = str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $storagePath);
         $candidate = $base . DIRECTORY_SEPARATOR . $p;
 
-        return realpath($candidate) ?: $candidate; 
+        if (is_file($candidate)) {
+            return realpath($candidate) ?: $candidate;
+        }
+
+        $filename = basename($storagePath);
+        $parts = explode('_', $filename, 2);
+        if (empty($parts[0]) || strlen($parts[0]) < 4) {
+            return '';
+        }
+
+        $hash = $parts[0];
+        $dir1 = substr($hash, 0, 2);
+        $dir2 = substr($hash, 2, 2);
+
+        $reconstructed = $base
+            . DIRECTORY_SEPARATOR . $dir1
+            . DIRECTORY_SEPARATOR . $dir2
+            . DIRECTORY_SEPARATOR . $filename;
+
+        if (is_file($reconstructed)) {
+            return realpath($reconstructed) ?: $reconstructed;
+        }
+
+        return '';
     }
 }
