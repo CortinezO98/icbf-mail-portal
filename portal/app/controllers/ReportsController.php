@@ -153,7 +153,6 @@ final class ReportsController
             // ✅ Evitar timeouts/memoria en export XLSX (solo aquí)
             @set_time_limit(0);
             if (function_exists('ini_set')) {
-                // ajusta si quieres (256M/512M/1024M)
                 @ini_set('memory_limit', (string)($this->config['reports_xlsx_memory_limit'] ?? '512M'));
             }
 
@@ -170,27 +169,12 @@ final class ReportsController
                 exit;
             }
 
-            // ✅ Cache a disco (reduce RAM en datasets grandes)
-            if (class_exists(\PhpOffice\PhpSpreadsheet\Settings::class)) {
-                try {
-                    $cacheDir = dirname(__DIR__, 2) . '/storage/tmp';
-                    if (!is_dir($cacheDir)) @mkdir($cacheDir, 0777, true);
-
-                    // si existe y se puede escribir, úsalo
-                    if (is_dir($cacheDir) && is_writable($cacheDir)) {
-                        \PhpOffice\PhpSpreadsheet\Settings::setCacheStorageMethod(
-                            \PhpOffice\PhpSpreadsheet\CachedObjectStorageFactory::cache_to_discISAM,
-                            ['dir' => $cacheDir]
-                        );
-                    }
-                } catch (\Throwable $e) {
-                    // si falla el cache, no tumbes el export
-                }
-            }
+            // ❌ IMPORTANTE: NO usar Settings::setCacheStorageMethod() en tu versión (PhpSpreadsheet 5.4.0)
+            // (esa API no existe y rompe XLSX). Dejamos sin cache para no afectar funcionalidad.
 
             $path = $reportsDir . '/' . $baseName . '_' . date('Ymd_His') . '.xlsx';
 
-            // ✅ Guardar XLSX (tu método ya funciona)
+            // ✅ Guardar XLSX (método compatible con tu versión)
             $this->saveXlsx($path, $rows);
 
             $params = [
@@ -456,6 +440,12 @@ final class ReportsController
 
     private function saveXlsx(string $path, array $rows): void
     {
+        // ✅ Asegura que PhpSpreadsheet esté cargado (usa el vendor del project root)
+        $autoload = realpath(dirname(__DIR__, 3) . '/vendor/autoload.php');
+        if ($autoload && is_file($autoload)) {
+            require_once $autoload;
+        }
+
         $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
         $sheet = $spreadsheet->getActiveSheet();
         $sheet->setTitle('SLA');
@@ -465,14 +455,15 @@ final class ReportsController
         } else {
             [$keys, $headers] = $this->getHeaderMapAndKeys($rows);
 
-            // ✅ headers en español
+            // Headers (API compatible con tu versión 5.4.0)
             $col = 1;
             foreach ($headers as $h) {
-                $sheet->setCellValueByColumnAndRow($col, 1, (string)$h);
+                $cell = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($col) . '1';
+                $sheet->setCellValue($cell, (string)$h);
                 $col++;
             }
 
-            // ✅ valores recorriendo keys reales (no los headers)
+            // Data (API compatible con tu versión 5.4.0)
             $rowIdx = 2;
             foreach ($rows as $r) {
                 $col = 1;
@@ -481,7 +472,8 @@ final class ReportsController
                     if (is_array($v) || is_object($v)) {
                         $v = json_encode($v, JSON_UNESCAPED_UNICODE);
                     }
-                    $sheet->setCellValueByColumnAndRow($col, $rowIdx, (string)$v);
+                    $cell = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($col) . (string)$rowIdx;
+                    $sheet->setCellValue($cell, (string)$v);
                     $col++;
                 }
                 $rowIdx++;
