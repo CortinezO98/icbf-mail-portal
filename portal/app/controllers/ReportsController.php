@@ -150,48 +150,70 @@ final class ReportsController
 
         if ($format === 'xlsx') {
 
-            // ✅ vendor REAL está en /var/www/icbf-mail-portal/vendor
-            // controllers está en /var/www/icbf-mail-portal/portal/app/controllers
-            // subimos 4 niveles: controllers -> app -> portal -> icbf-mail-portal
-            $projectRoot = dirname(__DIR__, 4);
-            $autoload = $projectRoot . '/vendor/autoload.php';
+            // ✅ Evitar timeouts/memoria en export XLSX (solo aquí)
+            @set_time_limit(0);
+            if (function_exists('ini_set')) {
+                // ajusta si quieres (256M/512M/1024M)
+                @ini_set('memory_limit', (string)($this->config['reports_xlsx_memory_limit'] ?? '512M'));
+            }
 
-            if (file_exists($autoload)) {
+            // ✅ Autoload correcto (tu vendor está en /var/www/icbf-mail-portal/vendor)
+            $autoload = realpath(dirname(__DIR__, 3) . '/vendor/autoload.php');
+            if ($autoload && is_file($autoload)) {
                 require_once $autoload;
             }
 
-            if (class_exists(\PhpOffice\PhpSpreadsheet\Spreadsheet::class)) {
-                $path = $reportsDir . '/' . $baseName . '_' . date('Ymd_His') . '.xlsx';
-                $this->saveXlsx($path, $rows);
-
-                $params = [
-                    'type' => $type,
-                    'start' => $start,
-                    'end' => $end,
-                    'mailbox_id' => $mailboxId,
-                    'format' => 'xlsx',
-                ];
-
-                $this->repo->insertGeneratedReport(
-                    $userId,
-                    'excel_' . $type,
-                    $path,
-                    $params,
-                    $start,
-                    $end,
-                    'READY',
-                    null,
-                    is_array($rows) ? count($rows) : null
-                );
-
-                header('Location: ' . url('/reports/download?id=' . $this->lastInsertIdSafe()));
+            // ✅ Validación fuerte: si NO está, no hacemos fallback silencioso
+            if (!class_exists(\PhpOffice\PhpSpreadsheet\Spreadsheet::class)) {
+                http_response_code(500);
+                echo "PhpSpreadsheet no disponible (autoload no cargado).";
                 exit;
             }
 
-            // Si NO existe la clase, no sirve intentar xlsx
-            // (puedes dejar fallback a csv si quieres, pero así te enteras del motivo)
-            http_response_code(500);
-            echo "No está disponible PhpSpreadsheet (XLSX). Verifica composer/vendor en: {$autoload}";
+            // ✅ Cache a disco (reduce RAM en datasets grandes)
+            if (class_exists(\PhpOffice\PhpSpreadsheet\Settings::class)) {
+                try {
+                    $cacheDir = dirname(__DIR__, 2) . '/storage/tmp';
+                    if (!is_dir($cacheDir)) @mkdir($cacheDir, 0777, true);
+
+                    // si existe y se puede escribir, úsalo
+                    if (is_dir($cacheDir) && is_writable($cacheDir)) {
+                        \PhpOffice\PhpSpreadsheet\Settings::setCacheStorageMethod(
+                            \PhpOffice\PhpSpreadsheet\CachedObjectStorageFactory::cache_to_discISAM,
+                            ['dir' => $cacheDir]
+                        );
+                    }
+                } catch (\Throwable $e) {
+                    // si falla el cache, no tumbes el export
+                }
+            }
+
+            $path = $reportsDir . '/' . $baseName . '_' . date('Ymd_His') . '.xlsx';
+
+            // ✅ Guardar XLSX (tu método ya funciona)
+            $this->saveXlsx($path, $rows);
+
+            $params = [
+                'type' => $type,
+                'start' => $start,
+                'end' => $end,
+                'mailbox_id' => $mailboxId,
+                'format' => 'xlsx',
+            ];
+
+            $this->repo->insertGeneratedReport(
+                $userId,
+                'excel_' . $type,
+                $path,
+                $params,
+                $start,
+                $end,
+                'READY',
+                null,
+                is_array($rows) ? count($rows) : null
+            );
+
+            header('Location: ' . url('/reports/download?id=' . $this->lastInsertIdSafe()));
             exit;
         }
 
