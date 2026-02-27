@@ -149,7 +149,13 @@ final class ReportsController
         $userId = (int)(Auth::user()['id'] ?? 0);
 
         if ($format === 'xlsx') {
-            $autoload = dirname(__DIR__, 2) . '/vendor/autoload.php';
+
+            // ✅ vendor REAL está en /var/www/icbf-mail-portal/vendor
+            // controllers está en /var/www/icbf-mail-portal/portal/app/controllers
+            // subimos 4 niveles: controllers -> app -> portal -> icbf-mail-portal
+            $projectRoot = dirname(__DIR__, 4);
+            $autoload = $projectRoot . '/vendor/autoload.php';
+
             if (file_exists($autoload)) {
                 require_once $autoload;
             }
@@ -182,8 +188,11 @@ final class ReportsController
                 exit;
             }
 
-            // fallback
-            $format = 'csv';
+            // Si NO existe la clase, no sirve intentar xlsx
+            // (puedes dejar fallback a csv si quieres, pero así te enteras del motivo)
+            http_response_code(500);
+            echo "No está disponible PhpSpreadsheet (XLSX). Verifica composer/vendor en: {$autoload}";
+            exit;
         }
 
         // CSV guardado
