@@ -12,124 +12,14 @@ $case   = $case ?? [];
 $flash  = $flash ?? null; // ya no se usa aquí (lo maneja layout)
 $_csrf  = $_csrf ?? '';
 
-function normalize_text(string $s): string {
-  // Decodifica entidades y normaliza saltos
-  $s = html_entity_decode($s, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-  $s = str_replace(["\r\n", "\r"], "\n", $s);
-  return $s;
-}
-
-function sanitize_email_html(string $html): string {
-  $html = html_entity_decode($html, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-  $html = trim($html);
-  if ($html === '') return '';
-
-  // Cargar HTML en DOM
-  $dom = new DOMDocument();
-  libxml_use_internal_errors(true);
-
-  // Truco para UTF-8
-  $dom->loadHTML(
-    '<!doctype html><html><head><meta charset="utf-8"></head><body>' . $html . '</body></html>',
-    LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD
-  );
-
-  libxml_clear_errors();
-  libxml_use_internal_errors(false);
-
-  $xpath = new DOMXPath($dom);
-
-  // 1) Elimina tags peligrosos
-  foreach (['script','style','iframe','object','embed','link','meta','base'] as $tag) {
-    foreach ($dom->getElementsByTagName($tag) as $node) {
-      $node->parentNode?->removeChild($node);
-    }
-  }
-
-  // 2) Quita atributos peligrosos (onload, onclick, etc) y javascript:
-  foreach ($xpath->query('//@*') as $attr) {
-    $name = strtolower($attr->nodeName);
-    $val  = trim((string)$attr->nodeValue);
-
-    // Eventos inline (on*)
-    if (str_starts_with($name, 'on')) {
-      $attr->ownerElement?->removeAttributeNode($attr);
-      continue;
-    }
-
-    // Bloquea javascript: en href/src
-    if (in_array($name, ['href','src'], true)) {
-      $low = strtolower($val);
-      if (str_starts_with($low, 'javascript:') || str_starts_with($low, 'data:')) {
-        $attr->ownerElement?->removeAttributeNode($attr);
-        continue;
-      }
-    }
-
-    // Opcional: si quieres quitar estilos inline (para que no dañe tu UI)
-    if ($name === 'style') {
-      $attr->ownerElement?->removeAttributeNode($attr);
-      continue;
-    }
-  }
-
-  // 3) Allowlist de tags (lo demás lo “aplana” a texto)
-  $allowed = [
-    'a','p','br','div','span','strong','b','em','i','u',
-    'ul','ol','li','blockquote','hr',
-    'table','thead','tbody','tr','td','th',
-    'h1','h2','h3','h4','h5','h6',
-    'pre','code'
-  ];
-
-  $all = $dom->getElementsByTagName('*');
-  // iteración al revés para poder remover
-  for ($i = $all->length - 1; $i >= 0; $i--) {
-    $el = $all->item($i);
-    if (!$el) continue;
-
-    $tag = strtolower($el->tagName);
-    if (!in_array($tag, $allowed, true)) {
-      // reemplaza el nodo por su texto (mantiene contenido)
-      $text = $dom->createTextNode($el->textContent ?? '');
-      $el->parentNode?->replaceChild($text, $el);
-      continue;
-    }
-
-    // Enlaces: endurece target/rel
-    if ($tag === 'a') {
-      $el->setAttribute('target', '_blank');
-      $el->setAttribute('rel', 'noopener noreferrer');
-    }
-  }
-
-  // Devuelve solo el body “real”
-  $body = $dom->getElementsByTagName('body')->item(0);
-  if (!$body) return '';
-
-  $out = '';
-  foreach ($body->childNodes as $child) {
-    $out .= $dom->saveHTML($child);
-  }
-  return trim($out);
-}
-
-function render_message_body(array $m): string {
-  $html = (string)($m['body_html'] ?? '');
-  if ($html !== '') {
-    $safe = sanitize_email_html($html);
-    if ($safe !== '') {
-      return '<div class="email-body email-body--html">' . $safe . '</div>';
-    }
-  }
-
+function safe_message_body(array $m): string {
   $txt = (string)($m['body_text'] ?? '');
-  $txt = normalize_text($txt);
-  if ($txt !== '') {
-    return '<div class="email-body email-body--text">' . esc($txt) . '</div>';
-  }
+  if ($txt !== '') return $txt;
 
-  return '<div class="email-body text-muted small">—</div>';
+  $html = (string)($m['body_html'] ?? '');
+  if ($html !== '') return trim(strip_tags($html));
+
+  return '';
 }
 
 function msg_when(array $m): string {
@@ -275,7 +165,7 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
               </div>
 
               <div class="body">
-                <?= render_message_body($m) ?>
+                <?= nl2br(esc($body)) ?>
               </div>
             </div>
           <?php endforeach; ?>
@@ -530,5 +420,4 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
     </div>
 
   </div>
-  
 </div>
