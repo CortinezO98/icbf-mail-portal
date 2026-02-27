@@ -72,9 +72,9 @@ final class ReportsController
         $end   = $this->safeDate($_POST['end_date'] ?? '') ?? date('Y-m-d');
 
         // filtros (compatibles con tu UI)
-        $status   = strtoupper(trim((string)($_POST['status'] ?? '')));   // NUEVO/ASIGNADO/EN_PROCESO/RESPONDIDO/CERRADO
+        $status   = strtoupper(trim((string)($_POST['status'] ?? '')));
         $agentId  = trim((string)($_POST['agent_id'] ?? ''));
-        $semaforo = strtoupper(trim((string)($_POST['semaforo'] ?? ''))); // VERDE/AMARILLO/ROJO/RESPONDIDO
+        $semaforo = strtoupper(trim((string)($_POST['semaforo'] ?? '')));
         $format   = strtolower(trim((string)($_POST['format'] ?? 'html')));
 
         if ($agentId !== '' && !ctype_digit($agentId)) $agentId = '';
@@ -135,8 +135,15 @@ final class ReportsController
 
         $rows = $this->repo->exportSlaDataset($start, $end, $mailboxId);
 
-        // Guardar el archivo en portal/storage/reports y registrar en generated_reports
-        $reportsDir = dirname(__DIR__, 2) . '/storage/reports';
+        // ✅ RUTAS REALES DE TU SERVIDOR
+        // controllers: /var/www/icbf-mail-portal/portal/app/controllers
+        // portalRoot : /var/www/icbf-mail-portal/portal
+        // projectRoot: /var/www/icbf-mail-portal   (aquí está vendor)
+        $portalRoot  = dirname(__DIR__, 3);
+        $projectRoot = dirname(__DIR__, 4);
+
+        // Guardar el archivo en portal/storage/reports
+        $reportsDir = $portalRoot . '/storage/reports';
         if (!is_dir($reportsDir)) {
             mkdir($reportsDir, 0777, true);
         }
@@ -149,7 +156,8 @@ final class ReportsController
         $userId = (int)(Auth::user()['id'] ?? 0);
 
         if ($format === 'xlsx') {
-            $autoload = dirname(__DIR__, 2) . '/vendor/autoload.php';
+            // ✅ Autoload real: /var/www/icbf-mail-portal/vendor/autoload.php
+            $autoload = $projectRoot . '/vendor/autoload.php';
             if (file_exists($autoload)) {
                 require_once $autoload;
             }
@@ -290,14 +298,23 @@ final class ReportsController
         $storedPath = trim($storedPath);
         if ($storedPath === '') return null;
 
-        $storageBase = realpath(dirname(__DIR__, 2) . '/storage');
+        // ✅ portalRoot real: /var/www/icbf-mail-portal/portal
+        $portalRoot = dirname(__DIR__, 3);
+
+        $storageDir = $portalRoot . '/storage';
+        $reportsDir = $storageDir . '/reports';
+
+        if (!is_dir($storageDir)) {
+            @mkdir($storageDir, 0777, true);
+        }
+        if (!is_dir($reportsDir)) {
+            @mkdir($reportsDir, 0777, true);
+        }
+
+        $storageBase = realpath($storageDir);
         if ($storageBase === false) return null;
 
-        $reportsBase = realpath($storageBase . DIRECTORY_SEPARATOR . 'reports');
-        if ($reportsBase === false) {
-            @mkdir($storageBase . DIRECTORY_SEPARATOR . 'reports', 0777, true);
-            $reportsBase = realpath($storageBase . DIRECTORY_SEPARATOR . 'reports');
-        }
+        $reportsBase = realpath($reportsDir);
         if ($reportsBase === false) return null;
 
         // absoluto
@@ -355,11 +372,6 @@ final class ReportsController
        ✅ EXPORTS: headers en español sin romper el dataset interno
        ========================================================== */
 
-    /**
-     * Devuelve [keys, headersES]
-     * - Si existe exportColumnOrder() en el repo: usa ese orden fijo.
-     * - Si no existe: usa el orden natural del dataset.
-     */
     private function getHeaderMapAndKeys(array $rows): array
     {
         if (empty($rows)) {
@@ -372,14 +384,9 @@ final class ReportsController
 
         $rowKeys = array_keys($rows[0]);
 
-        // ✅ Orden fijo si existe en el repo
         if (method_exists($this->repo, 'exportColumnOrder')) {
             $ordered = (array)$this->repo->exportColumnOrder();
-
-            // solo columnas presentes en el dataset
             $keys = array_values(array_filter($ordered, static fn($k) => in_array($k, $rowKeys, true)));
-
-            // agrega al final cualquier columna nueva que el dataset traiga y no esté en el orden fijo
             foreach ($rowKeys as $k) {
                 if (!in_array($k, $keys, true)) $keys[] = $k;
             }
@@ -404,8 +411,6 @@ final class ReportsController
         }
 
         [$keys, $headers] = $this->getHeaderMapAndKeys($rows);
-
-        // ✅ headers en español
         fputcsv($f, $headers);
 
         foreach ($rows as $r) {
@@ -434,14 +439,12 @@ final class ReportsController
         } else {
             [$keys, $headers] = $this->getHeaderMapAndKeys($rows);
 
-            // ✅ headers en español
             $col = 1;
             foreach ($headers as $h) {
                 $sheet->setCellValueByColumnAndRow($col, 1, (string)$h);
                 $col++;
             }
 
-            // ✅ valores recorriendo keys reales (no los headers)
             $rowIdx = 2;
             foreach ($rows as $r) {
                 $col = 1;
@@ -466,10 +469,6 @@ final class ReportsController
         $id = (int)$this->pdo->lastInsertId();
         return $id > 0 ? $id : 0;
     }
-
-    /* ===========================
-       Helpers (no rompen)
-       =========================== */
 
     private function filterRows(array $rows, string $status, ?int $agentId, string $semaforo): array
     {
