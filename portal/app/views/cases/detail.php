@@ -148,21 +148,33 @@ function render_message_body(array $m): string {
   $html = (string)($m['body_html'] ?? '');
   $txt  = (string)($m['body_text'] ?? '');
 
-  // 1) Si hay HTML, intenta sanitizar y renderizar
+  // 1) Si hay HTML
   if (trim($html) !== '') {
     $safe = sanitize_email_html($html);
 
-    // Si quedó visible, lo mostramos
     if (trim($safe) !== '') {
       return '<div class="email-body email-body--html">' . $safe . '</div>';
     }
 
-    // ✅ Fallback: si el HTML quedó vacío por sanitizado, mostrar texto plano derivado
-    $plainFromHtml = trim(html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
-    $plainFromHtml = normalize_text($plainFromHtml);
+    // 🔥 Fallback inteligente: convierte bloques HTML en saltos reales
+    $plain = $html;
 
-    if ($plainFromHtml !== '') {
-      return '<div class="email-body email-body--text">' . esc($plainFromHtml) . '</div>';
+    // Convertir bloques a saltos
+    $plain = preg_replace('/<\/p>/i', "\n\n", $plain);
+    $plain = preg_replace('/<br\s*\/?>/i', "\n", $plain);
+    $plain = preg_replace('/<\/div>/i', "\n", $plain);
+    $plain = preg_replace('/<\/h[1-6]>/i', "\n\n", $plain);
+    $plain = preg_replace('/<\/li>/i', "\n", $plain);
+
+    // Quitar lo demás
+    $plain = strip_tags($plain);
+
+    $plain = html_entity_decode($plain, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $plain = normalize_text($plain);
+    $plain = trim($plain);
+
+    if ($plain !== '') {
+      return '<div class="email-body email-body--text">' . esc($plain) . '</div>';
     }
   }
 
@@ -246,6 +258,7 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
 .email-body--text {
   white-space: pre-wrap;
   word-break: break-word;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
 }
 
 /* HTML: que no reviente el layout */
