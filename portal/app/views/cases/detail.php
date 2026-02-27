@@ -12,14 +12,167 @@ $case   = $case ?? [];
 $flash  = $flash ?? null; // ya no se usa aquí (lo maneja layout)
 $_csrf  = $_csrf ?? '';
 
-function safe_message_body(array $m): string {
-  $txt = (string)($m['body_text'] ?? '');
-  if ($txt !== '') return $txt;
+// -----------------------------
+// Render correcto de correos
+// -----------------------------
+function normalize_text(string $s): string {
+  // Decodifica entidades y normaliza saltos
+  $s = html_entity_decode($s, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+  $s = str_replace(["\r\n", "\r"], "\n", $s);
+  return $s;
+}
 
+function sanitize_email_html(string $html): string {
+  $html = html_entity_decode($html, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+  $html = trim($html);
+  if ($html === '') return '';
+
+  if (!class_exists('DOMDocument')) {
+    // Fallback mínimo si DOM no está disponible
+    return trim(strip_tags($html, '<p><br><div><span><b><strong><i><em><u><ul><ol><li><blockquote><hr><table><thead><tbody><tr><td><th><pre><code><h1><h2><h3><h4><h5><h6><a><img>'));
+  }
+
+  $dom = new DOMDocument();
+  libxml_use_internal_errors(true);
+
+  $dom->loadHTML(
+    '<!doctype html><html><head><meta charset="utf-8"></head><body>' . $html . '</body></html>',
+    LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD
+  );
+
+  libxml_clear_errors();
+  libxml_use_internal_errors(false);
+
+  $xpath = new DOMXPath($dom);
+
+  // 1) Elimina tags peligrosos
+  foreach (['script','style','iframe','object','embed','link','meta','base'] as $tag) {
+    $nodes = $dom->getElementsByTagName($tag);
+    for ($i = $nodes->length - 1; $i >= 0; $i--) {
+      $node = $nodes->item($i);
+      if ($node && $node->parentNode) {
+        $node->parentNode->removeChild($node);
+      }
+    }
+  }
+
+  // 2) Quita atributos peligrosos y protocolos no permitidos
+  foreach ($xpath->query('//@*') as $attr) {
+    $name = strtolower($attr->nodeName);
+    $val  = trim((string)$attr->nodeValue);
+
+    if (str_starts_with($name, 'on')) {
+      $attr->ownerElement?->removeAttributeNode($attr);
+      continue;
+    }
+
+    if (in_array($name, ['href','src'], true)) {
+      $low = strtolower($val);
+
+      // Bloquea javascript: y data: (data: es típico XSS)
+      if (str_starts_with($low, 'javascript:') || str_starts_with($low, 'data:')) {
+        $attr->ownerElement?->removeAttributeNode($attr);
+        continue;
+      }
+
+      // Permite cid: (inline email). Si NO lo quieres, bórralo aquí también.
+      // if (str_starts_with($low, 'cid:')) { ... }
+    }
+
+    // Quita estilos inline
+    if ($name === 'style') {
+      $attr->ownerElement?->removeAttributeNode($attr);
+      continue;
+    }
+  }
+
+  // 3) Allowlist de tags
+  $allowed = [
+    'a','p','br','div','span','strong','b','em','i','u',
+    'ul','ol','li','blockquote','hr',
+    'table','thead','tbody','tr','td','th',
+    'h1','h2','h3','h4','h5','h6',
+    'pre','code',
+    'img' // ✅ clave para correos
+  ];
+
+  $all = $dom->getElementsByTagName('*');
+  for ($i = $all->length - 1; $i >= 0; $i--) {
+    $el = $all->item($i);
+    if (!$el) continue;
+
+    $tag = strtolower($el->tagName);
+
+    if (!in_array($tag, $allowed, true)) {
+      $text = $dom->createTextNode($el->textContent ?? '');
+      $el->parentNode?->replaceChild($text, $el);
+      continue;
+    }
+
+    if ($tag === 'a') {
+      $el->setAttribute('target', '_blank');
+      $el->setAttribute('rel', 'noopener noreferrer');
+    }
+
+    if ($tag === 'img') {
+      // Solo deja src/alt (quita el resto)
+      $src = $el->getAttribute('src');
+      $alt = $el->getAttribute('alt');
+
+      foreach (iterator_to_array($el->attributes ?? []) as $a) {
+        $el->removeAttribute($a->nodeName);
+      }
+
+      if ($src !== '') $el->setAttribute('src', $src);
+      if ($alt !== '') $el->setAttribute('alt', $alt);
+
+      // Si src quedó vacío, elimina el img
+      if (trim($el->getAttribute('src')) === '') {
+        $el->parentNode?->removeChild($el);
+      }
+    }
+  }
+
+  $body = $dom->getElementsByTagName('body')->item(0);
+  if (!$body) return '';
+
+  $out = '';
+  foreach ($body->childNodes as $child) {
+    $out .= $dom->saveHTML($child);
+  }
+
+  return trim($out);
+}
+
+function render_message_body(array $m): string {
   $html = (string)($m['body_html'] ?? '');
-  if ($html !== '') return trim(strip_tags($html));
+  $txt  = (string)($m['body_text'] ?? '');
 
-  return '';
+  // 1) Si hay HTML, intenta sanitizar y renderizar
+  if (trim($html) !== '') {
+    $safe = sanitize_email_html($html);
+
+    // Si quedó visible, lo mostramos
+    if (trim($safe) !== '') {
+      return '<div class="email-body email-body--html">' . $safe . '</div>';
+    }
+
+    // ✅ Fallback: si el HTML quedó vacío por sanitizado, mostrar texto plano derivado
+    $plainFromHtml = trim(html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+    $plainFromHtml = normalize_text($plainFromHtml);
+
+    if ($plainFromHtml !== '') {
+      return '<div class="email-body email-body--text">' . esc($plainFromHtml) . '</div>';
+    }
+  }
+
+  // 2) Texto plano directo
+  $txt = normalize_text($txt);
+  if (trim($txt) !== '') {
+    return '<div class="email-body email-body--text">' . esc($txt) . '</div>';
+  }
+
+  return '<div class="email-body text-muted small">—</div>';
 }
 
 function msg_when(array $m): string {
@@ -72,6 +225,54 @@ $showEscFinish  = $canAgentFlowActions && $statusCode === 'ESCALATED';
 $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
 
 ?>
+
+<style>
+/* ---- estilos del cuerpo de correo (NO rompen nada) ---- */
+.msg .body {
+  background: #fff;
+  border: 1px solid rgba(0,0,0,.08);
+  border-radius: 10px;
+  padding: 12px 14px;
+  overflow: auto;
+}
+
+.email-body {
+  font-size: 0.95rem;
+  line-height: 1.35rem;
+  color: #1f2937;
+}
+
+/* Texto plano: respeta espacios y saltos */
+.email-body--text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* HTML: que no reviente el layout */
+.email-body--html img {
+  max-width: 100%;
+  height: auto;
+}
+
+.email-body--html table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.email-body--html td,
+.email-body--html th {
+  border: 1px solid rgba(0,0,0,.12);
+  padding: 6px 8px;
+  vertical-align: top;
+}
+
+.email-body--html blockquote {
+  border-left: 3px solid rgba(0,0,0,.15);
+  padding-left: 10px;
+  margin-left: 0;
+  color: #374151;
+}
+</style>
 
 <div class="page-title">
   <div>
@@ -149,7 +350,6 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
               $dir  = strtoupper((string)($m['direction'] ?? ''));
               $from = (string)($m['from_email'] ?? '');
               $when = msg_when($m);
-              $body = safe_message_body($m);
 
               $dirBadge = $dir === 'OUT' ? 'text-bg-secondary' : 'text-bg-primary';
               $dirLabel = $dir !== '' ? $dir : 'MSG';
@@ -165,7 +365,7 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
               </div>
 
               <div class="body">
-                <?= nl2br(esc($body)) ?>
+                <?= render_message_body($m) ?>
               </div>
             </div>
           <?php endforeach; ?>
@@ -215,7 +415,7 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
 
   <!-- Sidebar -->
   <div class="col-lg-4">
-    <!-- ACCIONES DEL CASO (SOLO AGENTE ASIGNADO)   -->
+    <!-- ACCIONES DEL CASO (SOLO AGENTE ASIGNADO) -->
     <?php if ($canAgentFlowActions): ?>
       <div class="card shadow-sm mb-3">
         <div class="card-header fw-semibold">
@@ -224,7 +424,6 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
 
         <div class="card-body">
           <?php if ($showStart): ?>
-            <!-- INICIAR GESTIÓN -->
             <form method="POST" action="<?= esc(url('/cases/' . $caseId . '/start')) ?>">
               <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
               <button class="btn btn-success w-100"
@@ -241,7 +440,6 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
           <?php endif; ?>
 
           <?php if ($showInProc): ?>
-            <!-- ESCALAR -->
             <form method="POST" action="<?= esc(url('/cases/' . $caseId . '/escalate')) ?>" class="mb-3">
               <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
 
@@ -267,7 +465,6 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
 
             <hr>
 
-            <!-- FINALIZAR GESTIÓN -->
             <form method="POST" action="<?= esc(url('/cases/' . $caseId . '/finish')) ?>">
               <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
               <button class="btn btn-primary w-100"
@@ -284,7 +481,6 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
           <?php endif; ?>
 
           <?php if ($showEscFinish): ?>
-            <!-- FINALIZAR ESCALAMIENTO -->
             <form method="POST" action="<?= esc(url('/cases/' . $caseId . '/finish-escalation')) ?>">
               <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
 
@@ -303,7 +499,6 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
           <?php endif; ?>
 
           <?php if ($showClose): ?>
-            <!-- CERRAR (solo cuando está RESPONDIDO) -->
             <form method="POST" action="<?= esc(url('/cases/' . $caseId . '/close')) ?>">
               <input type="hidden" name="_csrf" value="<?= esc($_csrf) ?>">
 
@@ -347,7 +542,7 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
       </div>
     <?php endif; ?>
 
-    <!-- ASIGNAR CASO (SOLO SUPERVISOR/ADMIN)      -->
+    <!-- ASIGNAR CASO (SOLO SUPERVISOR/ADMIN) -->
     <?php if ($isSupervisor): ?>
       <div class="card mb-3">
         <div class="card-header">Asignar caso</div>
