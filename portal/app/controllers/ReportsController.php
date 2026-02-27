@@ -136,9 +136,7 @@ final class ReportsController
         $rows = $this->repo->exportSlaDataset($start, $end, $mailboxId);
 
         // Guardar el archivo en portal/storage/reports y registrar en generated_reports
-        // ✅ FIX: base dir correcto (portal/) para no intentar escribir en portal/app/storage
-        $baseDir = dirname(__DIR__, 3); // .../portal
-        $reportsDir = $baseDir . '/storage/reports';
+        $reportsDir = dirname(__DIR__, 2) . '/storage/reports';
         if (!is_dir($reportsDir)) {
             mkdir($reportsDir, 0777, true);
         }
@@ -151,8 +149,7 @@ final class ReportsController
         $userId = (int)(Auth::user()['id'] ?? 0);
 
         if ($format === 'xlsx') {
-            // ✅ FIX: autoload correcto (portal/vendor/autoload.php)
-            $autoload = $baseDir . '/vendor/autoload.php';
+            $autoload = dirname(__DIR__, 2) . '/vendor/autoload.php';
             if (file_exists($autoload)) {
                 require_once $autoload;
             }
@@ -293,8 +290,7 @@ final class ReportsController
         $storedPath = trim($storedPath);
         if ($storedPath === '') return null;
 
-        // ✅ FIX: base correcto (portal/storage) para resolver paths guardados
-        $storageBase = realpath(dirname(__DIR__, 3) . '/storage');
+        $storageBase = realpath(dirname(__DIR__, 2) . '/storage');
         if ($storageBase === false) return null;
 
         $reportsBase = realpath($storageBase . DIRECTORY_SEPARATOR . 'reports');
