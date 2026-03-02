@@ -133,46 +133,49 @@ final class UsersAdminRepo
         $search = $search !== null ? trim($search) : null;
         if ($search === '') $search = null;
 
-        $sql = "
-            SELECT COUNT(DISTINCT u.id) as total
-            FROM users u
-            LEFT JOIN user_roles ur ON ur.user_id = u.id
-            WHERE 1=1
-        ";
-
         $params = [];
 
-        if ($search !== null) {
-            $s = trim($search);
+        // Si hay filtro por rol, usamos una subconsulta
+        if ($roleId !== null && $roleId > 0) {
+            $sql = "
+                SELECT COUNT(*) as total
+                FROM users u
+                WHERE EXISTS (
+                    SELECT 1 FROM user_roles ur 
+                    WHERE ur.user_id = u.id AND ur.role_id = :role_id
+                )
+            ";
+            $params[':role_id'] = (int)$roleId;
+        } else {
+            $sql = "SELECT COUNT(*) as total FROM users u WHERE 1=1";
+        }
 
+        // Agregar filtro de búsqueda si existe
+        if ($search !== null) {
             $sql .= " AND (
                 CAST(u.document AS CHAR) LIKE :search OR
                 u.username LIKE :search OR
                 u.email LIKE :search OR
                 u.full_name LIKE :search
             )";
-            $params[':search'] = "%{$s}%";
+            $params[':search'] = "%{$search}%";
         }
 
+        // Agregar filtro de estado si existe
         if ($isActive !== null) {
             $sql .= " AND u.is_active = :is_active";
             $params[':is_active'] = (int)$isActive;
         }
 
-        if ($roleId !== null && $roleId > 0) {
-            $sql .= " AND ur.role_id = :role_id";
-            $params[':role_id'] = (int)$roleId;
-        }
-
         $st = $this->pdo->prepare($sql);
 
         foreach ($params as $key => $value) {
-            $st->bindValue($key, $value);
+            $st->bindValue($key, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
         }
 
         $st->execute();
-
         $result = $st->fetch(PDO::FETCH_ASSOC);
+        
         return (int)($result['total'] ?? 0);
     }
 
