@@ -39,26 +39,31 @@ final class UsersAdminRepo
                 u.last_login_at,
                 u.created_at,
                 u.updated_at,
-                GROUP_CONCAT(DISTINCT r.code ORDER BY r.code SEPARATOR ', ') AS roles,
-                GROUP_CONCAT(DISTINCT r.id ORDER BY r.id SEPARATOR ',') AS role_ids
+                ra.roles,
+                ra.role_ids
             FROM users u
-            LEFT JOIN user_roles ur ON ur.user_id = u.id
-            LEFT JOIN roles r ON r.id = ur.role_id
+            LEFT JOIN (
+                SELECT
+                    ur.user_id,
+                    GROUP_CONCAT(DISTINCT r.code ORDER BY r.code SEPARATOR ', ') AS roles,
+                    GROUP_CONCAT(DISTINCT r.id ORDER BY r.id SEPARATOR ',') AS role_ids
+                FROM user_roles ur
+                INNER JOIN roles r ON r.id = ur.role_id
+                GROUP BY ur.user_id
+            ) ra ON ra.user_id = u.id
             WHERE 1=1
         ";
 
         $params = [];
 
         if ($search !== null) {
-            $s = trim($search);
-
             $sql .= " AND (
                 CAST(u.document AS CHAR) LIKE :search OR
                 u.username LIKE :search OR
                 u.email LIKE :search OR
                 u.full_name LIKE :search
             )";
-            $params[':search'] = "%{$s}%";
+            $params[':search'] = "%{$search}%";
         }
 
         if ($isActive !== null) {
@@ -67,19 +72,22 @@ final class UsersAdminRepo
         }
 
         if ($roleId !== null && $roleId > 0) {
-            $sql .= " AND ur.role_id = :role_id";
+            $sql .= " AND EXISTS (
+                SELECT 1 FROM user_roles ur2
+                WHERE ur2.user_id = u.id AND ur2.role_id = :role_id
+            )";
             $params[':role_id'] = (int)$roleId;
         }
 
-        $sql .= " GROUP BY u.id ORDER BY u.id DESC LIMIT :limit OFFSET :offset";
+        $sql .= " ORDER BY u.id DESC LIMIT :limit OFFSET :offset";
 
         $st = $this->pdo->prepare($sql);
 
-        foreach ($params as $key => $value) {
-            if ($key === ':is_active' || $key === ':role_id') {
-                $st->bindValue($key, (int)$value, PDO::PARAM_INT);
+        foreach ($params as $k => $v) {
+            if ($k === ':is_active' || $k === ':role_id') {
+                $st->bindValue($k, (int)$v, PDO::PARAM_INT);
             } else {
-                $st->bindValue($key, (string)$value, PDO::PARAM_STR);
+                $st->bindValue($k, (string)$v, PDO::PARAM_STR);
             }
         }
         $st->bindValue(':limit', $perPage, PDO::PARAM_INT);
