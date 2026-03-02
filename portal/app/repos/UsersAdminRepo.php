@@ -134,7 +134,7 @@ final class UsersAdminRepo
             error_log("!!!!!!!!!! PDO ERROR in listUsers !!!!!!!!!!");
             error_log("Error message: " . $e->getMessage());
             error_log("Error code: " . $e->getCode());
-            if (isset($e->errorInfo)) {
+            if (isset($e->errorInfo) && is_array($e->errorInfo)) {
                 error_log("SQL State: " . ($e->errorInfo[0] ?? 'N/A'));
                 error_log("Driver Code: " . ($e->errorInfo[1] ?? 'N/A'));
                 error_log("Driver Message: " . ($e->errorInfo[2] ?? 'N/A'));
@@ -173,8 +173,9 @@ final class UsersAdminRepo
             ORDER BY u.id DESC
         ";
 
-        $st = $this->pdo->query($sql);
-        return $st ? ($st->fetchAll(PDO::FETCH_ASSOC) ?: []) : [];
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute();
+        return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
     }
 
     /**
@@ -248,11 +249,14 @@ final class UsersAdminRepo
             
         } catch (\PDOException $e) {
             error_log("!!!!!!!!!! PDO ERROR in countUsers !!!!!!!!!!");
-            error_log("Error: " . $e->getMessage());
-            error_log("SQL State: " . $e->errorInfo[0] ?? 'N/A');
-            error_log("Driver Code: " . $e->errorInfo[1] ?? 'N/A');
-            error_log("Driver Message: " . $e->errorInfo[2] ?? 'N/A');
-            throw $e; // Re-lanzar para que lo capture el controlador
+            error_log("Error message: " . $e->getMessage());
+            if (isset($e->errorInfo) && is_array($e->errorInfo)) {
+                error_log("SQL State: " . ($e->errorInfo[0] ?? 'N/A'));
+                error_log("Driver Code: " . ($e->errorInfo[1] ?? 'N/A'));
+                error_log("Driver Message: " . ($e->errorInfo[2] ?? 'N/A'));
+            }
+            error_log("Stack trace: " . $e->getTraceAsString());
+            throw $e;
         }
     }
 
