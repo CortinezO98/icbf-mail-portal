@@ -63,21 +63,28 @@ final class UsersAdminRepo
 
         if ($search !== null) {
             $raw = $search;
+
+            // Si el usuario pega documento con puntos/guiones/espacios, buscamos también por "normalizado"
             $digits = preg_replace('/\D+/', '', $raw) ?? '';
             $hasDigits = ($digits !== '' && $digits !== $raw);
 
+            // ✅ IMPORTANTE: placeholders únicos (evita HY093 cuando emulación está off)
             $sql .= " AND (
-                COALESCE(u.document, '') LIKE :search OR
-                u.username LIKE :search OR
-                u.email LIKE :search OR
-                u.full_name LIKE :search
+                COALESCE(u.document, '') LIKE :s1 OR
+                u.username LIKE :s2 OR
+                u.email LIKE :s3 OR
+                u.full_name LIKE :s4
             ";
 
-            $params[':search'] = "%{$raw}%";
+            $like = "%{$raw}%";
+            $params[':s1'] = $like;
+            $params[':s2'] = $like;
+            $params[':s3'] = $like;
+            $params[':s4'] = $like;
 
             if ($hasDigits) {
-                $sql .= " OR REPLACE(REPLACE(REPLACE(COALESCE(u.document,''),'.',''),'-',''),' ','') LIKE :search_digits ";
-                $params[':search_digits'] = "%{$digits}%";
+                $sql .= " OR REPLACE(REPLACE(REPLACE(COALESCE(u.document,''),'.',''),'-',''),' ','') LIKE :sd1 ";
+                $params[':sd1'] = "%{$digits}%";
             }
 
             $sql .= ")";
@@ -99,7 +106,7 @@ final class UsersAdminRepo
         }
 
         $sql .= " ORDER BY u.id DESC LIMIT :limit OFFSET :offset";
-        
+
         // LOG DE LA CONSULTA SQL
         $sqlForLog = preg_replace('/\s+/', ' ', $sql);
         error_log("Final SQL query: " . $sqlForLog);
@@ -109,7 +116,6 @@ final class UsersAdminRepo
         try {
             $st = $this->pdo->prepare($sql);
 
-            // Bind de parámetros de búsqueda y filtros
             foreach ($params as $k => $v) {
                 if ($k === ':is_active' || $k === ':role_id') {
                     $st->bindValue($k, (int)$v, PDO::PARAM_INT);
@@ -119,28 +125,24 @@ final class UsersAdminRepo
                     error_log("Binding $k = '" . (string)$v . "' (STRING)");
                 }
             }
-            
-            // Bind de limit y offset
+
             $st->bindValue(':limit', $perPage, PDO::PARAM_INT);
             $st->bindValue(':offset', $offset, PDO::PARAM_INT);
             error_log("Binding :limit = $perPage (INT)");
             error_log("Binding :offset = $offset (INT)");
 
-            // Ejecutar consulta
             error_log("Executing query...");
             $st->execute();
-            
-            // Obtener resultados
+
             $results = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
             error_log("Query executed successfully. Returned " . count($results) . " rows");
-            
-            // Log del primer resultado para ver estructura (opcional)
+
             if (!empty($results)) {
                 error_log("First result sample: " . json_encode($results[0]));
             }
-            
+
             return $results;
-            
+
         } catch (\PDOException $e) {
             error_log("!!!!!!!!!! PDO ERROR in listUsers !!!!!!!!!!");
             error_log("Error message: " . $e->getMessage());
@@ -151,8 +153,6 @@ final class UsersAdminRepo
                 error_log("Driver Message: " . ($e->errorInfo[2] ?? 'N/A'));
             }
             error_log("Stack trace: " . $e->getTraceAsString());
-            
-            // Re-lanzar la excepción para que la capture el controlador
             throw $e;
         } catch (\Exception $e) {
             error_log("!!!!!!!!!! GENERAL ERROR in listUsers !!!!!!!!!!");
@@ -203,43 +203,44 @@ final class UsersAdminRepo
         error_log("UsersAdminRepo::countUsers - search: " . ($search ?? 'null') . ", isActive: " . ($isActive ?? 'null') . ", roleId: " . ($roleId ?? 'null'));
 
         $params = [];
-        
-        // CONSTRUIR LA CONSULTA BASE
+
         $sql = "SELECT COUNT(DISTINCT u.id) as total FROM users u";
-        
-        // Si hay filtro por rol, NECESITAMOS JOIN con user_roles
+
         if ($roleId !== null && $roleId > 0) {
             $sql .= " INNER JOIN user_roles ur ON ur.user_id = u.id AND ur.role_id = :role_id";
             $params[':role_id'] = (int)$roleId;
             error_log("Added role_id filter with INNER JOIN: $roleId");
         }
-        
+
         $sql .= " WHERE 1=1";
 
-        // Agregar filtro de búsqueda si existe
         if ($search !== null) {
             $raw = $search;
             $digits = preg_replace('/\D+/', '', $raw) ?? '';
             $hasDigits = ($digits !== '' && $digits !== $raw);
 
+            // ✅ placeholders únicos (evita HY093)
             $sql .= " AND (
-                COALESCE(u.document, '') LIKE :search OR
-                u.username LIKE :search OR
-                u.email LIKE :search OR
-                u.full_name LIKE :search
+                COALESCE(u.document, '') LIKE :s1 OR
+                u.username LIKE :s2 OR
+                u.email LIKE :s3 OR
+                u.full_name LIKE :s4
             ";
 
-            $params[':search'] = "%{$raw}%";
+            $like = "%{$raw}%";
+            $params[':s1'] = $like;
+            $params[':s2'] = $like;
+            $params[':s3'] = $like;
+            $params[':s4'] = $like;
 
             if ($hasDigits) {
-                $sql .= " OR REPLACE(REPLACE(REPLACE(COALESCE(u.document,''),'.',''),'-',''),' ','') LIKE :search_digits ";
-                $params[':search_digits'] = "%{$digits}%";
+                $sql .= " OR REPLACE(REPLACE(REPLACE(COALESCE(u.document,''),'.',''),'-',''),' ','') LIKE :sd1 ";
+                $params[':sd1'] = "%{$digits}%";
             }
 
             $sql .= ")";
         }
 
-        // Agregar filtro de estado si existe
         if ($isActive !== null) {
             $sql .= " AND u.is_active = :is_active";
             $params[':is_active'] = (int)$isActive;
@@ -260,10 +261,10 @@ final class UsersAdminRepo
             $st->execute();
             $result = $st->fetch(PDO::FETCH_ASSOC);
             $total = (int)($result['total'] ?? 0);
-            
+
             error_log("Query executed successfully, total = $total");
             return $total;
-            
+
         } catch (\PDOException $e) {
             error_log("!!!!!!!!!! PDO ERROR in countUsers !!!!!!!!!!");
             error_log("Error message: " . $e->getMessage());
