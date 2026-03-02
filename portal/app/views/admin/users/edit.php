@@ -155,25 +155,38 @@ function fmt_db_dt($value, string $outFormat): ?string
                                     <i class="bi bi-key me-1"></i>Nueva Contraseña
                                     <span class="text-muted">(Opcional)</span>
                                 </label>
+
                                 <div class="input-group">
-                                    <input type="password" 
-                                           class="form-control" 
-                                           id="password"
-                                           name="password" 
-                                           placeholder="Dejar vacío para no cambiar"
-                                           minlength="8"
-                                           pattern="^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$">
-                                    <button class="btn btn-outline-secondary" 
-                                            type="button" 
-                                            id="togglePassword">
-                                        <i class="bi bi-eye"></i>
+                                    <input type="password"
+                                        class="form-control"
+                                        id="password"
+                                        name="password"
+                                        placeholder="Dejar vacío para no cambiar"
+                                        minlength="8"
+                                        autocomplete="new-password"
+                                        pattern="^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[-A-Za-z\d@$!%*?&]{8,}$">
+                                    <button class="btn btn-outline-secondary"
+                                            type="button"
+                                            id="togglePassword"
+                                            aria-label="Mostrar/ocultar contraseña">
+                                    <i class="bi bi-eye"></i>
                                     </button>
                                 </div>
+
                                 <div class="form-text">
-                                    Mínimo 8 caracteres con mayúscula, minúscula, número y símbolo
+                                    Si la defines manualmente, usa al menos 8 caracteres con mayúscula, minúscula, número y símbolo.
+                                </div>
+
+                                <div class="d-flex flex-wrap gap-2 mt-2">
+                                    <button type="button" class="btn btn-sm btn-outline-primary" id="generatePassword">
+                                    <i class="bi bi-shuffle me-1"></i>Generar contraseña segura
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" id="copyPassword" disabled>
+                                    <i class="bi bi-clipboard me-1"></i>Copiar
+                                    </button>
                                 </div>
                             </div>
-                            
+                                                            
                             <div class="col-md-6">
                                 <div class="mb-3">
                                     <label class="form-label d-block">
