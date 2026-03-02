@@ -66,11 +66,19 @@ final class UsersAdminController
         }
 
         try {
-            error_log("Calling listUsers with: page=$page, perPage={$this->defaultPerPage}, search=$search, isActive=" . ($isActive ?? 'null') . ", roleId=" . ($roleId ?? 'null'));
+            error_log(
+                "Calling listUsers with: page=$page, perPage={$this->defaultPerPage}, search=$search, isActive=" .
+                ($isActive ?? 'null') . ", roleId=" . ($roleId ?? 'null')
+            );
+
             $users = $this->repo->listUsers($page, $this->defaultPerPage, $search, $isActive, $roleId);
             error_log("listUsers returned " . count($users) . " users");
 
-            error_log("Calling countUsers with: search=$search, isActive=" . ($isActive ?? 'null') . ", roleId=" . ($roleId ?? 'null'));
+            error_log(
+                "Calling countUsers with: search=$search, isActive=" .
+                ($isActive ?? 'null') . ", roleId=" . ($roleId ?? 'null')
+            );
+
             $total = $this->repo->countUsers($search, $isActive, $roleId);
             error_log("countUsers returned: $total");
 
@@ -99,20 +107,44 @@ final class UsersAdminController
                 'stats' => $this->repo->getStatistics(),
             ]);
         } catch (\Throwable $e) {
-            error_log("!!!!!!!!!! ERROR in UsersAdminController::index !!!!!!!!!!");
+            // ✅ ID corto para rastrear el error en soporte
+            $errId = strtoupper(bin2hex(random_bytes(3))); // ej: A1B2C3
+
+            error_log("!!!!!!!!!! ERROR in UsersAdminController::index [$errId] !!!!!!!!!!");
             error_log("Error message: " . $e->getMessage());
             error_log("Error code: " . $e->getCode());
             error_log("File: " . $e->getFile() . ":" . $e->getLine());
             error_log("Stack trace: " . $e->getTraceAsString());
 
-            $msg = 'Error interno al buscar usuarios.';
             $debug = (bool)($this->config['debug'] ?? false);
 
-            if ($debug) {
-                $msg .= ' ' . $e->getMessage();
+            // ✅ Ajusta esta línea a tu estructura real de sesión/roles:
+            // Si tienes helper: $isAdmin = \App\Auth\Auth::hasRole('ADMIN');
+            $isAdmin = (bool)(($_SESSION['user']['role'] ?? '') === 'ADMIN');
+
+            $details = null;
+            if ($debug || $isAdmin) {
+                $details = [
+                    'id'      => $errId,
+                    'message' => $e->getMessage(),
+                    'code'    => (string)$e->getCode(),
+                    'file'    => $e->getFile() . ':' . $e->getLine(),
+                ];
+
+                if ($e instanceof \PDOException && isset($e->errorInfo) && is_array($e->errorInfo)) {
+                    $details['sqlstate']        = (string)($e->errorInfo[0] ?? '');
+                    $details['driver_code']     = (string)($e->errorInfo[1] ?? '');
+                    $details['driver_message']  = (string)($e->errorInfo[2] ?? '');
+                }
             }
 
-            $this->flash('error', $msg);
+            // ✅ Flash con details para que tu layout lo muestre en SweetAlert (si lo implementas)
+            $_SESSION['_flash'] = [
+                'type' => 'error',
+                'message' => "Error interno al buscar usuarios. (ID: {$errId})",
+                'details' => $details,
+            ];
+
             $this->redirect('/admin/users');
         }
     }

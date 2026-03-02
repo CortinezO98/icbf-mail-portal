@@ -290,26 +290,58 @@ $enableSemaforoRoutes = false;
 window.addEventListener('DOMContentLoaded', function () {
 
   <?php if (!empty($flash) && is_array($flash)): ?>
-    const type = <?= json_encode($flash['type'] ?? 'info') ?>;
+    const type    = <?= json_encode($flash['type'] ?? 'info') ?>;
     const message = <?= json_encode($flash['message'] ?? '') ?>;
+    const details = <?= json_encode($flash['details'] ?? null) ?>;
 
     const iconMap = { success: 'success', error: 'error', warning: 'warning', info: 'info' };
     const icon = iconMap[type] || 'info';
-    const looksHtml = /<\/?[a-z][\s\S]*>/i.test(message);
 
     const payload = {
-      icon,
-      title: (icon === 'success' ? 'Listo' : (icon === 'error' ? 'Error' : 'Atención')),
-      confirmButtonText: 'Aceptar'
+        icon,
+        title: (icon === 'success' ? 'Listo' : (icon === 'error' ? 'Error' : 'Atención')),
+        confirmButtonText: 'Aceptar'
     };
 
-    if (looksHtml) payload.html = message;
-    else payload.text = message;
+    const safe = (v) => String(v ?? '')
+        .replaceAll('&','&amp;')
+        .replaceAll('<','&lt;')
+        .replaceAll('>','&gt;')
+        .replaceAll('"','&quot;')
+        .replaceAll("'","&#039;");
+
+    // Si el mensaje ya trae HTML, respétalo; si no, conviértelo a HTML seguro
+    let html = /<\/?[a-z][\s\S]*>/i.test(message) ? message : `<div>${safe(message)}</div>`;
+
+    // ✅ Si hay detalles técnicos, los anexamos (para debug/admin)
+    if (details && typeof details === 'object') {
+        const lines = [
+        `ID: ${safe(details.id ?? '')}`,
+        `Mensaje: ${safe(details.message ?? '')}`,
+        `Código: ${safe(details.code ?? '')}`,
+        `Archivo: ${safe(details.file ?? '')}`,
+        details.sqlstate ? `SQLSTATE: ${safe(details.sqlstate)}` : null,
+        details.driver_code ? `Driver Code: ${safe(details.driver_code)}` : null,
+        details.driver_message ? `Driver Message: ${safe(details.driver_message)}` : null,
+        ].filter(Boolean).join('\n');
+
+        html += `
+        <hr>
+        <details style="text-align:left">
+            <summary><b>Ver detalles técnicos</b></summary>
+            <pre style="white-space:pre-wrap; font-size:12px; margin-top:8px; margin-bottom:0;">
+    ${lines}
+            </pre>
+        </details>
+        `;
+    }
+
+    payload.html = html;
 
     const fireFlash = () => (window.Swal ? Swal.fire(payload) : Promise.resolve(alert(message)));
-  <?php else: ?>
+    <?php else: ?>
     const fireFlash = () => Promise.resolve();
-  <?php endif; ?>
+    <?php endif; ?>
 
   const importErrors = <?php echo json_encode($_SESSION['_import_errors'] ?? [], JSON_UNESCAPED_UNICODE); ?>;
   const importTotal  = <?php echo (int)($_SESSION['_import_errors_total'] ?? 0); ?>;
