@@ -63,7 +63,7 @@ final class UsersAdminRepo
 
         if ($search !== null) {
             $sql .= " AND (
-                CAST(u.document AS CHAR) LIKE :search OR
+                COALESCE(u.document, '') LIKE :search OR
                 u.username LIKE :search OR
                 u.email LIKE :search OR
                 u.full_name LIKE :search
@@ -212,7 +212,7 @@ final class UsersAdminRepo
         // Agregar filtro de búsqueda si existe
         if ($search !== null) {
             $sql .= " AND (
-                CAST(u.document AS CHAR) LIKE :search OR
+                COALESCE(u.document, '') LIKE :search OR
                 u.username LIKE :search OR
                 u.email LIKE :search OR
                 u.full_name LIKE :search
