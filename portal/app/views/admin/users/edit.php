@@ -234,6 +234,22 @@ function fmt_db_dt($value, string $outFormat): ?string
                                         </label>
                                     </div>
                                 </div>
+                                <div class="mb-3">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input"
+                                            type="checkbox"
+                                            role="switch"
+                                            id="send_welcome_email"
+                                            name="send_welcome_email"
+                                            value="1">
+                                        <label class="form-check-label" for="send_welcome_email">
+                                        <i class="bi bi-envelope-check me-1"></i>Enviar email con la nueva contraseña
+                                        </label>
+                                    </div>
+                                    <div class="form-text">
+                                        Si cambias la contraseña, se enviará al correo del usuario el username y la nueva contraseña.
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         
@@ -440,44 +456,144 @@ function fmt_db_dt($value, string $outFormat): ?string
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    const form = document.getElementById('editForm');
-    const submitBtn = document.getElementById('submitBtn');
-    const togglePasswordBtn = document.getElementById('togglePassword');
-    const passwordInput = document.getElementById('password');
+  const form = document.getElementById('editForm');
+  const submitBtn = document.getElementById('submitBtn');
 
-    togglePasswordBtn?.addEventListener('click', function() {
-        const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
-        passwordInput.setAttribute('type', type);
-        this.innerHTML = type === 'password' ? '<i class="bi bi-eye"></i>' : '<i class="bi bi-eye-slash"></i>';
-    });
+  const generatePasswordBtn = document.getElementById('generatePassword');
+  const copyPasswordBtn = document.getElementById('copyPassword');
+  const passwordInput = document.getElementById('password');
+  const togglePasswordBtn = document.getElementById('togglePassword');
 
-    form?.addEventListener('submit', function(event) {
-        if (!form.checkValidity()) {
-            event.preventDefault();
-            event.stopPropagation();
-        }
-        
-        form.classList.add('was-validated');
+  const SwalSafe = (window.Swal && typeof window.Swal.fire === 'function')
+    ? window.Swal
+    : { fire: (opts) => { console.log('Swal missing:', opts); } };
 
-        if (submitBtn) {
-            submitBtn.disabled = true;
-            submitBtn.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Guardando...';
+  // ====== Misma lógica que CREATE ======
+  function generateStrongPassword(groups = 1, groupLen = 4) {
+    const prefix = 'IqICBF';
+
+    // Evita caracteres confusos para dictar por teléfono
+    const upper  = 'ACDEFGHJKLMNPQRTUVWXYZ';
+    const lower  = 'acdefghjkmnpqrtuvwxyz';
+    const digits = '234679';
+    const symbol = '@';
+
+    const parts = [];
+    for (let g = 0; g < groups; g++) {
+      let chunk = '';
+      for (let i = 0; i < groupLen; i++) {
+        const set = (Math.random() < 0.5) ? upper : lower;
+        chunk += set[Math.floor(Math.random() * set.length)];
+      }
+      parts.push(chunk);
+    }
+
+    let nums = '';
+    for (let i = 0; i < 3; i++) {
+      nums += digits[Math.floor(Math.random() * digits.length)];
+    }
+
+    return `${prefix}-${parts.join('-')}-${nums}${symbol}`;
+  }
+
+  // Generar contraseña
+  generatePasswordBtn?.addEventListener('click', function() {
+    const pwd = generateStrongPassword();
+
+    passwordInput.value = pwd;
+    passwordInput.type = 'text';
+    if (togglePasswordBtn) togglePasswordBtn.innerHTML = '<i class="bi bi-eye-slash"></i>';
+    if (copyPasswordBtn) copyPasswordBtn.disabled = false;
+
+    SwalSafe.fire({
+      icon: 'success',
+      title: 'Contraseña generada',
+      html: `Contraseña: <code>${pwd}</code><br><small>Guárdala de manera segura.</small>`,
+      showCancelButton: true,
+      confirmButtonText: 'Copiar',
+      cancelButtonText: 'Cerrar',
+    }).then(async (res) => {
+      if (res.isConfirmed) {
+        try {
+          await navigator.clipboard.writeText(pwd);
+          SwalSafe.fire({ icon:'success', title:'Copiado', text:'Contraseña copiada al portapapeles.', timer:1200, showConfirmButton:false });
+        } catch (e) {
+          passwordInput.focus();
+          passwordInput.select();
+          document.execCommand('copy');
+          SwalSafe.fire({ icon:'success', title:'Copiado', text:'Contraseña copiada.', timer:1200, showConfirmButton:false });
         }
+      }
     });
-    
-    const emailInput = document.getElementById('email');
-    emailInput?.addEventListener('blur', function() {
-        const email = this.value;
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        
-        if (email && !emailRegex.test(email)) {
-            this.classList.add('is-invalid');
-        } else {
-            this.classList.remove('is-invalid');
-        }
+  });
+
+  // Copiar contraseña
+  copyPasswordBtn?.addEventListener('click', async function() {
+    const val = (passwordInput?.value || '').trim();
+    if (!val) return;
+    try {
+      await navigator.clipboard.writeText(val);
+      SwalSafe.fire({ icon:'success', title:'Copiado', text:'Contraseña copiada.', timer:1200, showConfirmButton:false });
+    } catch (e) {
+      passwordInput.focus();
+      passwordInput.select();
+      document.execCommand('copy');
+      SwalSafe.fire({ icon:'success', title:'Copiado', text:'Contraseña copiada.', timer:1200, showConfirmButton:false });
+    }
+  });
+
+  // Mostrar/ocultar contraseña
+  togglePasswordBtn?.addEventListener('click', function() {
+    const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
+    passwordInput.setAttribute('type', type);
+    this.innerHTML = type === 'password' ? '<i class="bi bi-eye"></i>' : '<i class="bi bi-eye-slash"></i>';
+  });
+
+  // Validación email (igual a tu edit actual)
+  const emailInput = document.getElementById('email');
+  emailInput?.addEventListener('blur', function() {
+    const email = this.value;
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    if (email && !emailRegex.test(email)) {
+      this.classList.add('is-invalid');
+    } else {
+      this.classList.remove('is-invalid');
+    }
+  });
+
+  // Submit (igual que tenías, pero sin romper)
+  form?.addEventListener('submit', function(event) {
+    if (!form.checkValidity()) {
+      event.preventDefault();
+      event.stopPropagation();
+      form.classList.add('was-validated');
+
+      SwalSafe.fire({
+        icon: 'error',
+        title: 'Revisa el formulario',
+        text: 'Hay campos obligatorios o inválidos. Corrige y vuelve a intentar.',
+      });
+      return;
+    }
+
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Guardando...';
+    }
+
+    SwalSafe.fire({
+      title: 'Guardando cambios...',
+      text: 'Por favor espera.',
+      allowOutsideClick: false,
+      allowEscapeKey: false,
+      didOpen: () => { if (window.Swal) window.Swal.showLoading(); }
     });
-    
-    const firstInput = form?.querySelector('input:not([type="hidden"])');
-    firstInput?.focus();
+    // No preventDefault: deja el POST normal
+  });
+
+  // Focus primer input
+  const firstInput = form?.querySelector('input:not([type="hidden"])');
+  firstInput?.focus();
 });
 </script>

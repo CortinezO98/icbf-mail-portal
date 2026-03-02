@@ -198,6 +198,7 @@ final class UsersAdminController
         // CSRF
         Csrf::validate($post['_csrf'] ?? null);
 
+
         // ✅ checkbox: encolar email
         $sendWelcome = (string)($post['send_welcome_email'] ?? '') === '1';
 
@@ -324,6 +325,8 @@ final class UsersAdminController
 
         Csrf::validate($post['_csrf'] ?? null);
 
+        $sendWelcome = (string)($post['send_welcome_email'] ?? '') === '1';
+
         $user = $this->repo->findById($id);
         if (!$user) {
             $this->flash('error', 'Usuario no encontrado.');
@@ -343,9 +346,9 @@ final class UsersAdminController
         $this->checkDuplicates($data['document'], $data['username'], $data['email'], $id);
 
         $updateData = [
-            'username' => $data['username'],
-            'email' => $data['email'],
-            'full_name' => $data['full_name'],
+            'username'   => $data['username'],
+            'email'      => $data['email'],
+            'full_name'  => $data['full_name'],
         ];
 
         if ($data['document'] !== ($user['document'] ?? '')) {
@@ -381,17 +384,53 @@ final class UsersAdminController
 
             $this->pdo->commit();
 
+            $mailQueued = false;
+            if ($sendWelcome && $newPassword !== '') {
+                $loginUrl  = \App\Config\url('/login');
+                $fromName  = (string)($this->config['mail']['from_name'] ?? 'ICBF Mail');
+                $fromEmail = (string)($this->config['mail']['from_email'] ?? 'noreply@icbf.gov.co');
+
+                $toEmail  = (string)($updateData['email'] ?? ($user['email'] ?? ''));
+                $toName   = (string)($updateData['full_name'] ?? ($user['full_name'] ?? ''));
+                $username = (string)($updateData['username'] ?? ($user['username'] ?? ''));
+
+                if ($toEmail !== '' && $username !== '') {
+                    try {
+                        $this->mailQueue->enqueueWelcomeEmail(
+                            $toEmail,
+                            $toName !== '' ? $toName : null,
+                            $username,
+                            $newPassword,
+                            $loginUrl,
+                            $fromEmail,
+                            $fromName,
+                            5
+                        );
+                        $mailQueued = true;
+                    } catch (\Throwable $e) {
+                        error_log('Mail enqueue failed (update user): ' . $e->getMessage());
+                    }
+                }
+            }
+
             $message = 'Usuario actualizado exitosamente.';
-            if ($newPassword !== '') $message .= ' Nueva contraseña establecida.';
+            if ($newPassword !== '') {
+                $message .= ' Nueva contraseña establecida.';
+                if ($sendWelcome) {
+                    $message .= $mailQueued
+                        ? ' Email encolado con la nueva contraseña.'
+                        : ' No se pudo encolar el email (revisa logs/BD).';
+                }
+            }
+
             $this->flash('success', $message);
             $this->redirect('/admin/users');
         } catch (Exception $e) {
-            $this->safeRollback(); // ✅ evita "There is no active transaction"
+            $this->safeRollback(); 
             $this->flash('error', 'Error al actualizar usuario: ' . $e->getMessage());
             $this->redirect('/admin/users/edit/' . $id);
         }
     }
-
     public function toggleActive(int $id): void
     {
         $post = $this->readRequestData();
