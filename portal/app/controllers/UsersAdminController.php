@@ -107,41 +107,47 @@ final class UsersAdminController
                 'stats' => $this->repo->getStatistics(),
             ]);
         } catch (\Throwable $e) {
-            // ✅ ID corto para rastrear el error en soporte
-            $errId = strtoupper(bin2hex(random_bytes(3))); // ej: A1B2C3
 
-            error_log("!!!!!!!!!! ERROR in UsersAdminController::index [$errId] !!!!!!!!!!");
+            // ID corto para correlacionar en logs
+            $errId = strtoupper(substr(bin2hex(random_bytes(3)), 0, 6)); // ej: 3A8F49
+
+            error_log("!!!!!!!!!! ERROR in UsersAdminController::index [{$errId}] !!!!!!!!!!");
             error_log("Error message: " . $e->getMessage());
             error_log("Error code: " . $e->getCode());
             error_log("File: " . $e->getFile() . ":" . $e->getLine());
             error_log("Stack trace: " . $e->getTraceAsString());
 
-            $debug = (bool)($this->config['debug'] ?? false);
+            // Si es PDOException, extraer SQLSTATE/driver info
+            $details = [
+                'id' => $errId,
+                'message' => $e->getMessage(),
+                'code' => $e->getCode(),
+                'file' => $e->getFile() . ':' . $e->getLine(),
+            ];
 
-            // ✅ Ajusta esta línea a tu estructura real de sesión/roles:
-            // Si tienes helper: $isAdmin = \App\Auth\Auth::hasRole('ADMIN');
-            $isAdmin = (bool)(($_SESSION['user']['role'] ?? '') === 'ADMIN');
-
-            $details = null;
-            if ($debug || $isAdmin) {
-                $details = [
-                    'id'      => $errId,
-                    'message' => $e->getMessage(),
-                    'code'    => (string)$e->getCode(),
-                    'file'    => $e->getFile() . ':' . $e->getLine(),
-                ];
-
-                if ($e instanceof \PDOException && isset($e->errorInfo) && is_array($e->errorInfo)) {
-                    $details['sqlstate']        = (string)($e->errorInfo[0] ?? '');
-                    $details['driver_code']     = (string)($e->errorInfo[1] ?? '');
-                    $details['driver_message']  = (string)($e->errorInfo[2] ?? '');
+            if ($e instanceof \PDOException) {
+                $ei = $e->errorInfo ?? null; // [SQLSTATE, driver_code, driver_message]
+                if (is_array($ei)) {
+                    $details['sqlstate'] = $ei[0] ?? null;
+                    $details['driver_code'] = $ei[1] ?? null;
+                    $details['driver_message'] = $ei[2] ?? null;
                 }
             }
 
-            // ✅ Flash con details para que tu layout lo muestre en SweetAlert (si lo implementas)
+            $debug = (bool)($this->config['debug'] ?? false);
+
+            // Mensaje corto para usuario + ID para buscar en logs
+            $msg = "Error interno al buscar usuarios. (ID: {$errId})";
+
+            // ✅ En debug puedes mostrar el mensaje base también
+            if ($debug) {
+                $msg .= " " . $e->getMessage();
+            }
+
+            // ✅ Mandar details al layout (SweetAlert puede mostrarlos)
             $_SESSION['_flash'] = [
                 'type' => 'error',
-                'message' => "Error interno al buscar usuarios. (ID: {$errId})",
+                'message' => $msg,
                 'details' => $details,
             ];
 
