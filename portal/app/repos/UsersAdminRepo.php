@@ -192,23 +192,18 @@ final class UsersAdminRepo
         error_log("UsersAdminRepo::countUsers - search: " . ($search ?? 'null') . ", isActive: " . ($isActive ?? 'null') . ", roleId: " . ($roleId ?? 'null'));
 
         $params = [];
-
-        // Si hay filtro por rol, usamos una subconsulta
+        
+        // CONSTRUIR LA CONSULTA BASE
+        $sql = "SELECT COUNT(DISTINCT u.id) as total FROM users u";
+        
+        // Si hay filtro por rol, NECESITAMOS JOIN con user_roles
         if ($roleId !== null && $roleId > 0) {
-            $sql = "
-                SELECT COUNT(*) as total
-                FROM users u
-                WHERE EXISTS (
-                    SELECT 1 FROM user_roles ur 
-                    WHERE ur.user_id = u.id AND ur.role_id = :role_id
-                )
-            ";
+            $sql .= " INNER JOIN user_roles ur ON ur.user_id = u.id AND ur.role_id = :role_id";
             $params[':role_id'] = (int)$roleId;
-            error_log("Using EXISTS subquery for role_id=$roleId");
-        } else {
-            $sql = "SELECT COUNT(*) as total FROM users u WHERE 1=1";
-            error_log("Using simple count query (no role filter)");
+            error_log("Added role_id filter with INNER JOIN: $roleId");
         }
+        
+        $sql .= " WHERE 1=1";
 
         // Agregar filtro de búsqueda si existe
         if ($search !== null) {

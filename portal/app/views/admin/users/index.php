@@ -348,7 +348,7 @@ $qs = static function(array $overrides = []) use ($search, $isActive, $roleId): 
                                                     data-confirm-title="Eliminar usuario"
                                                     data-confirm-text="¿Eliminar permanentemente este usuario? Esta acción no se puede deshacer."
                                                     data-confirm-icon="warning"
-                                                    <?= ((int)$u['id'] === (int)($_SESSION['user_id'] ?? 0)) ? 'disabled' : '' ?>>
+                                                    <?php $currentUserId = (int)($_SESSION['user']['id'] ?? 0);?><?= ((int)$u['id'] === $currentUserId) ? 'disabled' : '' ?>>
                                                 <i class="bi bi-trash"></i>
                                             </button>
                                         </form>
