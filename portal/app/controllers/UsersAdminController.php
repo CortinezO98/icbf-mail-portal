@@ -45,6 +45,13 @@ final class UsersAdminController
         $isActive = isset($_GET['active']) && $_GET['active'] !== '' ? (int)$_GET['active'] : null;
         $roleId = (isset($_GET['role_id']) && $_GET['role_id'] !== '') ? (int)$_GET['role_id'] : null;
 
+        // ✅ Si hay filtros/búsqueda y venías en una página > 1, forzar page=1
+        // Evita: "No se encontraron usuarios" cuando el filtro reduce el total y quedas parado en page=5, etc.
+        $hasFilters = ($search !== '') || ($isActive !== null) || ($roleId !== null && $roleId > 0);
+        if ($page > 1 && $hasFilters) {
+            $page = 1;
+        }
+
         // LOG DETALLADO
         error_log("========== USERS ADMIN INDEX ==========");
         error_log("GET params: " . json_encode($_GET));
@@ -97,8 +104,15 @@ final class UsersAdminController
             error_log("Error code: " . $e->getCode());
             error_log("File: " . $e->getFile() . ":" . $e->getLine());
             error_log("Stack trace: " . $e->getTraceAsString());
-            
-            $this->flash('error', 'Error interno al buscar usuarios. Revisa logs del servidor.');
+
+            $msg = 'Error interno al buscar usuarios.';
+            $debug = (bool)($this->config['debug'] ?? false);
+
+            if ($debug) {
+                $msg .= ' ' . $e->getMessage();
+            }
+
+            $this->flash('error', $msg);
             $this->redirect('/admin/users');
         }
     }

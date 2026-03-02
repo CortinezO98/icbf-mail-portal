@@ -62,14 +62,25 @@ final class UsersAdminRepo
         $params = [];
 
         if ($search !== null) {
+            $raw = $search;
+            $digits = preg_replace('/\D+/', '', $raw) ?? '';
+            $hasDigits = ($digits !== '' && $digits !== $raw);
+
             $sql .= " AND (
                 COALESCE(u.document, '') LIKE :search OR
                 u.username LIKE :search OR
                 u.email LIKE :search OR
                 u.full_name LIKE :search
-            )";
-            $params[':search'] = "%{$search}%";
-            error_log("Added search filter with term: '%{$search}%'");
+            ";
+
+            $params[':search'] = "%{$raw}%";
+
+            if ($hasDigits) {
+                $sql .= " OR REPLACE(REPLACE(REPLACE(COALESCE(u.document,''),'.',''),'-',''),' ','') LIKE :search_digits ";
+                $params[':search_digits'] = "%{$digits}%";
+            }
+
+            $sql .= ")";
         }
 
         if ($isActive !== null) {
@@ -207,14 +218,25 @@ final class UsersAdminRepo
 
         // Agregar filtro de búsqueda si existe
         if ($search !== null) {
+            $raw = $search;
+            $digits = preg_replace('/\D+/', '', $raw) ?? '';
+            $hasDigits = ($digits !== '' && $digits !== $raw);
+
             $sql .= " AND (
                 COALESCE(u.document, '') LIKE :search OR
                 u.username LIKE :search OR
                 u.email LIKE :search OR
                 u.full_name LIKE :search
-            )";
-            $params[':search'] = "%{$search}%";
-            error_log("Added search filter: '%$search%'");
+            ";
+
+            $params[':search'] = "%{$raw}%";
+
+            if ($hasDigits) {
+                $sql .= " OR REPLACE(REPLACE(REPLACE(COALESCE(u.document,''),'.',''),'-',''),' ','') LIKE :search_digits ";
+                $params[':search_digits'] = "%{$digits}%";
+            }
+
+            $sql .= ")";
         }
 
         // Agregar filtro de estado si existe
