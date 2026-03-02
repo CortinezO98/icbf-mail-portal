@@ -43,19 +43,32 @@ final class UsersAdminController
         $page = max(1, (int)($_GET['page'] ?? 1));
         $search = trim((string)($_GET['search'] ?? ''));
         $isActive = isset($_GET['active']) && $_GET['active'] !== '' ? (int)$_GET['active'] : null;
+        $roleId = (isset($_GET['role_id']) && $_GET['role_id'] !== '') ? (int)$_GET['role_id'] : null;
 
-        $roleId = (isset($_GET['role_id']) && $_GET['role_id'] !== '')
-            ? (int)$_GET['role_id']
-            : null;
+        // LOG DETALLADO
+        error_log("========== USERS ADMIN INDEX ==========");
+        error_log("GET params: " . json_encode($_GET));
+        error_log("Page: $page");
+        error_log("Search: '$search'");
+        error_log("isActive: " . ($isActive ?? 'null'));
+        error_log("roleId: " . ($roleId ?? 'null'));
 
         if ($roleId !== null && $roleId <= 0) {
             $roleId = null;
+            error_log("roleId adjusted to null (was <= 0)");
         }
 
         try {
+            error_log("Calling listUsers with: page=$page, perPage={$this->defaultPerPage}, search=$search, isActive=" . ($isActive ?? 'null') . ", roleId=" . ($roleId ?? 'null'));
             $users = $this->repo->listUsers($page, $this->defaultPerPage, $search, $isActive, $roleId);
+            error_log("listUsers returned " . count($users) . " users");
+
+            error_log("Calling countUsers with: search=$search, isActive=" . ($isActive ?? 'null') . ", roleId=" . ($roleId ?? 'null'));
             $total = $this->repo->countUsers($search, $isActive, $roleId);
+            error_log("countUsers returned: $total");
+
             $roles = $this->repo->listRoles();
+            error_log("listRoles returned " . count($roles) . " roles");
 
             $flash = $_SESSION['_flash'] ?? null;
             unset($_SESSION['_flash']);
@@ -79,7 +92,12 @@ final class UsersAdminController
                 'stats' => $this->repo->getStatistics(),
             ]);
         } catch (\Throwable $e) {
-            error_log("Admin users index failed: " . $e->getMessage());
+            error_log("!!!!!!!!!! ERROR in UsersAdminController::index !!!!!!!!!!");
+            error_log("Error message: " . $e->getMessage());
+            error_log("Error code: " . $e->getCode());
+            error_log("File: " . $e->getFile() . ":" . $e->getLine());
+            error_log("Stack trace: " . $e->getTraceAsString());
+            
             $this->flash('error', 'Error interno al buscar usuarios. Revisa logs del servidor.');
             $this->redirect('/admin/users');
         }

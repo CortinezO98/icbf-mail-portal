@@ -27,6 +27,11 @@ final class UsersAdminRepo
         $search = $search !== null ? trim($search) : null;
         if ($search === '') $search = null;
 
+        // LOG DE ENTRADA
+        error_log("========== UsersAdminRepo::listUsers ==========");
+        error_log("Input parameters - page: $page, perPage: $perPage, offset: $offset");
+        error_log("search: '" . ($search ?? 'null') . "', isActive: " . ($isActive ?? 'null') . ", roleId: " . ($roleId ?? 'null'));
+
         $sql = "
             SELECT
                 u.id,
@@ -64,11 +69,13 @@ final class UsersAdminRepo
                 u.full_name LIKE :search
             )";
             $params[':search'] = "%{$search}%";
+            error_log("Added search filter with term: '%{$search}%'");
         }
 
         if ($isActive !== null) {
             $sql .= " AND u.is_active = :is_active";
             $params[':is_active'] = (int)$isActive;
+            error_log("Added is_active filter: $isActive");
         }
 
         if ($roleId !== null && $roleId > 0) {
@@ -77,24 +84,72 @@ final class UsersAdminRepo
                 WHERE ur2.user_id = u.id AND ur2.role_id = :role_id
             )";
             $params[':role_id'] = (int)$roleId;
+            error_log("Added role_id filter: $roleId (using EXISTS)");
         }
 
         $sql .= " ORDER BY u.id DESC LIMIT :limit OFFSET :offset";
+        
+        // LOG DE LA CONSULTA SQL
+        $sqlForLog = preg_replace('/\s+/', ' ', $sql);
+        error_log("Final SQL query: " . $sqlForLog);
+        error_log("Parameters to bind: " . json_encode($params));
+        error_log("Limit: $perPage, Offset: $offset");
 
-        $st = $this->pdo->prepare($sql);
+        try {
+            $st = $this->pdo->prepare($sql);
 
-        foreach ($params as $k => $v) {
-            if ($k === ':is_active' || $k === ':role_id') {
-                $st->bindValue($k, (int)$v, PDO::PARAM_INT);
-            } else {
-                $st->bindValue($k, (string)$v, PDO::PARAM_STR);
+            // Bind de parámetros de búsqueda y filtros
+            foreach ($params as $k => $v) {
+                if ($k === ':is_active' || $k === ':role_id') {
+                    $st->bindValue($k, (int)$v, PDO::PARAM_INT);
+                    error_log("Binding $k = " . (int)$v . " (INT)");
+                } else {
+                    $st->bindValue($k, (string)$v, PDO::PARAM_STR);
+                    error_log("Binding $k = '" . (string)$v . "' (STRING)");
+                }
             }
-        }
-        $st->bindValue(':limit', $perPage, PDO::PARAM_INT);
-        $st->bindValue(':offset', $offset, PDO::PARAM_INT);
+            
+            // Bind de limit y offset
+            $st->bindValue(':limit', $perPage, PDO::PARAM_INT);
+            $st->bindValue(':offset', $offset, PDO::PARAM_INT);
+            error_log("Binding :limit = $perPage (INT)");
+            error_log("Binding :offset = $offset (INT)");
 
-        $st->execute();
-        return $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+            // Ejecutar consulta
+            error_log("Executing query...");
+            $st->execute();
+            
+            // Obtener resultados
+            $results = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+            error_log("Query executed successfully. Returned " . count($results) . " rows");
+            
+            // Log del primer resultado para ver estructura (opcional)
+            if (!empty($results)) {
+                error_log("First result sample: " . json_encode($results[0]));
+            }
+            
+            return $results;
+            
+        } catch (\PDOException $e) {
+            error_log("!!!!!!!!!! PDO ERROR in listUsers !!!!!!!!!!");
+            error_log("Error message: " . $e->getMessage());
+            error_log("Error code: " . $e->getCode());
+            if (isset($e->errorInfo)) {
+                error_log("SQL State: " . ($e->errorInfo[0] ?? 'N/A'));
+                error_log("Driver Code: " . ($e->errorInfo[1] ?? 'N/A'));
+                error_log("Driver Message: " . ($e->errorInfo[2] ?? 'N/A'));
+            }
+            error_log("Stack trace: " . $e->getTraceAsString());
+            
+            // Re-lanzar la excepción para que la capture el controlador
+            throw $e;
+        } catch (\Exception $e) {
+            error_log("!!!!!!!!!! GENERAL ERROR in listUsers !!!!!!!!!!");
+            error_log("Error message: " . $e->getMessage());
+            error_log("Error type: " . get_class($e));
+            error_log("Stack trace: " . $e->getTraceAsString());
+            throw $e;
+        }
     }
 
     public function getAllUsersForExport(): array
@@ -133,6 +188,8 @@ final class UsersAdminRepo
         $search = $search !== null ? trim($search) : null;
         if ($search === '') $search = null;
 
+        error_log("UsersAdminRepo::countUsers - search: " . ($search ?? 'null') . ", isActive: " . ($isActive ?? 'null') . ", roleId: " . ($roleId ?? 'null'));
+
         $params = [];
 
         // Si hay filtro por rol, usamos una subconsulta
@@ -146,8 +203,10 @@ final class UsersAdminRepo
                 )
             ";
             $params[':role_id'] = (int)$roleId;
+            error_log("Using EXISTS subquery for role_id=$roleId");
         } else {
             $sql = "SELECT COUNT(*) as total FROM users u WHERE 1=1";
+            error_log("Using simple count query (no role filter)");
         }
 
         // Agregar filtro de búsqueda si existe
@@ -159,24 +218,42 @@ final class UsersAdminRepo
                 u.full_name LIKE :search
             )";
             $params[':search'] = "%{$search}%";
+            error_log("Added search filter: '%$search%'");
         }
 
         // Agregar filtro de estado si existe
         if ($isActive !== null) {
             $sql .= " AND u.is_active = :is_active";
             $params[':is_active'] = (int)$isActive;
+            error_log("Added is_active filter: $isActive");
         }
 
-        $st = $this->pdo->prepare($sql);
+        error_log("Final SQL: " . preg_replace('/\s+/', ' ', $sql));
+        error_log("Params: " . json_encode($params));
 
-        foreach ($params as $key => $value) {
-            $st->bindValue($key, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
+        try {
+            $st = $this->pdo->prepare($sql);
+
+            foreach ($params as $key => $value) {
+                $st->bindValue($key, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
+                error_log("Binding $key = " . (is_int($value) ? $value : "'$value'"));
+            }
+
+            $st->execute();
+            $result = $st->fetch(PDO::FETCH_ASSOC);
+            $total = (int)($result['total'] ?? 0);
+            
+            error_log("Query executed successfully, total = $total");
+            return $total;
+            
+        } catch (\PDOException $e) {
+            error_log("!!!!!!!!!! PDO ERROR in countUsers !!!!!!!!!!");
+            error_log("Error: " . $e->getMessage());
+            error_log("SQL State: " . $e->errorInfo[0] ?? 'N/A');
+            error_log("Driver Code: " . $e->errorInfo[1] ?? 'N/A');
+            error_log("Driver Message: " . $e->errorInfo[2] ?? 'N/A');
+            throw $e; // Re-lanzar para que lo capture el controlador
         }
-
-        $st->execute();
-        $result = $st->fetch(PDO::FETCH_ASSOC);
-        
-        return (int)($result['total'] ?? 0);
     }
 
 
