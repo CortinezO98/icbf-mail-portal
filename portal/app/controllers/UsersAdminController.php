@@ -43,6 +43,7 @@ final class UsersAdminController
         $page = max(1, (int)($_GET['page'] ?? 1));
         $search = trim((string)($_GET['search'] ?? ''));
         $isActive = isset($_GET['active']) && $_GET['active'] !== '' ? (int)$_GET['active'] : null;
+
         $roleId = (isset($_GET['role_id']) && $_GET['role_id'] !== '')
             ? (int)$_GET['role_id']
             : null;
@@ -51,31 +52,37 @@ final class UsersAdminController
             $roleId = null;
         }
 
-        $users = $this->repo->listUsers($page, $this->defaultPerPage, $search, $isActive, $roleId);
-        $total = $this->repo->countUsers($search, $isActive, $roleId);
-        $roles = $this->repo->listRoles();
+        try {
+            $users = $this->repo->listUsers($page, $this->defaultPerPage, $search, $isActive, $roleId);
+            $total = $this->repo->countUsers($search, $isActive, $roleId);
+            $roles = $this->repo->listRoles();
 
-        $flash = $_SESSION['_flash'] ?? null;
-        unset($_SESSION['_flash']);
+            $flash = $_SESSION['_flash'] ?? null;
+            unset($_SESSION['_flash']);
 
-        $this->render('admin/users/index.php', [
-            'users' => $users,
-            'roles' => $roles,
-            'flash' => $flash,
-            '_csrf' => Csrf::token(),
-            'search' => $search,
-            'isActive' => $isActive,
-            'roleId' => $roleId,
-            'pagination' => [
-                'page' => $page,
-                'perPage' => $this->defaultPerPage,
-                'total' => $total,
-                'totalPages' => (int)ceil($total / $this->defaultPerPage),
-                'hasPrev' => $page > 1,
-                'hasNext' => ($page * $this->defaultPerPage) < $total,
-            ],
-            'stats' => $this->repo->getStatistics(),
-        ]);
+            $this->render('admin/users/index.php', [
+                'users' => $users,
+                'roles' => $roles,
+                'flash' => $flash,
+                '_csrf' => Csrf::token(),
+                'search' => $search,
+                'isActive' => $isActive,
+                'roleId' => $roleId,
+                'pagination' => [
+                    'page' => $page,
+                    'perPage' => $this->defaultPerPage,
+                    'total' => $total,
+                    'totalPages' => (int)ceil($total / $this->defaultPerPage),
+                    'hasPrev' => $page > 1,
+                    'hasNext' => ($page * $this->defaultPerPage) < $total,
+                ],
+                'stats' => $this->repo->getStatistics(),
+            ]);
+        } catch (\Throwable $e) {
+            error_log("Admin users index failed: " . $e->getMessage());
+            $this->flash('error', 'Error interno al buscar usuarios. Revisa logs del servidor.');
+            $this->redirect('/admin/users');
+        }
     }
 
     public function showCreate(): void

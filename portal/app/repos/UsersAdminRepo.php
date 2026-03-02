@@ -50,13 +50,15 @@ final class UsersAdminRepo
         $params = [];
 
         if ($search !== null) {
+            $s = trim($search);
+
             $sql .= " AND (
-                u.document LIKE :search OR
+                CAST(u.document AS CHAR) LIKE :search OR
                 u.username LIKE :search OR
                 u.email LIKE :search OR
                 u.full_name LIKE :search
             )";
-            $params[':search'] = "%{$search}%";
+            $params[':search'] = "%{$s}%";
         }
 
         if ($isActive !== null) {
@@ -74,9 +76,12 @@ final class UsersAdminRepo
         $st = $this->pdo->prepare($sql);
 
         foreach ($params as $key => $value) {
-            $st->bindValue($key, $value);
+            if ($key === ':is_active' || $key === ':role_id') {
+                $st->bindValue($key, (int)$value, PDO::PARAM_INT);
+            } else {
+                $st->bindValue($key, (string)$value, PDO::PARAM_STR);
+            }
         }
-
         $st->bindValue(':limit', $perPage, PDO::PARAM_INT);
         $st->bindValue(':offset', $offset, PDO::PARAM_INT);
 
@@ -130,13 +135,15 @@ final class UsersAdminRepo
         $params = [];
 
         if ($search !== null) {
+            $s = trim($search);
+
             $sql .= " AND (
-                u.document LIKE :search OR
+                CAST(u.document AS CHAR) LIKE :search OR
                 u.username LIKE :search OR
                 u.email LIKE :search OR
                 u.full_name LIKE :search
             )";
-            $params[':search'] = "%{$search}%";
+            $params[':search'] = "%{$s}%";
         }
 
         if ($isActive !== null) {
