@@ -22,62 +22,74 @@ if ($basePath !== '' && str_starts_with($currentPath, $basePath)) {
     if ($currentPath === '') $currentPath = '/';
 }
 
-// Definir rutas (SIN el base_path) - Cada ruta aplica su propio middleware
+// ELIMINAR EL PREFIJO /admin/users PARA QUE LAS RUTAS COINCIDAN
+$prefix = '/admin/users';
+if (str_starts_with($currentPath, $prefix)) {
+    $routePath = substr($currentPath, strlen($prefix));
+    if ($routePath === '') $routePath = '/';
+} else {
+    // No debería pasar porque index.php ya filtró, pero por seguridad
+    http_response_code(404);
+    echo "Invalid admin route";
+    exit;
+}
+
+// Definir rutas (SIN el prefijo /admin/users)
 $routes = [
     'GET' => [
-        '/admin/users' => function () use ($controller) {
+        '/' => function () use ($controller) {
             \App\Middleware\require_login();
             \App\Middleware\require_role(['ADMIN']);
             $controller->index();
         },
-        '/admin/users/create' => function () use ($controller) {
+        '/create' => function () use ($controller) {
             \App\Middleware\require_login();
             \App\Middleware\require_role(['ADMIN']);
             $controller->showCreate();
         },
-        '/admin/users/edit/(\d+)' => function ($id) use ($controller) {
+        '/edit/(\d+)' => function ($id) use ($controller) {
             \App\Middleware\require_login();
             \App\Middleware\require_role(['ADMIN']);
             $controller->showEdit((int)$id);
         },
-        '/admin/users/import' => function () use ($controller) {
+        '/import' => function () use ($controller) {
             \App\Middleware\require_login();
             \App\Middleware\require_role(['ADMIN']);
             $controller->showImport();
         },
-        '/admin/users/export-template' => function () use ($controller) {
+        '/export-template' => function () use ($controller) {
             \App\Middleware\require_login();
             \App\Middleware\require_role(['ADMIN']);
             $controller->exportTemplate();
         },
-        '/admin/users/export' => function () use ($controller) {
+        '/export' => function () use ($controller) {
             \App\Middleware\require_login();
             \App\Middleware\require_role(['ADMIN']);
             $controller->exportExcel();
         },
     ],
     'POST' => [
-        '/admin/users/create' => function () use ($controller) {
+        '/create' => function () use ($controller) {
             \App\Middleware\require_login();
             \App\Middleware\require_role(['ADMIN']);
             $controller->create();
         },
-        '/admin/users/edit/(\d+)' => function ($id) use ($controller) {
+        '/edit/(\d+)' => function ($id) use ($controller) {
             \App\Middleware\require_login();
             \App\Middleware\require_role(['ADMIN']);
             $controller->update((int)$id);
         },
-        '/admin/users/toggle-active/(\d+)' => function ($id) use ($controller) {
+        '/toggle-active/(\d+)' => function ($id) use ($controller) {
             \App\Middleware\require_login();
             \App\Middleware\require_role(['ADMIN']);
             $controller->toggleActive((int)$id);
         },
-        '/admin/users/delete/(\d+)' => function ($id) use ($controller) {
+        '/delete/(\d+)' => function ($id) use ($controller) {
             \App\Middleware\require_login();
             \App\Middleware\require_role(['ADMIN']);
             $controller->delete((int)$id);
         },
-        '/admin/users/import' => function () use ($controller) {
+        '/import' => function () use ($controller) {
             \App\Middleware\require_login();
             \App\Middleware\require_role(['ADMIN']);
             $controller->import();
@@ -89,12 +101,14 @@ $routes = [
 $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
 
 foreach ($routes[$method] ?? [] as $pattern => $handler) {
-    if (preg_match('#^' . $pattern . '$#', $currentPath, $matches)) {
+    if (preg_match('#^' . $pattern . '$#', $routePath, $matches)) {
         array_shift($matches);
         call_user_func_array($handler, $matches);
         exit;
     }
 }
 
-// Si no hay ruta, continuar con index.php (404)
-return;
+// Si no hay ruta, 404
+http_response_code(404);
+echo "Admin route not found: " . htmlspecialchars($routePath);
+exit;
