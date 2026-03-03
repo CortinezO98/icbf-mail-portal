@@ -317,10 +317,11 @@ def insert_attachment(
     db: Session,
     *,
     message_id_pk: int,
+    graph_attachment_id: str | None, 
     filename: str,
     content_type: str,
     size_bytes: int,
-    sha256: str | None,
+    sha256: str,
     is_inline: int,
     content_id: str | None,
     storage_path: str,
@@ -328,16 +329,17 @@ def insert_attachment(
     db.execute(
         text("""
             INSERT IGNORE INTO attachments (
-              message_id, filename, content_type, size_bytes,
+              message_id, graph_attachment_id, filename, content_type, size_bytes,
               sha256, is_inline, content_id, storage_path, created_at
             )
             VALUES (
-              :message_id, :filename, :content_type, :size_bytes,
+              :message_id, :graph_attachment_id, :filename, :content_type, :size_bytes,
               :sha256, :is_inline, :content_id, :storage_path, NOW(6)
             )
         """),
         {
-            "message_id": message_id_pk,
+            "message_id": message_id_pk,  
+            "graph_attachment_id": graph_attachment_id,
             "filename": filename[:255],
             "content_type": content_type[:120],
             "size_bytes": int(size_bytes),

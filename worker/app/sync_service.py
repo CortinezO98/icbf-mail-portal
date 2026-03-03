@@ -271,6 +271,7 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
 
     case_id: int | None = None
     message_pk_existing: int | None = None
+    message_pk: int | None = None
     should_process_attachments_even_if_dedupe = False
     event_type: str = "CASE_CREATED"
 
@@ -280,6 +281,7 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
         existing = _get_existing_message_row(db, mailbox_id=mailbox_id, provider_message_id=provider_message_id)
         if existing:
             message_pk_existing, case_id_existing, has_att_db = existing
+            message_pk = message_pk_existing
             logger.info("Dedupe hit message_id=%s case_id=%s", provider_message_id, case_id_existing)
 
             if has_att_db or has_attachments:
@@ -335,6 +337,19 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
                 processed_by_worker=settings.WORKER_INSTANCE_ID,
             )
 
+            row = db.execute(
+                text("""
+                    SELECT id
+                    FROM messages
+                    WHERE mailbox_id = :mbid AND provider_message_id = :pmid
+                    ORDER BY id DESC
+                    LIMIT 1
+                """),
+                {"mbid": mailbox_id, "pmid": provider_message_id},
+            ).fetchone()
+
+            message_pk = int(row[0]) if row else None
+
             _touch_case_activity(db, case_id=case_id, last_activity_at=received_at)
 
             repos.insert_case_event(
@@ -371,12 +386,12 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
                         details={"reason": "no_eligible_agents"},
                     )
 
-    if (has_attachments or should_process_attachments_even_if_dedupe) and mailbox_id is not None:
+    if (has_attachments or should_process_attachments_even_if_dedupe) and message_pk is not None:
         await _process_attachments(
-            mailbox_id=mailbox_id,
-            provider_message_id=provider_message_id,
             mailbox_email=mb,
-            message_id=message_id,
+            graph_message_id=message_id,
+            message_pk=message_pk,
+            provider_message_id=provider_message_id,
         )
     
     if settings.NOTIFICATIONS_ENABLED and assigned_agent_id and case_id is not None:
@@ -508,14 +523,14 @@ async def _notify_agent_new_case(*, case_id: int, agent_id: int, case_subject: s
         logger.warning("Notification failed case_id=%s agent_id=%s err=%s", case_id, agent_id, e)
 
 
-async def _process_attachments(*, mailbox_id: int, provider_message_id: str, mailbox_email: str, message_id: str) -> None:
+async def _process_attachments(*, mailbox_email: str, graph_message_id: str, message_pk: int, provider_message_id: str) -> None:
     """
     ✅ Importante:
     - NO hacemos awaits dentro de una transacción DB.
     - Primero traemos/decodificamos/guardamos a disco.
     - Luego persistimos rows en attachments.
     """
-    atts = await graph_client.list_attachments(mailbox_email, message_id)
+    atts = await graph_client.list_attachments(mailbox_email, graph_message_id)
     if not atts:
         return
 
@@ -537,7 +552,7 @@ async def _process_attachments(*, mailbox_id: int, provider_message_id: str, mai
 
         content_b64 = a.get("contentBytes")
         if not content_b64 and att_id:
-            full = await graph_client.get_attachment(mailbox_email, message_id, att_id)
+            full = await graph_client.get_attachment(mailbox_email, graph_message_id, att_id)
             content_b64 = full.get("contentBytes")
 
         if not content_b64:
@@ -558,10 +573,15 @@ async def _process_attachments(*, mailbox_id: int, provider_message_id: str, mai
         except Exception as e:
             logger.warning("Attachment rejected filename=%s reason=%s", filename, e)
             continue
+        
+        if not stored.sha256:
+            logger.warning("Attachment without sha256 filename=%s -> skip", filename)
+            continue
 
         prepared.append(
             {
                 "filename": filename,
+                "graph_attachment_id": att_id,
                 "content_type": stored.content_type,
                 "size_bytes": stored.size_bytes,
                 "sha256": stored.sha256,
@@ -571,13 +591,15 @@ async def _process_attachments(*, mailbox_id: int, provider_message_id: str, mai
             }
         )
 
-        logger.info("Prepared attachment filename=%s bytes=%s sha=%s", filename, stored.size_bytes, stored.sha256[:12])
+        logger.info(
+            "Prepared attachment msg_pk=%s graph_msg_id=%s filename=%s bytes=%s sha=%s",
+            message_pk, graph_message_id, filename, stored.size_bytes, stored.sha256[:12]
+        )
 
     if not prepared:
         return
 
     with get_db_session() as db:
-        message_pk = repos.get_message_pk(db, mailbox_id, provider_message_id)
 
         existing_count = _attachments_count(db, message_pk=message_pk)
         if existing_count > 0:
@@ -591,6 +613,7 @@ async def _process_attachments(*, mailbox_id: int, provider_message_id: str, mai
             repos.insert_attachment(
                 db,
                 message_id_pk=message_pk,
+                graph_attachment_id=p.get("graph_attachment_id"),
                 filename=p["filename"],
                 content_type=p["content_type"],
                 size_bytes=p["size_bytes"],
