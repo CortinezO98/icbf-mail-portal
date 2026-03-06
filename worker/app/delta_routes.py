@@ -5,6 +5,8 @@ from app.settings import settings
 from app.delta_service import run_delta_backstop
 from app.sync_service import process_message_id_async
 import logging
+from sqlalchemy import text
+from app.db import get_db_session
 
 logger = logging.getLogger("app.delta_routes")
 router = APIRouter()
@@ -64,50 +66,51 @@ async def reprocess_batch(
     """
     _require_admin_key(request)
     
-    from app.db import get_db_session
-    from sqlalchemy import text
-    
-    with get_db_session() as db:
-        # Obtener mensajes pendientes
-        rows = db.execute(
-            text("""
-                SELECT provider_message_id 
-                FROM messages m
-                LEFT JOIN attachments a ON a.message_id = m.id
-                WHERE m.has_attachments = 1
-                  AND a.id IS NULL
-                  AND m.received_at >= :cutoff_date
-                LIMIT :limit
-            """),
-            {
-                "cutoff_date": "2026-03-01",
-                "limit": limit
+    try:
+        with get_db_session() as db:
+            # Obtener mensajes pendientes
+            rows = db.execute(
+                text("""
+                    SELECT provider_message_id 
+                    FROM messages m
+                    LEFT JOIN attachments a ON a.message_id = m.id
+                    WHERE m.has_attachments = 1
+                      AND a.id IS NULL
+                      AND m.received_at >= '2026-03-01'
+                    LIMIT :limit
+                """),
+                {"limit": limit}
+            ).fetchall()
+        
+        if not rows:
+            return {
+                "total": 0,
+                "success": 0,
+                "failed": 0,
+                "message": "No pending messages to reprocess",
+                "results": []
             }
-        ).fetchall()
-    
-    if not rows:
+        
+        results = []
+        for row in rows:
+            msg_id = row[0]
+            try:
+                await process_message_id_async(msg_id)
+                results.append({"message_id": msg_id, "status": "success"})
+                logger.info(f"Batch reprocess success: {msg_id}")
+            except Exception as e:
+                results.append({"message_id": msg_id, "status": "failed", "error": str(e)[:200]})
+                logger.error(f"Batch reprocess failed: {msg_id} - {e}")
+        
         return {
-            "total": 0,
-            "success": 0,
-            "failed": 0,
-            "message": "No pending messages to reprocess",
-            "results": []
+            "total": len(results),
+            "success": sum(1 for r in results if r["status"] == "success"),
+            "failed": sum(1 for r in results if r["status"] == "failed"),
+            "results": results
         }
-    
-    results = []
-    for row in rows:
-        msg_id = row[0]
-        try:
-            await process_message_id_async(msg_id)
-            results.append({"message_id": msg_id, "status": "success"})
-            logger.info(f"Batch reprocess success: {msg_id}")
-        except Exception as e:
-            results.append({"message_id": msg_id, "status": "failed", "error": str(e)[:200]})
-            logger.error(f"Batch reprocess failed: {msg_id} - {e}")
-    
-    return {
-        "total": len(results),
-        "success": sum(1 for r in results if r["status"] == "success"),
-        "failed": sum(1 for r in results if r["status"] == "failed"),
-        "results": results
-    }
+    except Exception as e:
+        logger.exception(f"Batch reprocess failed: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
