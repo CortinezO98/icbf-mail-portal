@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from urllib.parse import quote_plus
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.settings import settings
@@ -27,6 +27,14 @@ engine = create_engine(
     max_overflow=settings.DB_MAX_OVERFLOW,
     future=True,
 )
+
+@event.listens_for(engine, "connect")
+def set_timezone(dbapi_connection, connection_record):
+    """Establece la zona horaria a America/Bogota para cada conexión"""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("SET time_zone = 'America/Bogota'")
+    cursor.close()
+
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
