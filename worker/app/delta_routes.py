@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Query
 from app.settings import settings
 from app.delta_service import run_delta_backstop
+from app.sync_service import process_message_id_async
+import logging
 
+logger = logging.getLogger("app.delta_routes")
 router = APIRouter()
 
 def _require_admin_key(request: Request) -> None:
@@ -11,6 +14,7 @@ def _require_admin_key(request: Request) -> None:
     if not key or key != settings.ADMIN_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid admin key")
 
+# === FUNCIONALIDAD ORIGINAL - SIN CAMBIOS ===
 @router.post("/graph/delta/run")
 async def run_delta(request: Request) -> dict:
     _require_admin_key(request)
@@ -27,3 +31,83 @@ async def prime_delta(request: Request) -> dict:
         return await run_delta_backstop()
     finally:
         setattr(settings, "DELTA_PRIME_ONLY", old)
+
+
+# === NUEVA FUNCIONALIDAD AGREGADA - NO AFECTA LO ANTERIOR ===
+@router.post("/admin/reprocess")
+async def reprocess_message(
+    request: Request,
+    message_id: str = Query(..., description="Provider message ID to reprocess")
+) -> dict:
+    """
+    Reprocesa un mensaje específico por su provider_message_id.
+    Útil para recuperar attachments fallidos.
+    """
+    _require_admin_key(request)
+    
+    try:
+        logger.info(f"Manual reprocess requested for message_id: {message_id}")
+        await process_message_id_async(message_id)
+        return {"success": True, "message_id": message_id, "status": "reprocessed"}
+    except Exception as e:
+        logger.exception(f"Reprocess failed for {message_id}")
+        return {"success": False, "message_id": message_id, "error": str(e)}
+
+
+@router.post("/admin/reprocess-batch")
+async def reprocess_batch(
+    request: Request,
+    limit: int = Query(50, description="Max messages to reprocess")
+) -> dict:
+    """
+    Reprocesa mensajes con attachments faltantes en lote.
+    """
+    _require_admin_key(request)
+    
+    from app.db import get_db_session
+    from sqlalchemy import text
+    
+    with get_db_session() as db:
+        # Obtener mensajes pendientes
+        rows = db.execute(
+            text("""
+                SELECT provider_message_id 
+                FROM messages m
+                LEFT JOIN attachments a ON a.message_id = m.id
+                WHERE m.has_attachments = 1
+                  AND a.id IS NULL
+                  AND m.received_at >= :cutoff_date
+                LIMIT :limit
+            """),
+            {
+                "cutoff_date": "2026-03-01",
+                "limit": limit
+            }
+        ).fetchall()
+    
+    if not rows:
+        return {
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "message": "No pending messages to reprocess",
+            "results": []
+        }
+    
+    results = []
+    for row in rows:
+        msg_id = row[0]
+        try:
+            await process_message_id_async(msg_id)
+            results.append({"message_id": msg_id, "status": "success"})
+            logger.info(f"Batch reprocess success: {msg_id}")
+        except Exception as e:
+            results.append({"message_id": msg_id, "status": "failed", "error": str(e)[:200]})
+            logger.error(f"Batch reprocess failed: {msg_id} - {e}")
+    
+    return {
+        "total": len(results),
+        "success": sum(1 for r in results if r["status"] == "success"),
+        "failed": sum(1 for r in results if r["status"] == "failed"),
+        "results": results
+    }
