@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -40,12 +43,18 @@ def _ext_of(filename: str) -> str:
 def validate_attachment(filename: str, size_bytes: int, content_type: str | None = None) -> None:
     ext = _ext_of(filename)
 
-    if ext in settings.blocked_ext_set():
-        raise ValueError(f"Blocked extension: .{ext}")
+    if ext == '':
+        if content_type and content_type.startswith(('image/', 'video/', 'application/', 'text/')):
+            logger.info(f"Allowing file without extension: {filename}, content-type: {content_type}")
+        else:
+            raise ValueError(f"File without extension and unknown content-type: {content_type}")
+    else:
+        if ext in settings.blocked_ext_set():
+            raise ValueError(f"Blocked extension: .{ext}")
 
-    allowed = settings.allowed_ext_set()
-    if allowed and ext not in allowed:
-        raise ValueError(f"Extension not allowed: .{ext}")
+        allowed = settings.allowed_ext_set()
+        if allowed and ext not in allowed:
+            raise ValueError(f"Extension not allowed: .{ext}")
 
     if size_bytes > settings.max_attachment_bytes():
         raise ValueError(f"Attachment too large: {size_bytes} bytes")
