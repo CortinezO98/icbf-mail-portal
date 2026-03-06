@@ -12,6 +12,7 @@ from app.graph_client import graph_client
 from app.db import get_db_session
 from app import repos
 from app.storage import save_attachment_bytes
+from zoneinfo import ZoneInfo 
 
 logger = logging.getLogger("app.sync_service")
 
@@ -23,7 +24,15 @@ def _iso_to_dt(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).replace(tzinfo=None)
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        
+        bogota_tz = ZoneInfo("America/Bogota")
+        dt_bogota = dt.astimezone(bogota_tz)
+        
+        return dt_bogota.replace(tzinfo=None)
     except Exception:
         return None
 
