@@ -74,7 +74,7 @@ class Settings(BaseSettings):
 
     # Subscriptions
     AUTO_ENSURE_SUBSCRIPTION: int = 0
-    SUBSCRIPTION_CHANGE_TYPE: str = "created"
+    SUBSCRIPTION_CHANGE_TYPE: str = "created,updated" 
     SUBSCRIPTION_RESOURCE: str = "users/{MAILBOX_EMAIL}/mailFolders('Inbox')/messages"
     SUBSCRIPTION_LIFETIME_MINUTES: int = 10080
     SUB_RENEW_THRESHOLD_MINUTES: int = 1440
@@ -93,6 +93,14 @@ class Settings(BaseSettings):
 
     DELTA_MAX_MESSAGES: int = 500
     DELTA_MAX_PAGES: int = 50
+
+    # Background loops
+    SUB_LOOP_ENABLED: int = 1
+    DELTA_LOOP_ENABLED: int = 1
+    SUB_LOOP_INTERVAL_SECONDS: int = 60
+    DELTA_LOOP_INTERVAL_SECONDS: int = 120 
+    SUB_LOOP_JITTER_SECONDS: int = 10
+    DELTA_LOOP_JITTER_SECONDS: int = 5
 
     # Admin
     ADMIN_API_KEY: str = ""
