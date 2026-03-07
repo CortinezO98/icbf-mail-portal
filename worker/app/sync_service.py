@@ -642,16 +642,16 @@ async def _process_attachments(*, mailbox_email: str, graph_message_id: str, mes
     logger.info("Inserted attachments=%s for provider_message_id=%s", len(prepared), provider_message_id)
 
 
-async def process_message_id_async(message_id: str) -> None:
+async def process_message_id_async(message_id: str, source: str = "unknown") -> None:
     """
-    Entry-point para Delta backstop: procesa 1 correo por message_id.
+    Entry-point unificado para webhook, delta y reconcile.
     Reusa la misma lógica de _process_single_message.
     """
     if not settings.MAILBOX_EMAIL:
         logger.error("MAILBOX_EMAIL missing - cannot process message_id=%s", message_id)
         return
 
-    logger.info("DELTA_PROCESS_START | message_id=%s", message_id)
+    logger.info("MESSAGE_PROCESS_START | source=%s | message_id=%s", source, message_id)
 
     with get_db_session() as db:
         mailbox_id = repos.get_or_create_mailbox(db, settings.MAILBOX_EMAIL)

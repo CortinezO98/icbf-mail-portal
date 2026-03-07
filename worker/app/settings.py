@@ -109,6 +109,18 @@ class Settings(BaseSettings):
     WEBHOOK_CONSUMERS: int = 4
 
 
+    # Persistent inbound queue
+    INBOUND_QUEUE_ENABLED: int = 1
+    INBOUND_QUEUE_POLL_SECONDS: int = 2
+    INBOUND_QUEUE_BATCH_SIZE: int = 20
+    INBOUND_QUEUE_MAX_ATTEMPTS: int = 8
+
+    # Reconcile
+    RECONCILE_ENABLED: int = 1
+    RECONCILE_INTERVAL_SECONDS: int = 300
+    RECONCILE_LOOKBACK_MINUTES: int = 180
+    RECONCILE_PAGE_SIZE: int = 100
+
     # helpers
     def allowed_ext_set(self) -> Set[str]:
         return {x.strip().lower().lstrip(".") for x in self.ALLOWED_ATTACHMENT_EXT.split(",") if x.strip()}

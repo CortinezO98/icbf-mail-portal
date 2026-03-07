@@ -9,6 +9,8 @@ from fastapi import APIRouter, Request, Response
 
 from app.settings import settings
 from app import sync_service
+from app.db import get_db_session
+from app import inbound_queue_repo
 
 logger = logging.getLogger("app.webhook")
 router = APIRouter()
@@ -58,7 +60,7 @@ async def _webhook_consumer(worker_no: int) -> None:
         message_id = await _webhook_queue.get()
         try:
             logger.info("WEBHOOK_PROCESS_START | worker=%s | message_id=%s", worker_no, message_id)
-            await sync_service.process_message_id_async(message_id)
+            await sync_service.process_message_id_async(message_id, source="webhook")
             logger.info("WEBHOOK_PROCESS_DONE | worker=%s | message_id=%s", worker_no, message_id)
         except Exception as e:
             logger.exception(
@@ -146,11 +148,32 @@ async def graph_webhook_post(request: Request) -> Response:
             continue
 
         try:
-            _webhook_queue.put_nowait(msg_id)
+            with get_db_session() as db:
+                event_id = inbound_queue_repo.enqueue_event(
+                    db,
+                    source="webhook",
+                    provider_message_id=msg_id,
+                    mailbox_email=settings.MAILBOX_EMAIL,
+                    payload=n,
+                )
+
+            logger.info(
+                "QUEUE_EVENT_CREATED | source=webhook | event_id=%s | message_id=%s",
+                event_id,
+                msg_id,
+            )
+
+            if _webhook_queue is not None:
+                try:
+                    _webhook_queue.put_nowait(msg_id)
+                    logger.info("WEBHOOK_ENQUEUED | message_id=%s", msg_id)
+                except asyncio.QueueFull:
+                    logger.error("WEBHOOK_QUEUE_FULL | message_id=%s", msg_id)
+
             enqueued += 1
-            logger.info("WEBHOOK_ENQUEUED | message_id=%s", msg_id)
-        except asyncio.QueueFull:
-            logger.error("WEBHOOK_QUEUE_FULL | message_id=%s", msg_id)
+
+        except Exception as e:
+            logger.exception("WEBHOOK_PERSIST_FAILED | message_id=%s | err=%s", msg_id, e)
 
     logger.info("Webhook enqueued notifications=%s", enqueued)
     return Response(content="OK", media_type="text/plain", status_code=202)

@@ -7,16 +7,18 @@ from app.sync_service import process_message_id_async
 import logging
 from sqlalchemy import text
 from app.db import get_db_session
+from app import inbound_queue_repo
 
 logger = logging.getLogger("app.delta_routes")
 router = APIRouter()
+
 
 def _require_admin_key(request: Request) -> None:
     key = request.headers.get("x-admin-key") or request.headers.get("X-Admin-Key")
     if not key or key != settings.ADMIN_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid admin key")
 
-# === FUNCIONALIDAD ORIGINAL - SIN CAMBIOS ===
+
 @router.post("/graph/delta/run")
 async def run_delta(request: Request) -> dict:
     _require_admin_key(request)
@@ -35,7 +37,6 @@ async def prime_delta(request: Request) -> dict:
         setattr(settings, "DELTA_PRIME_ONLY", old)
 
 
-# === NUEVA FUNCIONALIDAD AGREGADA - NO AFECTA LO ANTERIOR ===
 @router.post("/admin/reprocess")
 async def reprocess_message(
     request: Request,
@@ -46,13 +47,13 @@ async def reprocess_message(
     Útil para recuperar attachments fallidos.
     """
     _require_admin_key(request)
-    
+
     try:
-        logger.info(f"Manual reprocess requested for message_id: {message_id}")
-        await process_message_id_async(message_id)
+        logger.info("Manual reprocess requested for message_id=%s", message_id)
+        await process_message_id_async(message_id, source="manual")
         return {"success": True, "message_id": message_id, "status": "reprocessed"}
     except Exception as e:
-        logger.exception(f"Reprocess failed for {message_id}")
+        logger.exception("Reprocess failed for %s", message_id)
         return {"success": False, "message_id": message_id, "error": str(e)}
 
 
@@ -65,13 +66,12 @@ async def reprocess_batch(
     Reprocesa mensajes con attachments faltantes en lote.
     """
     _require_admin_key(request)
-    
+
     try:
         with get_db_session() as db:
-            # Obtener mensajes pendientes
             rows = db.execute(
                 text("""
-                    SELECT provider_message_id 
+                    SELECT provider_message_id
                     FROM messages m
                     LEFT JOIN attachments a ON a.message_id = m.id
                     WHERE m.has_attachments = 1
@@ -81,7 +81,7 @@ async def reprocess_batch(
                 """),
                 {"limit": limit}
             ).fetchall()
-        
+
         if not rows:
             return {
                 "total": 0,
@@ -90,18 +90,18 @@ async def reprocess_batch(
                 "message": "No pending messages to reprocess",
                 "results": []
             }
-        
+
         results = []
         for row in rows:
             msg_id = row[0]
             try:
-                await process_message_id_async(msg_id)
+                await process_message_id_async(msg_id, source="manual")
                 results.append({"message_id": msg_id, "status": "success"})
-                logger.info(f"Batch reprocess success: {msg_id}")
+                logger.info("Batch reprocess success: %s", msg_id)
             except Exception as e:
                 results.append({"message_id": msg_id, "status": "failed", "error": str(e)[:200]})
-                logger.error(f"Batch reprocess failed: {msg_id} - {e}")
-        
+                logger.error("Batch reprocess failed: %s - %s", msg_id, e)
+
         return {
             "total": len(results),
             "success": sum(1 for r in results if r["status"] == "success"),
@@ -109,8 +109,18 @@ async def reprocess_batch(
             "results": results
         }
     except Exception as e:
-        logger.exception(f"Batch reprocess failed: {e}")
+        logger.exception("Batch reprocess failed: %s", e)
         return {
             "success": False,
             "error": str(e)
         }
+
+
+@router.get("/admin/inbound-queue/stats")
+async def inbound_queue_stats(request: Request) -> dict:
+    _require_admin_key(request)
+
+    with get_db_session() as db:
+        stats = inbound_queue_repo.queue_stats(db)
+
+    return {"ok": True, "stats": stats}

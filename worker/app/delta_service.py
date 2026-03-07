@@ -8,7 +8,7 @@ from typing import Any, Iterable
 from app.settings import settings
 from app.db import get_db_session
 from app.graph_client import graph_client
-from app import repos, sync_service
+from app import repos, inbound_queue_repo
 
 logger = logging.getLogger("app.delta_service")
 
@@ -152,7 +152,7 @@ async def _run_delta_for_folder(
     prime_only = _cfg_bool("DELTA_PRIME_ONLY", False)
 
     priming = prime_only or (prime_on_empty and is_first_run)
-    url = next_link or delta_link 
+    url = next_link or delta_link
 
     pages = 0
     total_items = 0
@@ -208,7 +208,7 @@ async def _run_delta_for_folder(
                     mailbox_id=mailbox_id,
                     folder_id=folder_id,
                     delta_link=delta_link,
-                    next_link=url,  
+                    next_link=url,
                     last_sync_at=utcnow(),
                     last_status_code=status,
                     last_error=err,
@@ -242,7 +242,7 @@ async def _run_delta_for_folder(
                 msg_ids.append(str(mid))
 
         if msg_ids and not priming:
-            processed_ok = await _process_message_ids(msg_ids)
+            processed_ok = await _enqueue_message_ids(msg_ids, mailbox_email=mailbox_email)
             processed_messages += processed_ok
 
         new_next = data.get("@odata.nextLink")
@@ -286,24 +286,37 @@ async def _run_delta_for_folder(
     }
 
 
-async def _process_message_ids(message_ids: list[str]) -> int:
+async def _enqueue_message_ids(message_ids: list[str], *, mailbox_email: str) -> int:
     """
-    Concurrency control para no saturar Graph/DB.
-    Retorna cuántos se intentaron procesar (ok contabilizados).
+    Encola provider_message_id encontrados por delta para que los procese
+    inbound_queue_worker. Evita procesar directo aquí y centraliza retries.
     """
     concurrency = int(getattr(settings, "DELTA_CONCURRENCY", 3))
     sem = asyncio.Semaphore(concurrency)
 
-    ok_count = 0
+    enqueued_count = 0
 
     async def _one(mid: str) -> None:
-        nonlocal ok_count
+        nonlocal enqueued_count
         async with sem:
             try:
-                await sync_service.process_message_id_async(mid)
-                ok_count += 1
+                with get_db_session() as db:
+                    event_id = inbound_queue_repo.enqueue_event(
+                        db,
+                        source="delta",
+                        provider_message_id=mid,
+                        mailbox_email=mailbox_email,
+                        payload=None,
+                    )
+
+                logger.info(
+                    "QUEUE_EVENT_CREATED | source=delta | event_id=%s | message_id=%s",
+                    event_id,
+                    mid,
+                )
+                enqueued_count += 1
             except Exception:
-                logger.exception("Delta processing failed message_id=%s", mid)
+                logger.exception("Delta enqueue failed message_id=%s", mid)
 
     await asyncio.gather(*[_one(m) for m in message_ids])
-    return ok_count
+    return enqueued_count

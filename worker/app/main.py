@@ -11,6 +11,7 @@ from fastapi import FastAPI
 
 from app.settings import settings
 from app.webhook import router as webhook_router, start_webhook_workers, stop_webhook_workers
+from app.inbound_queue_worker import start_inbound_queue_worker, stop_inbound_queue_worker
 from app.subscriptions_routes import router as subs_router
 from app.delta_routes import router as delta_router
 from app.background_jobs import start_background_jobs, stop_background_jobs
@@ -36,9 +37,11 @@ def create_app() -> FastAPI:
 
         await start_background_jobs()
         await start_webhook_workers()
+        await start_inbound_queue_worker()
 
     @app.on_event("shutdown")
     async def on_shutdown() -> None:
+        await stop_inbound_queue_worker()
         await stop_webhook_workers()
         await stop_background_jobs()
 
