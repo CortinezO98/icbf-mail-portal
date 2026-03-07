@@ -97,13 +97,17 @@ class Settings(BaseSettings):
     # Background loops
     SUB_LOOP_ENABLED: int = 1
     DELTA_LOOP_ENABLED: int = 1
-    SUB_LOOP_INTERVAL_SECONDS: int = 60
-    DELTA_LOOP_INTERVAL_SECONDS: int = 120 
+    SUB_LOOP_INTERVAL_SECONDS: int = 30
+    DELTA_LOOP_INTERVAL_SECONDS: int = 60 
     SUB_LOOP_JITTER_SECONDS: int = 10
     DELTA_LOOP_JITTER_SECONDS: int = 5
 
     # Admin
     ADMIN_API_KEY: str = ""
+
+    WEBHOOK_QUEUE_MAXSIZE: int = 2000
+    WEBHOOK_CONSUMERS: int = 4
+
 
     # helpers
     def allowed_ext_set(self) -> Set[str]:

@@ -12,12 +12,9 @@ from app.graph_client import graph_client
 from app.db import get_db_session
 from app import repos
 from app.storage import save_attachment_bytes
-from zoneinfo import ZoneInfo 
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("app.sync_service")
-
-
-
 
 
 def _iso_to_dt(value: str | None) -> datetime | None:
@@ -28,10 +25,10 @@ def _iso_to_dt(value: str | None) -> datetime | None:
 
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        
+
         bogota_tz = ZoneInfo("America/Bogota")
         dt_bogota = dt.astimezone(bogota_tz)
-        
+
         return dt_bogota.replace(tzinfo=None)
     except Exception:
         return None
@@ -102,7 +99,7 @@ def _extract_message_id(notification: dict[str, Any]) -> str | None:
     last = res.rstrip("/").split("/")[-1]
 
     if last.startswith("messages(") and last.endswith(")"):
-        inner = last[len("messages(") : -1].strip().strip("'").strip('"')
+        inner = last[len("messages("): -1].strip().strip("'").strip('"')
         return inner or None
 
     return last or None
@@ -231,7 +228,6 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
     cc_emails = _emails(msg.get("ccRecipients"))
     bcc_emails = _emails(msg.get("bccRecipients"))
 
-    # ✅ Mejor fallback: receivedDateTime -> createdDateTime -> now
     received_at = (
         _iso_to_dt(msg.get("receivedDateTime"))
         or _iso_to_dt(msg.get("createdDateTime"))
@@ -239,7 +235,6 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
     )
     sent_at = _iso_to_dt(msg.get("sentDateTime"))
 
-    # ✅ BLOQUEO por GO_LIVE_AT (día cero)
     go_live = settings.go_live_dt() if hasattr(settings, "go_live_dt") else None
     if go_live and received_at and received_at < go_live:
         logger.warning(
@@ -263,7 +258,6 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
 
     has_attachments = 1 if msg.get("hasAttachments") else 0
 
-    # 🔥 FILTRO NDR / UNDELIVERABLE (ANTI REBOTES)
     if _is_ndr(
         subject=subject,
         from_email=str(from_email),
@@ -291,7 +285,7 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
         if existing:
             message_pk_existing, case_id_existing, has_att_db = existing
             message_pk = message_pk_existing
-            logger.info("Dedupe hit message_id=%s case_id=%s", provider_message_id, case_id_existing)
+            logger.info("DEDUPE_HIT | message_id=%s | case_id=%s", provider_message_id, case_id_existing)
 
             if has_att_db or has_attachments:
                 if _attachments_count(db, message_pk=message_pk_existing) == 0:
@@ -323,6 +317,14 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
                     received_at=received_at,
                 )
                 event_type = "CASE_CREATED"
+
+                logger.info(
+                    "CASE_CREATED | case_id=%s | message_id=%s | from_email=%s | subject=%s",
+                    case_id,
+                    provider_message_id,
+                    from_email,
+                    subject,
+                )
 
             repos.insert_message_inbound(
                 db,
@@ -359,6 +361,14 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
 
             message_pk = int(row[0]) if row else None
 
+            logger.info(
+                "MESSAGE_INSERTED | message_pk=%s | case_id=%s | message_id=%s | received_at=%s",
+                message_pk,
+                case_id,
+                provider_message_id,
+                received_at,
+            )
+
             _touch_case_activity(db, case_id=case_id, last_activity_at=received_at)
 
             repos.insert_case_event(
@@ -380,7 +390,7 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
             if event_type == "CASE_CREATED":
                 assigned_agent_id = repos.auto_assign_case(db, case_id=case_id)
                 if assigned_agent_id:
-                    logger.info("Auto-assigned case_id=%s to agent_id=%s", case_id, assigned_agent_id)
+                    logger.info("AUTO_ASSIGNED | case_id=%s | agent_id=%s", case_id, assigned_agent_id)
                 else:
                     logger.warning("No eligible agents found for auto-assign case_id=%s", case_id)
 
@@ -402,11 +412,9 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
             message_pk=message_pk,
             provider_message_id=provider_message_id,
         )
-    
+
     if settings.NOTIFICATIONS_ENABLED and assigned_agent_id and case_id is not None:
         await _notify_agent_new_case(case_id=case_id, agent_id=assigned_agent_id, case_subject=subject)
-
-
 
 
 async def _notify_agent_new_case(*, case_id: int, agent_id: int, case_subject: str) -> None:
@@ -582,7 +590,7 @@ async def _process_attachments(*, mailbox_email: str, graph_message_id: str, mes
         except Exception as e:
             logger.warning("Attachment rejected filename=%s reason=%s", filename, e)
             continue
-        
+
         if not stored.sha256:
             logger.warning("Attachment without sha256 filename=%s -> skip", filename)
             continue
@@ -609,7 +617,6 @@ async def _process_attachments(*, mailbox_email: str, graph_message_id: str, mes
         return
 
     with get_db_session() as db:
-
         existing_count = _attachments_count(db, message_pk=message_pk)
         if existing_count > 0:
             logger.info(
@@ -643,6 +650,8 @@ async def process_message_id_async(message_id: str) -> None:
     if not settings.MAILBOX_EMAIL:
         logger.error("MAILBOX_EMAIL missing - cannot process message_id=%s", message_id)
         return
+
+    logger.info("DELTA_PROCESS_START | message_id=%s", message_id)
 
     with get_db_session() as db:
         mailbox_id = repos.get_or_create_mailbox(db, settings.MAILBOX_EMAIL)
