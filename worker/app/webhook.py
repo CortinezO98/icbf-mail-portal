@@ -136,11 +136,9 @@ async def graph_webhook_post(request: Request) -> Response:
             )
         return Response(content="OK", media_type="text/plain", status_code=202)
 
-    if _webhook_queue is None:
-        logger.error("Webhook queue is not initialized")
-        return Response(content="OK", media_type="text/plain", status_code=202)
-
     enqueued = 0
+    persisted = 0
+
     for n in valid:
         msg_id = sync_service._extract_message_id(n)
         if not msg_id:
@@ -157,6 +155,7 @@ async def graph_webhook_post(request: Request) -> Response:
                     payload=n,
                 )
 
+            persisted += 1
             logger.info(
                 "QUEUE_EVENT_CREATED | source=webhook | event_id=%s | message_id=%s",
                 event_id,
@@ -166,16 +165,24 @@ async def graph_webhook_post(request: Request) -> Response:
             if _webhook_queue is not None:
                 try:
                     _webhook_queue.put_nowait(msg_id)
+                    enqueued += 1
                     logger.info("WEBHOOK_ENQUEUED | message_id=%s", msg_id)
                 except asyncio.QueueFull:
                     logger.error("WEBHOOK_QUEUE_FULL | message_id=%s", msg_id)
-
-            enqueued += 1
+            else:
+                logger.warning(
+                    "WEBHOOK_QUEUE_NOT_AVAILABLE | message_id=%s | persisted_only=true",
+                    msg_id,
+                )
 
         except Exception as e:
             logger.exception("WEBHOOK_PERSIST_FAILED | message_id=%s | err=%s", msg_id, e)
 
-    logger.info("Webhook enqueued notifications=%s", enqueued)
+    logger.info(
+        "Webhook processed notifications | persisted=%s | enqueued=%s",
+        persisted,
+        enqueued,
+    )
     return Response(content="OK", media_type="text/plain", status_code=202)
 
 

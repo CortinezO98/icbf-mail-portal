@@ -58,6 +58,19 @@ async def reconcile_recent_inbox() -> dict:
             if not isinstance(item, dict):
                 continue
 
+            received_raw = item.get("receivedDateTime") or item.get("createdDateTime")
+            if received_raw:
+                try:
+                    dt = datetime.fromisoformat(str(received_raw).replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+
+                    cutoff = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
+                    if dt < cutoff:
+                        continue
+                except Exception:
+                    pass
+
             msg_id = item.get("id")
             if not msg_id:
                 continue
