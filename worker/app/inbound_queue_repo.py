@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
@@ -16,7 +15,7 @@ def enqueue_event(
     payload: dict[str, Any] | None = None,
 ) -> int | None:
     """
-    Inserta evento pendiente si no existe otro pendiente/processing reciente
+    Inserta evento pendiente si no existe otro pending/processing reciente
     para el mismo provider_message_id + mailbox_email.
     """
     row = db.execute(
@@ -75,7 +74,22 @@ def enqueue_event(
 def claim_pending_events(db, *, batch_size: int) -> list[dict[str, Any]]:
     """
     Reclama eventos pending disponibles y los marca processing.
+    Además, libera eventos atascados en processing.
     """
+    # 1) Liberar eventos atascados en processing por más de 10 minutos
+    db.execute(
+        text("""
+            UPDATE inbound_event_queue
+            SET status = 'pending',
+                locked_at = NULL,
+                updated_at = NOW(6)
+            WHERE status = 'processing'
+              AND locked_at IS NOT NULL
+              AND locked_at < DATE_SUB(NOW(6), INTERVAL 10 MINUTE)
+        """)
+    )
+
+    # 2) Reclamar nuevos pending
     rows = db.execute(
         text("""
             SELECT id, source, provider_message_id, mailbox_email, attempts
@@ -158,6 +172,7 @@ def mark_retry(
                 attempts = :attempts,
                 last_error = :err,
                 available_at = DATE_ADD(NOW(6), INTERVAL :delay SECOND),
+                locked_at = NULL,
                 updated_at = NOW(6)
             WHERE id = :id
         """),
@@ -184,6 +199,37 @@ def queue_stats(db) -> dict[str, int]:
         out[str(status)] = int(total)
     return out
 
+def list_failed_events(db, *, limit: int = 100) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text("""
+            SELECT id, source, provider_message_id, mailbox_email, attempts, last_error, updated_at
+            FROM inbound_event_queue
+            WHERE status = 'failed'
+            ORDER BY updated_at DESC
+            LIMIT :limit
+        """),
+        {"limit": limit},
+    ).mappings().all()
+
+    return [dict(r) for r in rows]
+
+
+def requeue_failed_events(db, *, limit: int = 1000) -> int:
+    upd = db.execute(
+        text("""
+            UPDATE inbound_event_queue
+            SET status = 'pending',
+                available_at = NOW(6),
+                locked_at = NULL,
+                updated_at = NOW(6)
+            WHERE status = 'failed'
+            ORDER BY updated_at DESC
+            LIMIT :limit
+        """),
+        {"limit": limit},
+    )
+    return int(upd.rowcount or 0)
+
 
 def _retry_delay_seconds(attempt_no: int) -> int:
     if attempt_no <= 1:
@@ -195,3 +241,5 @@ def _retry_delay_seconds(attempt_no: int) -> int:
     if attempt_no == 4:
         return 900
     return 1800
+
+

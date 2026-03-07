@@ -156,13 +156,13 @@ async def _run_delta_for_folder(
 
     pages = 0
     total_items = 0
-    processed_messages = 0
+    enqueued_messages = 0
     finished = False
 
     while True:
         if pages >= max_pages:
             break
-        if not priming and processed_messages >= max_messages:
+        if not priming and enqueued_messages >= max_messages:
             break
 
         pages += 1
@@ -221,7 +221,7 @@ async def _run_delta_for_folder(
                 "error": err,
                 "pages": pages,
                 "total_items": total_items,
-                "processed_messages": processed_messages,
+                "enqueued_messages": enqueued_messages,
                 "finished": False,
             }
 
@@ -242,8 +242,8 @@ async def _run_delta_for_folder(
                 msg_ids.append(str(mid))
 
         if msg_ids and not priming:
-            processed_ok = await _enqueue_message_ids(msg_ids, mailbox_email=mailbox_email)
-            processed_messages += processed_ok
+            enqueued_ok = await _enqueue_message_ids(msg_ids, mailbox_email=mailbox_email)
+            enqueued_messages += enqueued_ok
 
         new_next = data.get("@odata.nextLink")
         new_delta = data.get("@odata.deltaLink")
@@ -280,7 +280,7 @@ async def _run_delta_for_folder(
         "priming": bool(priming),
         "pages": pages,
         "total_items": total_items,
-        "processed_messages": processed_messages,
+        "enqueued_messages": enqueued_messages,
         "finished": bool(finished),
         "note": ("stopped_by_limits" if not finished else None),
     }

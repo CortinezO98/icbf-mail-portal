@@ -124,3 +124,29 @@ async def inbound_queue_stats(request: Request) -> dict:
         stats = inbound_queue_repo.queue_stats(db)
 
     return {"ok": True, "stats": stats}
+
+
+@router.get("/admin/inbound-queue/failed")
+async def inbound_queue_failed(
+    request: Request,
+    limit: int = Query(100, description="Max failed events to return")
+) -> dict:
+    _require_admin_key(request)
+
+    with get_db_session() as db:
+        rows = inbound_queue_repo.list_failed_events(db, limit=limit)
+
+    return {"ok": True, "total": len(rows), "rows": rows}
+
+
+@router.post("/admin/inbound-queue/requeue-failed")
+async def inbound_queue_requeue_failed(
+    request: Request,
+    limit: int = Query(1000, description="Max failed events to requeue")
+) -> dict:
+    _require_admin_key(request)
+
+    with get_db_session() as db:
+        updated = inbound_queue_repo.requeue_failed_events(db, limit=limit)
+
+    return {"ok": True, "requeued": updated}

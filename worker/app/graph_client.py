@@ -84,7 +84,7 @@ class GraphClient:
                     "replyTo",
                     "body",
                     "internetMessageId",
-                    "internetMessageHeaders",  
+                    "internetMessageHeaders",
                     "conversationId",
                     "hasAttachments",
                 ]
@@ -140,8 +140,7 @@ class GraphClient:
             logger.error("get_attachment failed: %s %s", resp.status_code, resp.text)
             raise RuntimeError("Graph get_attachment failed")
         return resp.json()
-    
-    
+
     async def send_mail(self, mailbox_email: str, *, to_email: str, subject: str, body_html: str) -> None:
         """
         Envía correo usando Microsoft Graph desde el mailbox_email (remitente).
@@ -162,7 +161,6 @@ class GraphClient:
         if resp.status_code not in (202, 200):
             logger.error("send_mail failed: %s %s", resp.status_code, resp.text)
             raise RuntimeError(f"sendMail failed status={resp.status_code} body={resp.text[:300]}")
-
 
     async def create_subscription(
         self,
@@ -205,7 +203,7 @@ class GraphClient:
             raise RuntimeError("Graph get_subscription failed")
         return resp.json()
 
-    # Delta helpers 
+    # Delta helpers
     def _folder_ref(self, *, folder_code: str, graph_folder_id: str | None) -> str:
         if graph_folder_id:
             return graph_folder_id
@@ -232,7 +230,7 @@ class GraphClient:
             delta_url = f"{GRAPH_BASE}/users/{mailbox_email}/mailFolders('{folder_ref}')/messages/delta"
             params = {
                 "$top": str(int(page_size)),
-                "$select": "id", 
+                "$select": "id,receivedDateTime,createdDateTime",
             }
             headers = await self._headers()
             headers["Prefer"] = f"odata.maxpagesize={int(page_size)}"
@@ -245,8 +243,6 @@ class GraphClient:
             data = {"raw": resp.text}
 
         return status, data
-    
-    
 
 
 graph_client = GraphClient()

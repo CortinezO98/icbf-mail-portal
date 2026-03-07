@@ -644,7 +644,7 @@ async def _process_attachments(*, mailbox_email: str, graph_message_id: str, mes
 
 async def process_message_id_async(message_id: str, source: str = "unknown") -> None:
     """
-    Entry-point unificado para webhook, delta y reconcile.
+    Entry-point unificado para webhook, delta, reconcile y manual.
     Reusa la misma lógica de _process_single_message.
     """
     if not settings.MAILBOX_EMAIL:

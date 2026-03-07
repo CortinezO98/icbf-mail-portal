@@ -125,19 +125,19 @@ async def _delta_loop(stop_event: asyncio.Event) -> None:
         try:
             res: dict[str, Any] = await run_delta_backstop()
             folders = res.get("folders") or []
-            processed = 0
+            enqueued = 0
             ok_folders = 0
             for f in folders:
                 if isinstance(f, dict) and f.get("ok"):
                     ok_folders += 1
-                    processed += int(f.get("processed_messages") or 0)
+                    enqueued += int(f.get("enqueued_messages") or 0)
 
             logger.info(
-                "Delta loop | ok=%s | folders_ok=%s/%s | processed_messages=%s",
+                "Delta loop | ok=%s | folders_ok=%s/%s | enqueued_messages=%s",
                 res.get("ok"),
                 ok_folders,
                 len(folders),
-                processed,
+                enqueued,
             )
         except Exception as e:
             logger.exception("Delta loop failed: %s", e)
