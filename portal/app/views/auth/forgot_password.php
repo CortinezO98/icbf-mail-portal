@@ -3,62 +3,59 @@ use App\Auth\Csrf;
 use function App\Config\url;
 
 $year = date('Y');
+$emailValue = htmlspecialchars((string)($_POST['email'] ?? ''), ENT_QUOTES, 'UTF-8');
 ?>
-<div class="login-wrap">
-  <div class="login-col">
+<div class="login-wrap forgot-wrap">
+  <div class="login-col forgot-col">
 
-    <!-- Logos con animación mejorada -->
-    <div class="login-logos animate__animated animate__fadeInDown">
+    <div class="login-logos forgot-logos animate__animated animate__fadeInDown">
       <img
         src="<?= htmlspecialchars(url('/assets/img/logo_icbf.png'), ENT_QUOTES, 'UTF-8') ?>"
         alt="Logo ICBF"
-        class="img-fluid logo-hover"
+        class="forgot-logo-main"
       >
       <img
         src="<?= htmlspecialchars(url('/assets/img/logo_iq.png'), ENT_QUOTES, 'UTF-8') ?>"
         alt="Logo IQ Outsourcing"
-        class="img-fluid logo-hover"
-        style="max-height:70px;"
+        class="forgot-logo-secondary"
       >
     </div>
 
     <div class="login-title animate__animated animate__fadeInDown">
-      <span class="badge bg-success bg-opacity-10 text-success px-3 py-2 rounded-pill">
-        <i class="bi bi-shield-lock me-2"></i>Recuperación de Acceso
-      </span>
+      Recuperación de acceso
     </div>
 
-    <div class="card card-login shadow-lg animate__animated animate__fadeInUp">
-      <div class="card-header bg-gradient">
-        <h5 class="mb-0 text-white d-flex align-items-center">
-          <i class="bi bi-envelope-paper fs-4 me-2"></i>
-          <span>Restablecer contraseña</span>
+    <div class="card card-login forgot-card shadow-lg animate__animated animate__fadeInUp">
+      <div class="card-header forgot-card-header">
+        <h5 class="mb-0 text-white">
+          <i class="bi bi-envelope-lock me-2"></i>Restablecer contraseña
         </h5>
       </div>
 
-      <div class="card-body p-4">
+      <div class="card-body p-4 p-md-4">
         <?php if (!empty($message)): ?>
-          <div class="alert alert-success border-0 bg-success-subtle text-success d-flex align-items-center" role="alert">
-            <i class="bi bi-check-circle-fill fs-5 me-2"></i>
-            <div><?= htmlspecialchars($message, ENT_QUOTES, 'UTF-8') ?></div>
+          <div class="alert alert-success py-2 mb-3" role="alert">
+            <i class="bi bi-check-circle me-1"></i>
+            <?= htmlspecialchars((string)$message, ENT_QUOTES, 'UTF-8') ?>
           </div>
         <?php endif; ?>
 
         <?php if (!empty($error)): ?>
-          <div class="alert alert-danger border-0 bg-danger-subtle text-danger d-flex align-items-center" role="alert">
-            <i class="bi bi-exclamation-triangle-fill fs-5 me-2"></i>
-            <div><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div>
+          <div class="alert alert-danger py-2 mb-3" role="alert">
+            <i class="bi bi-exclamation-triangle me-1"></i>
+            <?= htmlspecialchars((string)$error, ENT_QUOTES, 'UTF-8') ?>
           </div>
         <?php endif; ?>
 
-        <!-- Instrucciones -->
-        <div class="instruction-box mb-4 p-3 bg-light rounded-3">
-          <p class="mb-2 text-secondary">
-            <i class="bi bi-info-circle-fill text-success me-2"></i>
-            Te enviaremos un enlace seguro a tu correo para restablecer tu contraseña.
-          </p>
-          <div class="progress" style="height: 2px;">
-            <div class="progress-bar bg-success" style="width: 0%" id="progressBar"></div>
+        <div class="forgot-info-box mb-4">
+          <div class="d-flex align-items-start">
+            <i class="bi bi-info-circle-fill forgot-info-icon me-2"></i>
+            <div>
+              <div class="forgot-info-title">Recuperación segura</div>
+              <div class="forgot-info-text">
+                Ingresa tu correo electrónico y te enviaremos un enlace seguro para restablecer tu contraseña.
+              </div>
+            </div>
           </div>
         </div>
 
@@ -69,55 +66,64 @@ $year = date('Y');
             value="<?= htmlspecialchars(Csrf::token(), ENT_QUOTES, 'UTF-8') ?>"
           >
 
-          <!-- Campo de email con diseño mejorado -->
-          <div class="mb-4 input-group-floating">
-            <div class="form-floating">
+          <div class="mb-3">
+            <label for="email" class="form-label">Correo electrónico</label>
+            <div class="input-group input-group-lg">
+              <span class="input-group-text forgot-input-icon">
+                <i class="bi bi-envelope"></i>
+              </span>
               <input
                 id="email"
                 name="email"
                 type="email"
-                class="form-control form-control-lg border-0 border-bottom rounded-0 px-0"
-                placeholder="nombre@ejemplo.com"
+                class="form-control"
+                placeholder="usuario@dominio.com"
                 required
                 autocomplete="email"
-                value="<?= htmlspecialchars($_POST['email'] ?? '', ENT_QUOTES, 'UTF-8') ?>"
+                value="<?= $emailValue ?>"
               >
-              <label for="email" class="px-0 text-secondary">
-                <i class="bi bi-envelope me-2"></i>Correo electrónico
-              </label>
+              <div class="invalid-feedback">
+                Por favor ingresa un correo electrónico válido.
+              </div>
             </div>
-            <div class="invalid-feedback">Por favor ingresa un correo válido.</div>
           </div>
 
-          <!-- Botón con efecto -->
-          <div class="d-grid gap-3">
-            <button type="submit" class="btn btn-success btn-lg position-relative overflow-hidden" id="submitBtn">
-              <span class="btn-text">
+          <div class="d-grid gap-2 mt-4">
+            <button type="submit" class="btn btn-brand forgot-submit-btn" id="submitBtn">
+              <span class="btn-label">
                 <i class="bi bi-send-check me-2"></i>Enviar enlace de recuperación
               </span>
-              <span class="spinner-border spinner-border-sm d-none" role="status" id="spinner"></span>
+              <span class="spinner-border spinner-border-sm ms-2 d-none" id="submitSpinner" role="status" aria-hidden="true"></span>
             </button>
 
-            <a href="<?= htmlspecialchars(url('/login'), ENT_QUOTES, 'UTF-8') ?>" class="btn btn-outline-secondary">
+            <a
+              href="<?= htmlspecialchars(url('/login'), ENT_QUOTES, 'UTF-8') ?>"
+              class="btn btn-outline-secondary forgot-back-btn"
+            >
               <i class="bi bi-arrow-left me-2"></i>Volver al inicio de sesión
             </a>
           </div>
         </form>
 
-        <!-- Características de seguridad -->
-        <div class="security-features mt-4 pt-3 border-top">
-          <div class="row g-2 text-center text-secondary small">
+        <div class="forgot-security mt-4 pt-3">
+          <div class="row g-3 text-center">
             <div class="col-4">
-              <i class="bi bi-shield-check text-success d-block fs-4 mb-1"></i>
-              <span>Enlace seguro</span>
+              <div class="forgot-security-item">
+                <i class="bi bi-shield-check forgot-security-icon"></i>
+                <small>Enlace seguro</small>
+              </div>
             </div>
             <div class="col-4">
-              <i class="bi bi-clock-history text-success d-block fs-4 mb-1"></i>
-              <span>Válido 30 min</span>
+              <div class="forgot-security-item">
+                <i class="bi bi-clock-history forgot-security-icon"></i>
+                <small>Válido 30 min</small>
+              </div>
             </div>
             <div class="col-4">
-              <i class="bi bi-incognito text-success d-block fs-4 mb-1"></i>
-              <span>Confidencial</span>
+              <div class="forgot-security-item">
+                <i class="bi bi-incognito forgot-security-icon"></i>
+                <small>Confidencial</small>
+              </div>
             </div>
           </div>
         </div>
@@ -125,167 +131,204 @@ $year = date('Y');
     </div>
 
     <div class="login-footer animate__animated animate__fadeInUp">
-      <small class="text-muted">
-        © <?= (int)$year ?> ICBF • IQ Outsourcing • 
-        <a href="#" class="text-decoration-none text-success">Términos</a> • 
-        <a href="#" class="text-decoration-none text-success">Privacidad</a>
-      </small>
+      <small>© <?= (int)$year ?> ICBF • IQ Outsourcing</small>
     </div>
 
   </div>
 </div>
 
-<!-- Scripts para mejoras visuales -->
 <script>
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', function () {
   const form = document.getElementById('forgotForm');
+  const email = document.getElementById('email');
   const submitBtn = document.getElementById('submitBtn');
-  const spinner = document.getElementById('spinner');
-  const emailInput = document.getElementById('email');
-  const progressBar = document.getElementById('progressBar');
-  const btnText = submitBtn?.querySelector('.btn-text');
+  const submitSpinner = document.getElementById('submitSpinner');
+  const btnLabel = submitBtn ? submitBtn.querySelector('.btn-label') : null;
 
-  // Simular progreso cuando se escribe
-  emailInput?.addEventListener('input', function() {
-    const length = this.value.length;
-    if (length > 0) {
-      progressBar.style.width = Math.min(length * 2, 100) + '%';
-    } else {
-      progressBar.style.width = '0%';
-    }
-  });
-
-  // Validación en tiempo real
-  emailInput?.addEventListener('blur', function() {
-    if (this.value && !this.validity.valid) {
-      this.classList.add('is-invalid');
-    } else {
-      this.classList.remove('is-invalid');
-    }
-  });
-
-  // Submit con efecto de carga
-  form?.addEventListener('submit', function(e) {
-    if (!form.checkValidity()) {
-      e.preventDefault();
-      e.stopPropagation();
-      form.classList.add('was-validated');
-      
-      // SweetAlert para errores de validación
-      if (window.Swal) {
-        Swal.fire({
-          icon: 'warning',
-          title: 'Campo requerido',
-          text: 'Por favor ingresa un correo electrónico válido.',
-          confirmButtonColor: '#4CAF50',
-          timer: 3000,
-          timerProgressBar: true
-        });
+  if (email) {
+    email.addEventListener('input', function () {
+      if (email.classList.contains('is-invalid') && email.checkValidity()) {
+        email.classList.remove('is-invalid');
       }
-      return;
-    }
-
-    if (submitBtn && spinner && btnText) {
-      btnText.style.opacity = '0.5';
-      spinner.classList.remove('d-none');
-      submitBtn.disabled = true;
-      
-      // Efecto de progreso
-      let width = 0;
-      const interval = setInterval(() => {
-        if (width >= 90) clearInterval(interval);
-        progressBar.style.width = Math.min(width, 90) + '%';
-        width += 10;
-      }, 100);
-    }
-  });
-
-  // Tooltips para características de seguridad
-  const securityIcons = document.querySelectorAll('.security-features .col-4');
-  securityIcons.forEach(icon => {
-    icon.addEventListener('mouseenter', function() {
-      this.classList.add('text-success');
     });
-    icon.addEventListener('mouseleave', function() {
-      this.classList.remove('text-success');
+
+    email.addEventListener('blur', function () {
+      if (email.value.trim() !== '' && !email.checkValidity()) {
+        email.classList.add('is-invalid');
+      } else {
+        email.classList.remove('is-invalid');
+      }
     });
-  });
+  }
+
+  if (form) {
+    form.addEventListener('submit', function (e) {
+      if (!form.checkValidity()) {
+        e.preventDefault();
+        e.stopPropagation();
+        form.classList.add('was-validated');
+        if (email && !email.checkValidity()) {
+          email.classList.add('is-invalid');
+        }
+        return;
+      }
+
+      if (submitBtn && submitSpinner && btnLabel) {
+        submitBtn.disabled = true;
+        submitSpinner.classList.remove('d-none');
+        btnLabel.style.opacity = '0.85';
+      }
+    });
+  }
 });
 </script>
 
-<!-- Estilos adicionales -->
 <style>
-.input-group-floating .form-floating > .form-control:focus ~ label,
-.input-group-floating .form-floating > .form-control:not(:placeholder-shown) ~ label {
-  color: #4CAF50 !important;
-  opacity: 0.8;
-  transform: scale(0.85) translateY(-0.75rem) translateX(0.15rem);
+.forgot-wrap {
+  min-height: calc(100vh - 80px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
 }
 
-.input-group-floating .form-floating > .form-control:focus {
-  border-bottom-color: #4CAF50 !important;
-  box-shadow: none !important;
+.forgot-col {
+  width: 100%;
+  max-width: 540px;
+  margin: 0 auto;
 }
 
-.instruction-box {
-  border-left: 4px solid #4CAF50;
-  animation: slideIn 0.5s ease-out;
+.forgot-logos {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  margin-bottom: 18px;
 }
 
-@keyframes slideIn {
-  from {
-    opacity: 0;
-    transform: translateX(-10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
+.forgot-logo-main {
+  display: block;
+  width: auto;
+  max-width: 220px;
+  max-height: 130px;
+  object-fit: contain;
 }
 
-.logo-hover {
-  transition: transform 0.3s ease;
+.forgot-logo-secondary {
+  display: block;
+  width: auto;
+  max-width: 120px;
+  max-height: 60px;
+  object-fit: contain;
 }
 
-.logo-hover:hover {
-  transform: scale(1.05);
-}
-
-.btn-success {
-  background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
-  border: none;
-  transition: all 0.3s ease;
-}
-
-.btn-success:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 20px rgba(76, 175, 80, 0.3);
-}
-
-.btn-success:active {
-  transform: translateY(0);
-}
-
-.progress {
-  background-color: #e9ecef;
-  border-radius: 2px;
+.forgot-card {
+  border: 0;
+  border-radius: 18px;
   overflow: hidden;
 }
 
-.progress-bar {
-  transition: width 0.3s ease;
+.forgot-card-header {
+  background: linear-gradient(135deg, #4CAF50 0%, #3f9644 100%);
+  border-bottom: 0;
 }
 
-.security-features .col-4 {
-  transition: all 0.3s ease;
-  cursor: default;
+.forgot-info-box {
+  background: #f8fafc;
+  border: 1px solid #e9ecef;
+  border-left: 4px solid #4CAF50;
+  border-radius: 12px;
+  padding: 14px 16px;
 }
 
-.security-features .col-4:hover {
-  transform: translateY(-3px);
+.forgot-info-icon {
+  color: #4CAF50;
+  font-size: 1rem;
+  margin-top: 2px;
 }
 
-.bg-gradient {
-  background: linear-gradient(135deg, #4CAF50 0%, #3d8b40 100%);
+.forgot-info-title {
+  font-weight: 600;
+  color: #1f2937;
+  margin-bottom: 2px;
+}
+
+.forgot-info-text {
+  color: #6b7280;
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+.forgot-input-icon {
+  background: #fff;
+  border-right: 0;
+}
+
+.input-group .form-control {
+  border-left: 0;
+}
+
+.input-group .form-control:focus {
+  box-shadow: none;
+}
+
+.input-group:focus-within {
+  border-radius: 0.5rem;
+}
+
+.forgot-submit-btn {
+  min-height: 48px;
+  font-weight: 600;
+}
+
+.forgot-back-btn {
+  min-height: 46px;
+}
+
+.forgot-security {
+  border-top: 1px solid #e9ecef;
+}
+
+.forgot-security-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  color: #6c757d;
+  gap: 6px;
+}
+
+.forgot-security-icon {
+  color: #4CAF50;
+  font-size: 1.3rem;
+}
+
+@media (max-width: 576px) {
+  .forgot-wrap {
+    padding: 20px 12px;
+    min-height: auto;
+  }
+
+  .forgot-logos {
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .forgot-logo-main {
+    max-width: 170px;
+    max-height: 95px;
+  }
+
+  .forgot-logo-secondary {
+    max-width: 90px;
+    max-height: 48px;
+  }
+
+  .forgot-col {
+    max-width: 100%;
+  }
+
+  .forgot-security small {
+    font-size: 0.72rem;
+  }
 }
 </style>
