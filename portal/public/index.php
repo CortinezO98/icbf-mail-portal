@@ -75,6 +75,30 @@ try {
         (new \App\Controllers\AuthController($pdo, $config))->logout();
         exit;
     }
+     // Mostrar formulario para solicitar recuperación
+    if ($path === '/forgot-password' && $method === 'GET') {
+        (new \App\Controllers\AuthController($pdo, $config))->showForgotPassword();
+        exit;
+    }
+
+    // Procesar solicitud y enviar/generar token
+    if ($path === '/forgot-password' && $method === 'POST') {
+        (new \App\Controllers\AuthController($pdo, $config))->sendResetLink();
+        exit;
+    }
+
+    // Mostrar formulario para nueva contraseña desde token
+    if ($path === '/reset-password' && $method === 'GET') {
+        (new \App\Controllers\AuthController($pdo, $config))->showResetPassword();
+        exit;
+    }
+
+    // Procesar actualización de contraseña
+    if ($path === '/reset-password' && $method === 'POST') {
+        (new \App\Controllers\AuthController($pdo, $config))->resetPassword();
+        exit;
+    }
+
 
     // Cases
     if ($path === '/cases' && $method === 'GET') {

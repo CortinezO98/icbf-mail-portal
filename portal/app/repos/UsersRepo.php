@@ -32,6 +32,113 @@ final class UsersRepo
         return $row ?: null;
     }
 
+    public function findActiveByEmail(string $email): ?array
+    {
+        $sql = "
+            SELECT *
+            FROM users
+            WHERE email = :email
+              AND is_active = 1
+            LIMIT 1
+        ";
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute([
+            ':email' => trim($email),
+        ]);
+
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    }
+
+    public function storePasswordResetToken(
+        int $userId,
+        string $email,
+        string $tokenHash,
+        string $expiresAt
+    ): void {
+        $sql = "
+            INSERT INTO password_resets (
+                user_id,
+                email,
+                token_hash,
+                expires_at
+            )
+            VALUES (
+                :user_id,
+                :email,
+                :token_hash,
+                :expires_at
+            )
+        ";
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute([
+            ':user_id'    => $userId,
+            ':email'      => trim($email),
+            ':token_hash' => $tokenHash,
+            ':expires_at' => $expiresAt,
+        ]);
+    }
+
+    public function findValidPasswordResetByTokenHash(string $tokenHash): ?array
+    {
+        $sql = "
+            SELECT
+                pr.*,
+                u.id AS user_id_ref,
+                u.email AS user_email
+            FROM password_resets pr
+            INNER JOIN users u
+                ON u.id = pr.user_id
+            WHERE pr.token_hash = :token_hash
+              AND pr.used_at IS NULL
+              AND pr.expires_at >= NOW(6)
+              AND u.is_active = 1
+            LIMIT 1
+        ";
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute([
+            ':token_hash' => $tokenHash,
+        ]);
+
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    }
+
+    public function updatePasswordHash(int $userId, string $passwordHash): void
+    {
+        $sql = "
+            UPDATE users
+            SET password_hash = :password_hash,
+                updated_at = NOW(6)
+            WHERE id = :id
+            LIMIT 1
+        ";
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute([
+            ':password_hash' => $passwordHash,
+            ':id'            => $userId,
+        ]);
+    }
+
+    public function markPasswordResetUsed(int $resetId): void
+    {
+        $sql = "
+            UPDATE password_resets
+            SET used_at = NOW(6)
+            WHERE id = :id
+            LIMIT 1
+        ";
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute([
+            ':id' => $resetId,
+        ]);
+    }
+
     public function rolesForUser(int $userId): array
     {
         $sql = "
