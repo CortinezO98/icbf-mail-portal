@@ -12,6 +12,7 @@ use App\Auth\Auth;
 use App\Auth\Csrf;
 
 use function App\Config\url;
+use function App\Config\public_url;
 
 final class AuthController
 {
@@ -159,10 +160,10 @@ final class AuthController
                 (int)$user['id'],
                 (string)$user['email'],
                 true,
-                ['expires_in' => '30 minutes', 'token_preview' => substr($plainToken, 0, 8) . '...']
+                ['expires_in' => '30 minutes']
             );
 
-            $resetUrl = url('/reset-password?token=' . urlencode($plainToken));
+            $resetUrl = public_url('/reset-password?token=' . urlencode($plainToken));
 
             $this->sendPasswordResetEmail(
                 (string)$user['email'],
