@@ -5,34 +5,34 @@ use function App\Config\url;
 $year = date('Y');
 $emailValue = htmlspecialchars((string)($_POST['email'] ?? ''), ENT_QUOTES, 'UTF-8');
 ?>
-<div class="login-wrap forgot-wrap">
-  <div class="login-col forgot-col">
+<div class="login-wrap">
+  <div class="login-col">
 
-    <div class="login-logos forgot-logos animate__animated animate__fadeInDown">
+    <!-- LOGOS -->
+    <div class="login-logos animate__animated animate__fadeInDown">
       <img
         src="<?= htmlspecialchars(url('/assets/img/logo_icbf.png'), ENT_QUOTES, 'UTF-8') ?>"
         alt="Logo ICBF"
-        class="forgot-logo-main"
+        class="img-fluid"
       >
       <img
         src="<?= htmlspecialchars(url('/assets/img/logo_iq.png'), ENT_QUOTES, 'UTF-8') ?>"
         alt="Logo IQ Outsourcing"
-        class="forgot-logo-secondary"
+        class="img-fluid"
+        style="max-height:70px;"
       >
     </div>
 
-    <div class="login-title animate__animated animate__fadeInDown">
-      Recuperación de acceso
-    </div>
-
-    <div class="card card-login forgot-card shadow-lg animate__animated animate__fadeInUp">
-      <div class="card-header forgot-card-header">
+    <!-- TARJETA PRINCIPAL (IDÉNTICA AL LOGIN) -->
+    <div class="card card-login shadow-lg animate__animated animate__fadeInUp">
+      <div class="card-header">
         <h5 class="mb-0 text-white">
-          <i class="bi bi-envelope-lock me-2"></i>Restablecer contraseña
+          <i class="bi bi-envelope-lock me-2"></i>Recuperación de acceso
         </h5>
       </div>
 
-      <div class="card-body p-4 p-md-4">
+      <div class="card-body">
+        <!-- ALERTAS -->
         <?php if (!empty($message)): ?>
           <div class="alert alert-success py-2 mb-3" role="alert">
             <i class="bi bi-check-circle me-1"></i>
@@ -47,18 +47,13 @@ $emailValue = htmlspecialchars((string)($_POST['email'] ?? ''), ENT_QUOTES, 'UTF
           </div>
         <?php endif; ?>
 
-        <div class="forgot-info-box mb-4">
-          <div class="d-flex align-items-start">
-            <i class="bi bi-info-circle-fill forgot-info-icon me-2"></i>
-            <div>
-              <div class="forgot-info-title">Recuperación segura</div>
-              <div class="forgot-info-text">
-                Ingresa tu correo electrónico y te enviaremos un enlace seguro para restablecer tu contraseña.
-              </div>
-            </div>
-          </div>
+        <!-- TEXTO INFORMATIVO (ESTILO CONSISTENTE) -->
+        <div class="text-muted small mb-4 text-center">
+          <i class="bi bi-info-circle me-1"></i>
+          Te enviaremos un enlace seguro a tu correo para restablecer tu contraseña.
         </div>
 
+        <!-- FORMULARIO -->
         <form method="post" action="<?= htmlspecialchars(url('/forgot-password'), ENT_QUOTES, 'UTF-8') ?>" id="forgotForm" novalidate>
           <input
             type="hidden"
@@ -66,77 +61,72 @@ $emailValue = htmlspecialchars((string)($_POST['email'] ?? ''), ENT_QUOTES, 'UTF
             value="<?= htmlspecialchars(Csrf::token(), ENT_QUOTES, 'UTF-8') ?>"
           >
 
+          <!-- CAMPO DE EMAIL (IGUAL AL LOGIN) -->
           <div class="mb-3">
             <label for="email" class="form-label">Correo electrónico</label>
-            <div class="input-group input-group-lg">
-              <span class="input-group-text forgot-input-icon">
-                <i class="bi bi-envelope"></i>
-              </span>
-              <input
-                id="email"
-                name="email"
-                type="email"
-                class="form-control"
-                placeholder="usuario@dominio.com"
-                required
-                autocomplete="email"
-                value="<?= $emailValue ?>"
-              >
-              <div class="invalid-feedback">
-                Por favor ingresa un correo electrónico válido.
-              </div>
+            <input
+              id="email"
+              name="email"
+              type="email"
+              class="form-control"
+              placeholder="usuario@dominio.com"
+              required
+              autocomplete="email"
+              value="<?= $emailValue ?>"
+            >
+            <div class="invalid-feedback">
+              Por favor ingresa un correo electrónico válido.
             </div>
           </div>
 
-          <div class="d-grid gap-2 mt-4">
-            <button type="submit" class="btn btn-brand forgot-submit-btn" id="submitBtn">
+          <!-- BOTÓN PRINCIPAL (IGUAL AL LOGIN) -->
+          <div class="d-grid">
+            <button type="submit" class="btn btn-brand" id="submitBtn">
               <span class="btn-label">
-                <i class="bi bi-send-check me-2"></i>Enviar enlace de recuperación
+                <i class="bi bi-send-check me-1"></i>Enviar enlace de recuperación
               </span>
-              <span class="spinner-border spinner-border-sm ms-2 d-none" id="submitSpinner" role="status" aria-hidden="true"></span>
+              <span class="spinner-border spinner-border-sm ms-2 d-none" id="submitSpinner" role="status"></span>
             </button>
+          </div>
 
+          <!-- ENLACE VOLVER (IGUAL AL LOGIN) -->
+          <div class="text-center mt-3">
             <a
               href="<?= htmlspecialchars(url('/login'), ENT_QUOTES, 'UTF-8') ?>"
-              class="btn btn-outline-secondary forgot-back-btn"
+              class="link-success text-decoration-none fw-semibold"
             >
-              <i class="bi bi-arrow-left me-2"></i>Volver al inicio de sesión
+              <i class="bi bi-arrow-left me-1"></i>Volver al inicio de sesión
             </a>
           </div>
         </form>
 
-        <div class="forgot-security mt-4 pt-3">
-          <div class="row g-3 text-center">
-            <div class="col-4">
-              <div class="forgot-security-item">
-                <i class="bi bi-shield-check forgot-security-icon"></i>
-                <small>Enlace seguro</small>
-              </div>
-            </div>
-            <div class="col-4">
-              <div class="forgot-security-item">
-                <i class="bi bi-clock-history forgot-security-icon"></i>
-                <small>Válido 30 min</small>
-              </div>
-            </div>
-            <div class="col-4">
-              <div class="forgot-security-item">
-                <i class="bi bi-incognito forgot-security-icon"></i>
-                <small>Confidencial</small>
-              </div>
-            </div>
+        <!-- CARACTERÍSTICAS DE SEGURIDAD (ESTILO SUTIL) -->
+        <div class="d-flex justify-content-center gap-4 mt-4 pt-2 small text-muted">
+          <div class="text-center">
+            <i class="bi bi-shield-check d-block fs-5 text-success mb-1"></i>
+            <span>Enlace seguro</span>
+          </div>
+          <div class="text-center">
+            <i class="bi bi-clock-history d-block fs-5 text-success mb-1"></i>
+            <span>Válido 30 min</span>
+          </div>
+          <div class="text-center">
+            <i class="bi bi-incognito d-block fs-5 text-success mb-1"></i>
+            <span>Confidencial</span>
           </div>
         </div>
       </div>
     </div>
 
-    <div class="login-footer animate__animated animate__fadeInUp">
+    <!-- FOOTER CENTRADO (EXACTAMENTE COMO EL LOGIN) -->
+    <div class="login-footer text-center">
       <small>© <?= (int)$year ?> ICBF • IQ Outsourcing</small>
     </div>
 
   </div>
 </div>
 
+<!-- SCRIPT PARA VALIDACIÓN Y EFECTOS -->
 <script>
 document.addEventListener('DOMContentLoaded', function () {
   const form = document.getElementById('forgotForm');
@@ -145,190 +135,127 @@ document.addEventListener('DOMContentLoaded', function () {
   const submitSpinner = document.getElementById('submitSpinner');
   const btnLabel = submitBtn ? submitBtn.querySelector('.btn-label') : null;
 
+  // Validación en tiempo real
   if (email) {
     email.addEventListener('input', function () {
-      if (email.classList.contains('is-invalid') && email.checkValidity()) {
-        email.classList.remove('is-invalid');
+      if (this.classList.contains('is-invalid') && this.checkValidity()) {
+        this.classList.remove('is-invalid');
       }
     });
 
     email.addEventListener('blur', function () {
-      if (email.value.trim() !== '' && !email.checkValidity()) {
-        email.classList.add('is-invalid');
+      if (this.value.trim() !== '' && !this.checkValidity()) {
+        this.classList.add('is-invalid');
       } else {
-        email.classList.remove('is-invalid');
+        this.classList.remove('is-invalid');
       }
     });
   }
 
+  // Submit del formulario
   if (form) {
     form.addEventListener('submit', function (e) {
       if (!form.checkValidity()) {
         e.preventDefault();
         e.stopPropagation();
         form.classList.add('was-validated');
+        
         if (email && !email.checkValidity()) {
           email.classList.add('is-invalid');
         }
+        
         return;
       }
 
+      // Efecto de carga
       if (submitBtn && submitSpinner && btnLabel) {
         submitBtn.disabled = true;
         submitSpinner.classList.remove('d-none');
-        btnLabel.style.opacity = '0.85';
+        btnLabel.style.opacity = '0.8';
       }
     });
   }
+
+  // Limpiar estado si la página se recarga
+  window.addEventListener('pageshow', function() {
+    if (submitBtn && submitSpinner && btnLabel) {
+      submitBtn.disabled = false;
+      submitSpinner.classList.add('d-none');
+      btnLabel.style.opacity = '1';
+    }
+  });
 });
 </script>
 
+<!-- ESTILOS ADICIONALES PARA MANTENER CONSISTENCIA -->
 <style>
-.forgot-wrap {
-  min-height: calc(100vh - 80px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 32px 16px;
-}
-
-.forgot-col {
-  width: 100%;
-  max-width: 540px;
-  margin: 0 auto;
-}
-
-.forgot-logos {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 18px;
-  margin-bottom: 18px;
-}
-
-.forgot-logo-main {
-  display: block;
-  width: auto;
-  max-width: 220px;
-  max-height: 130px;
-  object-fit: contain;
-}
-
-.forgot-logo-secondary {
-  display: block;
-  width: auto;
-  max-width: 120px;
-  max-height: 60px;
-  object-fit: contain;
-}
-
-.forgot-card {
+/* Mantener exactamente los mismos estilos del login */
+.card-login {
   border: 0;
+  background: var(--bg-soft, #f6f8fb);
   border-radius: 18px;
   overflow: hidden;
 }
 
-.forgot-card-header {
-  background: linear-gradient(135deg, #4CAF50 0%, #3f9644 100%);
+.card-login .card-header {
+  background: var(--color-primary, #4CAF50);
+  color: #fff;
+  text-align: center;
   border-bottom: 0;
-}
-
-.forgot-info-box {
-  background: #f8fafc;
-  border: 1px solid #e9ecef;
-  border-left: 4px solid #4CAF50;
-  border-radius: 12px;
   padding: 14px 16px;
 }
 
-.forgot-info-icon {
-  color: #4CAF50;
-  font-size: 1rem;
-  margin-top: 2px;
+.card-login .card-body {
+  padding: 22px;
 }
 
-.forgot-info-title {
-  font-weight: 600;
-  color: #1f2937;
-  margin-bottom: 2px;
-}
-
-.forgot-info-text {
-  color: #6b7280;
-  font-size: 0.95rem;
-  line-height: 1.45;
-}
-
-.forgot-input-icon {
-  background: #fff;
-  border-right: 0;
-}
-
-.input-group .form-control {
-  border-left: 0;
-}
-
-.input-group .form-control:focus {
-  box-shadow: none;
-}
-
-.input-group:focus-within {
-  border-radius: 0.5rem;
-}
-
-.forgot-submit-btn {
-  min-height: 48px;
+.form-label {
   font-weight: 600;
 }
 
-.forgot-back-btn {
-  min-height: 46px;
+.btn-brand {
+  --bs-btn-color: #fff;
+  --bs-btn-bg: var(--color-primary, #4CAF50);
+  --bs-btn-border-color: var(--color-primary, #4CAF50);
+  --bs-btn-hover-color: #fff;
+  --bs-btn-hover-bg: var(--color-primary-dark, #3f9c44);
+  --bs-btn-hover-border-color: var(--color-primary-dark, #3f9c44);
 }
 
-.forgot-security {
-  border-top: 1px solid #e9ecef;
-}
-
-.forgot-security-item {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
+.login-footer {
+  text-align: center;
+  margin-top: 12px;
   color: #6c757d;
-  gap: 6px;
+  font-size: 12px;
 }
 
-.forgot-security-icon {
-  color: #4CAF50;
-  font-size: 1.3rem;
+/* Asegurar que el footer esté centrado */
+.login-footer small {
+  display: block;
+  text-align: center;
 }
 
+/* Estilos para las características de seguridad */
+.gap-4 {
+  gap: 1.5rem;
+}
+
+.text-muted i {
+  transition: transform 0.2s ease;
+}
+
+.text-muted i:hover {
+  transform: translateY(-2px);
+}
+
+/* Responsive */
 @media (max-width: 576px) {
-  .forgot-wrap {
-    padding: 20px 12px;
-    min-height: auto;
+  .card-login .card-body {
+    padding: 18px;
   }
-
-  .forgot-logos {
-    gap: 12px;
-    margin-bottom: 14px;
-  }
-
-  .forgot-logo-main {
-    max-width: 170px;
-    max-height: 95px;
-  }
-
-  .forgot-logo-secondary {
-    max-width: 90px;
-    max-height: 48px;
-  }
-
-  .forgot-col {
-    max-width: 100%;
-  }
-
-  .forgot-security small {
-    font-size: 0.72rem;
+  
+  .gap-4 {
+    gap: 1rem;
   }
 }
 </style>
