@@ -8,7 +8,13 @@ use function App\Config\url;
 require_once __DIR__ . '/_helpers.php';
 
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
-$isLogin = str_ends_with($path, '/login') || $path === '/login';
+$authPaths = [
+    '/login',
+    '/forgot-password',
+    '/reset-password',
+];
+
+$isAuthPage = in_array($path, $authPaths, true);
 
 $normRole = static fn(string $r): string => strtoupper(trim($r));
 
@@ -126,8 +132,8 @@ $enableSemaforoRoutes = false;
     </style>
 </head>
 
-<body class="bg-light <?= $isLogin ? 'page-login' : 'page-app' ?>">
-<?php if (!$isLogin): ?>
+<body class="bg-light <?= $isAuthPage ? 'page-login' : 'page-app' ?>">
+<?php if (!$isAuthPage): ?>
     <nav class="navbar navbar-expand-lg navbar-dark"
          style="background-color: var(--color-primary);"
          aria-label="Navegación principal">
@@ -273,7 +279,7 @@ $enableSemaforoRoutes = false;
     </nav>
 <?php endif; ?>
 
-<main class="<?= $isLogin ? '' : 'container py-4 app-shell' ?>" role="main" id="mainContent">
+<main class="<?= $isAuthPage ? '' : 'container py-4 app-shell' ?>" role="main" id="mainContent">
     <?php include $viewPath; ?>
 </main>
 
