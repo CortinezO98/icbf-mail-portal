@@ -34,6 +34,7 @@ require_once __DIR__ . '/../app/controllers/DashboardController.php';
 require_once __DIR__ . '/../app/services/ReportExportService.php';
 require_once __DIR__ . '/../app/controllers/ReportsController.php';
 require_once __DIR__ . '/../app/controllers/UsersAdminController.php';
+require_once __DIR__ . '/../app/controllers/AgentAssignmentsController.php';
 
 require_once __DIR__ . '/../app/middleware/require_login.php';
 require_once __DIR__ . '/../app/middleware/require_role.php';
