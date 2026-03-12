@@ -652,4 +652,182 @@ final class CasesRepo
             throw $e;
         }
     }
+
+
+    public function listAssignedByAgent(int $agentId, string $q = '', int $page = 1, int $perPage = 20): array
+    {
+        $page = max(1, $page);
+        $perPage = max(1, min(100, $perPage));
+        $offset = ($page - 1) * $perPage;
+
+        $where = [
+            "c.assigned_user_id = :agent_id",
+            "cs.code = 'ASIGNADO'",
+            "cs.is_final = 0",
+        ];
+
+        $params = [
+            ':agent_id' => $agentId,
+        ];
+
+        $q = trim($q);
+        if ($q !== '') {
+            $where[] = "(
+                c.case_number LIKE :q_case_number
+                OR c.subject LIKE :q_subject
+                OR c.requester_name LIKE :q_requester_name
+                OR c.requester_email LIKE :q_requester_email
+                OR CONCAT('', c.id) LIKE :q_case_id
+            )";
+
+            $search = '%' . $q . '%';
+            $params[':q_case_number'] = $search;
+            $params[':q_subject'] = $search;
+            $params[':q_requester_name'] = $search;
+            $params[':q_requester_email'] = $search;
+            $params[':q_case_id'] = $search;
+        }
+
+        $whereClause = ' WHERE ' . implode(' AND ', $where);
+
+        $countSql = "
+            SELECT COUNT(*)
+            FROM cases c
+            JOIN case_statuses cs ON cs.id = c.status_id
+            {$whereClause}
+        ";
+
+        $stCount = $this->pdo->prepare($countSql);
+        foreach ($params as $key => $value) {
+            $stCount->bindValue($key, $value);
+        }
+        $stCount->execute();
+        $totalRows = (int)($stCount->fetchColumn() ?? 0);
+
+        $totalPages = max(1, (int)ceil($totalRows / $perPage));
+        if ($page > $totalPages) {
+            $page = $totalPages;
+            $offset = ($page - 1) * $perPage;
+        }
+
+        $sql = "
+            SELECT
+                c.id,
+                c.case_number,
+                c.subject,
+                c.requester_name,
+                c.requester_email,
+                c.received_at,
+                c.last_activity_at,
+                c.assigned_at,
+                c.status_id,
+                cs.code AS status_code,
+                cs.name AS status_name,
+                u.full_name AS assigned_user_name
+            FROM cases c
+            JOIN case_statuses cs ON cs.id = c.status_id
+            LEFT JOIN users u ON u.id = c.assigned_user_id
+            {$whereClause}
+            ORDER BY c.assigned_at DESC, c.last_activity_at DESC, c.id DESC
+            LIMIT :limit OFFSET :offset
+        ";
+
+        $st = $this->pdo->prepare($sql);
+        foreach ($params as $key => $value) {
+            $st->bindValue($key, $value);
+        }
+        $st->bindValue(':limit', $perPage, PDO::PARAM_INT);
+        $st->bindValue(':offset', $offset, PDO::PARAM_INT);
+        $st->execute();
+
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        return [
+            'data' => $rows,
+            'pagination' => [
+                'page' => $page,
+                'per_page' => $perPage,
+                'total_rows' => $totalRows,
+                'total_pages' => $totalPages,
+                'has_prev' => $page > 1,
+                'has_next' => $page < $totalPages,
+                'offset' => $offset,
+            ],
+            'summary' => [
+                'total_assigned' => $totalRows,
+            ],
+        ];
+    }
+
+    public function lockAssignedCasesForReassign(array $caseIds, int $sourceAgentId): array
+    {
+        $caseIds = array_values(array_unique(array_filter(array_map('intval', $caseIds), fn($v) => $v > 0)));
+        if (empty($caseIds)) {
+            return [];
+        }
+
+        $placeholders = [];
+        $params = [
+            ':source_agent_id' => $sourceAgentId,
+        ];
+
+        foreach ($caseIds as $index => $caseId) {
+            $ph = ':cid_' . $index;
+            $placeholders[] = $ph;
+            $params[$ph] = $caseId;
+        }
+
+        $sql = "
+            SELECT
+                c.id,
+                c.status_id,
+                c.assigned_user_id,
+                cs.code AS status_code,
+                cs.is_final
+            FROM cases c
+            JOIN case_statuses cs ON cs.id = c.status_id
+            WHERE c.assigned_user_id = :source_agent_id
+            AND cs.code = 'ASIGNADO'
+            AND cs.is_final = 0
+            AND c.id IN (" . implode(',', $placeholders) . ")
+            FOR UPDATE
+        ";
+
+        $st = $this->pdo->prepare($sql);
+        foreach ($params as $key => $value) {
+            $st->bindValue($key, $value, PDO::PARAM_INT);
+        }
+        $st->execute();
+
+        return $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    }
+
+    public function reassignAssignedCase(int $caseId, int $sourceAgentId, int $targetAgentId, int $statusAsignadoId): bool
+    {
+        $sql = "
+            UPDATE cases
+            SET
+                assigned_user_id = :target_agent_id,
+                status_id = :status_id,
+                assigned_at = NOW(6),
+                last_activity_at = NOW(6),
+                updated_at = NOW(6)
+            WHERE id = :case_id
+            AND assigned_user_id = :source_agent_id
+            AND status_id = :status_id
+            LIMIT 1
+        ";
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute([
+            ':target_agent_id' => $targetAgentId,
+            ':status_id' => $statusAsignadoId,
+            ':case_id' => $caseId,
+            ':source_agent_id' => $sourceAgentId,
+        ]);
+
+        return $st->rowCount() > 0;
+    }
+
+
 }
