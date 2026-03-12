@@ -165,6 +165,15 @@ $enableSemaforoRoutes = false;
                             Bandeja
                         </a>
                     </li>
+                    <?php if (Auth::hasRole('ADMIN') || Auth::hasRole('SUPERVISOR')): ?>
+                        <li class="nav-item">
+                            <a class="nav-link <?= is_active_prefix($path, '/cases/by-agent') ? 'active' : '' ?>"
+                            href="<?= esc(url('/cases/by-agent')) ?>">
+                                <i class="bi bi-people me-2"></i>
+                                Casos por agente
+                            </a>
+                        </li>
+                    <?php endif; ?>
 
                     <?php if ($roleIsSupervisor || $roleIsAgent): ?>
                         <li class="nav-item">

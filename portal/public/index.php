@@ -114,6 +114,23 @@ try {
         exit;
     }
 
+    // Vista de casos asignados por agente (Supervisor/Admin)
+    if ($path === '/cases/by-agent' && $method === 'GET') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
+        (new \App\Controllers\AgentAssignmentsController($pdo, $config))->index();
+        exit;
+    }
+
+    // Reasignación masiva desde la vista por agente (Supervisor/Admin)
+    if ($path === '/cases/by-agent/reassign' && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
+        (new \App\Controllers\AgentAssignmentsController($pdo, $config))->bulkReassign();
+        exit;
+    }
+
+
     // ============================================================
     // ✅ NUEVAS RUTAS: START / FINISH (métricas por estados)
     // ============================================================
