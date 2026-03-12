@@ -79,7 +79,7 @@ if (!function_exists('buildPaginationUrl')) {
     function buildPaginationUrl(int $page, ?string $status = null): string {
         return buildCasesUrl([
             'page' => $page > 1 ? $page : null,
-            'status' => $status ?: null,
+            'status' => $status === null ? 'ALL' : $status,
         ]);
     }
 }
