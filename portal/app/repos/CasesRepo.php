@@ -9,20 +9,22 @@ final class CasesRepo
 {
     public function __construct(private PDO $pdo) {}
 
-    public function listInbox(
-        ?string $statusCode,
-        ?int $assignedUserId,
-        string $q = '',
-        int $page = 1,
-        int $perPage = 20
-    ) {
+    public function listInbox(?string $statusCode, ?int $assignedUserId, mixed $arg3 = '', ?int $arg4 = null, ?int $arg5 = null)
+    {
         $numArgs = func_num_args();
 
-        // Compatibilidad con llamadas antiguas si aún existiera alguna
-        if ($numArgs <= 3 && is_int($q)) {
-            $limit = (int)$q;
+        // Firma vieja:
+        // listInbox($statusCode, $assignedUserId, $limit)
+        if ($numArgs === 3 && is_int($arg3)) {
+            $limit = max(1, min(500, (int)$arg3));
             return $this->listInboxLegacy($statusCode, $assignedUserId, '', $limit);
         }
+
+        // Firma nueva:
+        // listInbox($statusCode, $assignedUserId, $q, $page, $perPage)
+        $q = is_string($arg3) ? trim($arg3) : '';
+        $page = max(1, (int)($arg4 ?? 1));
+        $perPage = max(1, min(100, (int)($arg5 ?? 20)));
 
         return $this->listInboxPaginated($statusCode, $assignedUserId, $q, $page, $perPage);
     }
@@ -55,7 +57,7 @@ final class CasesRepo
                 OR c.subject LIKE :q
                 OR c.requester_name LIKE :q
                 OR c.requester_email LIKE :q
-                OR CAST(c.id AS CHAR) LIKE :q
+                OR CONCAT('', c.id) LIKE :q
             )";
             $params[':q'] = '%' . $q . '%';
         }
