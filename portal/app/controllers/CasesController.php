@@ -37,7 +37,11 @@ final class CasesController
     public function inbox(): void
     {
         $status = isset($_GET['status']) ? strtoupper(trim((string)$_GET['status'])) : null;
-        if ($status === '') $status = null;
+        if ($status === '') {
+            $status = null;
+        }
+
+        $q = trim((string)($_GET['q'] ?? ''));
 
         $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
         $perPage = isset($_GET['per_page']) ? max(1, min(100, (int)$_GET['per_page'])) : 20;
@@ -51,7 +55,7 @@ final class CasesController
             $status = 'NUEVO';
         }
 
-        $result = $this->casesRepo->listInbox($status, $assignedUserId, $page, $perPage);
+        $result = $this->casesRepo->listInbox($status, $assignedUserId, $q, $page, $perPage);
 
         if (isset($result['data']) && isset($result['pagination'])) {
             $cases = $result['data'];
@@ -81,6 +85,7 @@ final class CasesController
         $this->render('cases/inbox.php', [
             'cases' => $cases,
             'status' => $status,
+            'q' => $q,
             'unassignedCount' => $unassignedCount,
             'pagination' => $pagination,
             'flash' => $flash,
@@ -343,7 +348,6 @@ final class CasesController
         try {
             $fromStatusId = (int)($case['status_id'] ?? 0);
 
-            // Mantener tu comportamiento: en tu BD el code final es CERRADO
             $toStatusId = $this->casesRepo->close($caseId, (int)Auth::id(), $note, $ticket, 'CERRADO');
 
             $this->caseEventsRepo->addStatusChange(
@@ -404,7 +408,6 @@ final class CasesController
             $this->redirect('/cases');
         }
 
-        // AGENTE solo puede operar casos asignados a él
         if (Auth::hasRole('AGENTE') && !Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
             if ((int)($case['assigned_user_id'] ?? 0) !== (int)Auth::id()) {
                 http_response_code(403);

@@ -9,25 +9,65 @@ final class CasesRepo
 {
     public function __construct(private PDO $pdo) {}
 
-
-    public function listInbox(?string $statusCode, ?int $assignedUserId, int $page = 1, int $perPage = 20)
-    {
+    public function listInbox(
+        ?string $statusCode,
+        ?int $assignedUserId,
+        string $q = '',
+        int $page = 1,
+        int $perPage = 20
+    ) {
         $numArgs = func_num_args();
 
-        if ($numArgs <= 2) {
-            $limit = func_get_arg(2) ?? 200;
-            return $this->listInboxLegacy($statusCode, $assignedUserId, (int)$limit);
+        // Compatibilidad con llamadas antiguas si aún existiera alguna
+        if ($numArgs <= 3 && is_int($q)) {
+            $limit = (int)$q;
+            return $this->listInboxLegacy($statusCode, $assignedUserId, '', $limit);
         }
 
-        return $this->listInboxPaginated($statusCode, $assignedUserId, $page, $perPage);
+        return $this->listInboxPaginated($statusCode, $assignedUserId, $q, $page, $perPage);
     }
 
-    private function listInboxLegacy(?string $statusCode, ?int $assignedUserId, int $limit = 200): array
+    private function buildInboxFilters(?string $statusCode, ?int $assignedUserId, string $q = ''): array
+    {
+        $where = [];
+        $params = [];
+
+        $statusCode = strtoupper(trim((string)$statusCode));
+        $q = trim($q);
+
+        if ($statusCode !== '') {
+            if (in_array($statusCode, ['ESCALADO', 'ESCALATED'], true)) {
+                $where[] = "cs.code IN ('ESCALADO', 'ESCALATED')";
+            } else {
+                $where[] = "cs.code = :scode";
+                $params[':scode'] = $statusCode;
+            }
+        }
+
+        if ($assignedUserId !== null) {
+            $where[] = "c.assigned_user_id = :uid";
+            $params[':uid'] = $assignedUserId;
+        }
+
+        if ($q !== '') {
+            $where[] = "(
+                c.case_number LIKE :q
+                OR c.subject LIKE :q
+                OR c.requester_name LIKE :q
+                OR c.requester_email LIKE :q
+                OR CAST(c.id AS CHAR) LIKE :q
+            )";
+            $params[':q'] = '%' . $q . '%';
+        }
+
+        return [$where, $params];
+    }
+
+    private function listInboxLegacy(?string $statusCode, ?int $assignedUserId, string $q = '', int $limit = 200): array
     {
         $limit = max(1, min(500, $limit));
 
-        $where = [];
-        $params = [];
+        [$where, $params] = $this->buildInboxFilters($statusCode, $assignedUserId, $q);
 
         $sql = "SELECT
                     c.id, c.case_number, c.subject,
@@ -42,20 +82,12 @@ final class CasesRepo
                     DATE_SUB(c.last_activity_at, INTERVAL 5 HOUR) AS last_activity_at_bogota,
 
                     c.due_at, c.sla_state,
+                    c.assigned_user_id,
                     cs.code AS status_code, cs.name AS status_name,
                     u.full_name AS assigned_user_name
                 FROM cases c
                 JOIN case_statuses cs ON cs.id = c.status_id
                 LEFT JOIN users u ON u.id = c.assigned_user_id";
-
-        if ($statusCode) {
-            $where[] = "cs.code = :scode";
-            $params[':scode'] = $statusCode;
-        }
-        if ($assignedUserId !== null) {
-            $where[] = "c.assigned_user_id = :uid";
-            $params[':uid'] = $assignedUserId;
-        }
 
         if ($where) {
             $sql .= " WHERE " . implode(" AND ", $where);
@@ -72,14 +104,18 @@ final class CasesRepo
      * Versión nueva con paginación.
      * Devuelve ['data'=>..., 'pagination'=>...]
      */
-    private function listInboxPaginated(?string $statusCode, ?int $assignedUserId, int $page = 1, int $perPage = 20): array
-    {
+    private function listInboxPaginated(
+        ?string $statusCode,
+        ?int $assignedUserId,
+        string $q = '',
+        int $page = 1,
+        int $perPage = 20
+    ): array {
         $perPage = max(1, min(100, $perPage));
         $page = max(1, $page);
         $offset = ($page - 1) * $perPage;
 
-        $where = [];
-        $params = [];
+        [$where, $params] = $this->buildInboxFilters($statusCode, $assignedUserId, $q);
 
         $countSql = "SELECT COUNT(*) as total
                      FROM cases c
@@ -106,15 +142,6 @@ final class CasesRepo
                 JOIN case_statuses cs ON cs.id = c.status_id
                 LEFT JOIN users u ON u.id = c.assigned_user_id";
 
-        if ($statusCode) {
-            $where[] = "cs.code = :scode";
-            $params[':scode'] = $statusCode;
-        }
-        if ($assignedUserId !== null) {
-            $where[] = "c.assigned_user_id = :uid";
-            $params[':uid'] = $assignedUserId;
-        }
-
         $whereClause = $where ? " WHERE " . implode(" AND ", $where) : "";
 
         $countSql .= $whereClause;
@@ -123,7 +150,10 @@ final class CasesRepo
         $totalRows = (int)($stCount->fetchColumn() ?? 0);
 
         $totalPages = (int)ceil($totalRows / $perPage);
-        if ($totalPages < 1) $totalPages = 1;
+        if ($totalPages < 1) {
+            $totalPages = 1;
+        }
+
         if ($page > $totalPages) {
             $page = $totalPages;
             $offset = ($page - 1) * $perPage;
@@ -160,7 +190,7 @@ final class CasesRepo
 
     public function listInboxData(?string $statusCode, ?int $assignedUserId, int $limit = 200): array
     {
-        return $this->listInboxLegacy($statusCode, $assignedUserId, $limit);
+        return $this->listInboxLegacy($statusCode, $assignedUserId, '', $limit);
     }
 
     public function getInboxPagination(?string $statusCode, ?int $assignedUserId, int $page = 1, int $perPage = 20): array
@@ -169,22 +199,12 @@ final class CasesRepo
         $page = max(1, $page);
         $offset = ($page - 1) * $perPage;
 
-        $where = [];
-        $params = [];
+        [$where, $params] = $this->buildInboxFilters($statusCode, $assignedUserId, '');
 
         $countSql = "SELECT COUNT(*) as total
                      FROM cases c
                      JOIN case_statuses cs ON cs.id = c.status_id
                      LEFT JOIN users u ON u.id = c.assigned_user_id";
-
-        if ($statusCode) {
-            $where[] = "cs.code = :scode";
-            $params[':scode'] = $statusCode;
-        }
-        if ($assignedUserId !== null) {
-            $where[] = "c.assigned_user_id = :uid";
-            $params[':uid'] = $assignedUserId;
-        }
 
         $whereClause = $where ? " WHERE " . implode(" AND ", $where) : "";
 
@@ -194,7 +214,10 @@ final class CasesRepo
         $totalRows = (int)($stCount->fetchColumn() ?? 0);
 
         $totalPages = (int)ceil($totalRows / $perPage);
-        if ($totalPages < 1) $totalPages = 1;
+        if ($totalPages < 1) {
+            $totalPages = 1;
+        }
+
         if ($page > $totalPages) {
             $page = $totalPages;
             $offset = ($page - 1) * $perPage;
@@ -502,9 +525,15 @@ final class CasesRepo
             $row->execute([':id' => $caseId]);
             $c = $row->fetch(PDO::FETCH_ASSOC);
 
-            if (!$c) throw new \RuntimeException("Caso no existe");
-            if ((int)$c['assigned_user_id'] !== $actorUserId) throw new \RuntimeException("No eres el asignado");
-            if (($c['status_code'] ?? '') !== 'ASIGNADO') throw new \RuntimeException("El caso no está en ASIGNADO");
+            if (!$c) {
+                throw new \RuntimeException("Caso no existe");
+            }
+            if ((int)$c['assigned_user_id'] !== $actorUserId) {
+                throw new \RuntimeException("No eres el asignado");
+            }
+            if (($c['status_code'] ?? '') !== 'ASIGNADO') {
+                throw new \RuntimeException("El caso no está en ASIGNADO");
+            }
 
             $toStatusId = $this->requireStatusIdByCode('EN_PROCESO');
 
@@ -545,9 +574,15 @@ final class CasesRepo
             $row->execute([':id' => $caseId]);
             $c = $row->fetch(PDO::FETCH_ASSOC);
 
-            if (!$c) throw new \RuntimeException("Caso no existe");
-            if ((int)$c['assigned_user_id'] !== $actorUserId) throw new \RuntimeException("No eres el asignado");
-            if (($c['status_code'] ?? '') !== 'EN_PROCESO') throw new \RuntimeException("El caso no está en EN_PROCESO");
+            if (!$c) {
+                throw new \RuntimeException("Caso no existe");
+            }
+            if ((int)$c['assigned_user_id'] !== $actorUserId) {
+                throw new \RuntimeException("No eres el asignado");
+            }
+            if (($c['status_code'] ?? '') !== 'EN_PROCESO') {
+                throw new \RuntimeException("El caso no está en EN_PROCESO");
+            }
 
             $toStatusId = $this->requireStatusIdByCode('RESPONDIDO');
 
@@ -583,7 +618,6 @@ final class CasesRepo
                 throw new \RuntimeException("Solo se puede finalizar escalamiento cuando el caso está ESCALATED");
             }
 
-            // Regresa a EN_PROCESO (tu “volver atrás”)
             $toStatusId = $this->requireStatusIdByCode('EN_PROCESO');
 
             $st = $this->pdo->prepare("
