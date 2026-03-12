@@ -26,16 +26,19 @@ async def start_webhook_workers() -> None:
         logger.warning("Webhook queue already started")
         return
 
-    _webhook_queue = asyncio.Queue(maxsize=settings.WEBHOOK_QUEUE_MAXSIZE)
+    maxsize = int(getattr(settings, "WEBHOOK_QUEUE_MAXSIZE", 1000))
+    consumers = int(getattr(settings, "WEBHOOK_CONSUMERS", 2))
+
+    _webhook_queue = asyncio.Queue(maxsize=max(1, maxsize))
     _worker_tasks = [
-        asyncio.create_task(_webhook_consumer(i + 1), name=f"webhook_consumer_{i+1}")
-        for i in range(settings.WEBHOOK_CONSUMERS)
+        asyncio.create_task(_webhook_consumer(i + 1), name=f"webhook_consumer_{i + 1}")
+        for i in range(max(1, consumers))
     ]
 
     logger.warning(
         "Webhook queue started | consumers=%s | maxsize=%s",
-        settings.WEBHOOK_CONSUMERS,
-        settings.WEBHOOK_QUEUE_MAXSIZE,
+        consumers,
+        maxsize,
     )
 
 
@@ -59,9 +62,23 @@ async def _webhook_consumer(worker_no: int) -> None:
     while True:
         message_id = await _webhook_queue.get()
         try:
-            logger.info("WEBHOOK_PROCESS_START | worker=%s | message_id=%s", worker_no, message_id)
-            await sync_service.process_message_id_async(message_id, source="webhook")
-            logger.info("WEBHOOK_PROCESS_DONE | worker=%s | message_id=%s", worker_no, message_id)
+            logger.info(
+                "WEBHOOK_PROCESS_START | worker=%s | message_id=%s",
+                worker_no,
+                message_id,
+            )
+
+            await sync_service.process_message_id_async(
+                message_id,
+                source="webhook",
+            )
+
+            logger.info(
+                "WEBHOOK_PROCESS_DONE | worker=%s | message_id=%s",
+                worker_no,
+                message_id,
+            )
+
         except Exception as e:
             logger.exception(
                 "WEBHOOK_PROCESS_FAILED | worker=%s | message_id=%s | err=%s",
@@ -170,7 +187,10 @@ async def graph_webhook_post(request: Request) -> Response:
                     msg_id,
                 )
 
-
+            # Se conserva el procesamiento rápido en memoria.
+            # Aunque el evento ya exista o ya haya sido materializado,
+            # este camino en memoria ayuda a reaccionar rápido cuando el
+            # webhook es el primer canal en recibir el mensaje.
             if _webhook_queue is not None:
                 try:
                     _webhook_queue.put_nowait(msg_id)
@@ -186,7 +206,11 @@ async def graph_webhook_post(request: Request) -> Response:
                 )
 
         except Exception as e:
-            logger.exception("WEBHOOK_PERSIST_FAILED | message_id=%s | err=%s", msg_id, e)
+            logger.exception(
+                "WEBHOOK_PERSIST_FAILED | message_id=%s | err=%s",
+                msg_id,
+                e,
+            )
 
     logger.info(
         "Webhook processed notifications | persisted=%s | enqueued=%s | skipped=%s",

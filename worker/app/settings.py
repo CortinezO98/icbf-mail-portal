@@ -114,6 +114,7 @@ class Settings(BaseSettings):
     INBOUND_QUEUE_POLL_SECONDS: int = 2
     INBOUND_QUEUE_BATCH_SIZE: int = 20
     INBOUND_QUEUE_MAX_ATTEMPTS: int = 8
+    INBOUND_QUEUE_CONCURRENCY: int = 5
 
     # Reconcile
     RECONCILE_ENABLED: int = 1
