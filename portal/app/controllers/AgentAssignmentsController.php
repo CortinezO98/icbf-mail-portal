@@ -28,49 +28,63 @@ final class AgentAssignmentsController
 
     public function index(): void
     {
-        $sourceAgentId = isset($_GET['agent_id']) && $_GET['agent_id'] !== ''
-            ? (int)$_GET['agent_id']
-            : 0;
+        try {
+            $sourceAgentId = isset($_GET['agent_id']) && $_GET['agent_id'] !== ''
+                ? (int)$_GET['agent_id']
+                : 0;
 
-        $q = trim((string)($_GET['q'] ?? ''));
-        $page = max(1, (int)($_GET['page'] ?? 1));
-        $perPage = max(10, min(100, (int)($_GET['per_page'] ?? 20)));
+            $q = trim((string)($_GET['q'] ?? ''));
+            $page = max(1, (int)($_GET['page'] ?? 1));
+            $perPage = max(10, min(100, (int)($_GET['per_page'] ?? 20)));
 
-        $agents = $this->usersRepo->listAssignableAgents();
+            $agents = $this->usersRepo->listAssignableAgents();
 
-        $result = [
-            'data' => [],
-            'pagination' => [
-                'page' => 1,
-                'per_page' => $perPage,
-                'total_rows' => 0,
-                'total_pages' => 1,
-                'has_prev' => false,
-                'has_next' => false,
-                'offset' => 0,
-            ],
-            'summary' => [
-                'total_assigned' => 0,
-            ],
-        ];
+            $result = [
+                'data' => [],
+                'pagination' => [
+                    'page' => 1,
+                    'per_page' => $perPage,
+                    'total_rows' => 0,
+                    'total_pages' => 1,
+                    'has_prev' => false,
+                    'has_next' => false,
+                    'offset' => 0,
+                ],
+                'summary' => [
+                    'total_assigned' => 0,
+                ],
+            ];
 
-        if ($sourceAgentId > 0) {
-            $result = $this->casesRepo->listAssignedByAgent($sourceAgentId, $q, $page, $perPage);
+            if ($sourceAgentId > 0) {
+                $result = $this->casesRepo->listAssignedByAgent($sourceAgentId, $q, $page, $perPage);
+            }
+
+            $flash = $_SESSION['_flash'] ?? null;
+            unset($_SESSION['_flash']);
+
+            $this->render('cases/by_agent.php', [
+                'agents' => $agents,
+                'cases' => $result['data'] ?? [],
+                'pagination' => $result['pagination'] ?? [],
+                'summary' => $result['summary'] ?? ['total_assigned' => 0],
+                'selectedAgentId' => $sourceAgentId,
+                'q' => $q,
+                '_csrf' => Csrf::token(),
+                'flash' => $flash,
+            ]);
+        } catch (\Throwable $e) {
+            http_response_code(500);
+
+            echo '<h2>Error real en AgentAssignmentsController::index()</h2>';
+            echo '<pre style="white-space:pre-wrap; font-size:14px;">';
+            echo 'CLASE: ' . htmlspecialchars(get_class($e)) . "\n";
+            echo 'MENSAJE: ' . htmlspecialchars($e->getMessage()) . "\n";
+            echo 'ARCHIVO: ' . htmlspecialchars($e->getFile()) . "\n";
+            echo 'LINEA: ' . (int)$e->getLine() . "\n\n";
+            echo "TRACE:\n" . htmlspecialchars($e->getTraceAsString());
+            echo '</pre>';
+            exit;
         }
-
-        $flash = $_SESSION['_flash'] ?? null;
-        unset($_SESSION['_flash']);
-
-        $this->render('cases/by_agent.php', [
-            'agents' => $agents,
-            'cases' => $result['data'] ?? [],
-            'pagination' => $result['pagination'] ?? [],
-            'summary' => $result['summary'] ?? ['total_assigned' => 0],
-            'selectedAgentId' => $sourceAgentId,
-            'q' => $q,
-            '_csrf' => Csrf::token(),
-            'flash' => $flash,
-        ]);
     }
 
     public function bulkReassign(): void

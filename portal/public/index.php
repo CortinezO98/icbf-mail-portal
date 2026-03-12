@@ -118,16 +118,43 @@ try {
     if ($path === '/cases/by-agent' && $method === 'GET') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
-        (new \App\Controllers\AgentAssignmentsController($pdo, $config))->index();
-        exit;
+
+        try {
+            (new \App\Controllers\AgentAssignmentsController($pdo, $config))->index();
+        } catch (\Throwable $e) {
+            http_response_code(500);
+
+            echo '<h2>Error real en /cases/by-agent</h2>';
+            echo '<pre style="white-space:pre-wrap; font-size:14px;">';
+            echo 'CLASE: ' . htmlspecialchars(get_class($e)) . "\n";
+            echo 'MENSAJE: ' . htmlspecialchars($e->getMessage()) . "\n";
+            echo 'ARCHIVO: ' . htmlspecialchars($e->getFile()) . "\n";
+            echo 'LINEA: ' . (int)$e->getLine() . "\n\n";
+            echo "TRACE:\n" . htmlspecialchars($e->getTraceAsString());
+            echo '</pre>';
+            exit;
+        }
     }
 
-    // Reasignación masiva desde la vista por agente (Supervisor/Admin)
     if ($path === '/cases/by-agent/reassign' && $method === 'POST') {
         \App\Middleware\require_login();
         \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
-        (new \App\Controllers\AgentAssignmentsController($pdo, $config))->bulkReassign();
-        exit;
+
+        try {
+            (new \App\Controllers\AgentAssignmentsController($pdo, $config))->bulkReassign();
+        } catch (\Throwable $e) {
+            http_response_code(500);
+
+            echo '<h2>Error real en /cases/by-agent/reassign</h2>';
+            echo '<pre style="white-space:pre-wrap; font-size:14px;">';
+            echo 'CLASE: ' . htmlspecialchars(get_class($e)) . "\n";
+            echo 'MENSAJE: ' . htmlspecialchars($e->getMessage()) . "\n";
+            echo 'ARCHIVO: ' . htmlspecialchars($e->getFile()) . "\n";
+            echo 'LINEA: ' . (int)$e->getLine() . "\n\n";
+            echo "TRACE:\n" . htmlspecialchars($e->getTraceAsString());
+            echo '</pre>';
+            exit;
+        }
     }
 
 
