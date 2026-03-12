@@ -14,22 +14,37 @@ def utcnow() -> datetime:
 
 
 def get_or_create_mailbox(db: Session, email: str) -> int:
-    row = db.execute(text("SELECT id FROM mailboxes WHERE email = :email LIMIT 1"), {"email": email}).fetchone()
+    row = db.execute(
+        text("SELECT id FROM mailboxes WHERE email = :email LIMIT 1"),
+        {"email": email}
+    ).fetchone()
     if row:
         return int(row[0])
+
     db.execute(
         text("""
-            INSERT INTO mailboxes (email, display_name, tenant_id, graph_user_id, is_active, created_at, updated_at)
-            VALUES (:email, NULL, NULL, NULL, 1, NOW(6), NOW(6))
+            INSERT INTO mailboxes (
+                email, display_name, tenant_id, graph_user_id, is_active, created_at, updated_at
+            )
+            VALUES (
+                :email, NULL, NULL, NULL, 1, NOW(6), NOW(6)
+            )
         """),
         {"email": email},
     )
-    row2 = db.execute(text("SELECT id FROM mailboxes WHERE email = :email LIMIT 1"), {"email": email}).fetchone()
+
+    row2 = db.execute(
+        text("SELECT id FROM mailboxes WHERE email = :email LIMIT 1"),
+        {"email": email}
+    ).fetchone()
     return int(row2[0])
 
 
 def get_status_id_by_code(db: Session, code: str) -> int:
-    row = db.execute(text("SELECT id FROM case_statuses WHERE code = :code LIMIT 1"), {"code": code}).fetchone()
+    row = db.execute(
+        text("SELECT id FROM case_statuses WHERE code = :code LIMIT 1"),
+        {"code": code}
+    ).fetchone()
     if not row:
         raise RuntimeError(f"Missing status in DB: {code}")
     return int(row[0])
@@ -41,7 +56,7 @@ def pick_least_loaded_agent(db: Session) -> int | None:
     Carga activa = casos asignados con status IN ('ASIGNADO','EN_PROCESO').
 
     Elegibles:
-      - users.is_active = 1  (usuario vigente, NO es conectado)
+      - users.is_active = 1
       - users.assign_enabled = 1
       - roles.code = 'AGENTE' (via user_roles)
 
@@ -145,17 +160,33 @@ def auto_assign_case(db: Session, *, case_id: int) -> int | None:
 
 def next_case_number(db: Session) -> str:
     year = datetime.utcnow().year
-    db.execute(text("INSERT IGNORE INTO case_sequences (year, last_value, updated_at) VALUES (:y, 0, NOW(6))"), {"y": year})
+
+    db.execute(
+        text("""
+            INSERT IGNORE INTO case_sequences (year, last_value, updated_at)
+            VALUES (:y, 0, NOW(6))
+        """),
+        {"y": year},
+    )
+
     row = db.execute(
         text("SELECT last_value FROM case_sequences WHERE year = :y FOR UPDATE"),
         {"y": year},
     ).fetchone()
+
     last = int(row[0]) if row else 0
     new_val = last + 1
+
     db.execute(
-        text("UPDATE case_sequences SET last_value = :v, updated_at = NOW(6) WHERE year = :y"),
+        text("""
+            UPDATE case_sequences
+            SET last_value = :v,
+                updated_at = NOW(6)
+            WHERE year = :y
+        """),
         {"v": new_val, "y": year},
     )
+
     return f"ICBF-{year}-{new_val:06d}"
 
 
@@ -167,33 +198,83 @@ def create_case(
     requester_email: str,
     requester_name: str | None,
     received_at: datetime,
+    thread_conversation_id: str | None = None,
+    parent_case_id: int | None = None,
+    root_internet_message_id: str | None = None,
+    reply_to_internet_message_id: str | None = None,
 ) -> int:
+    """
+    Crea un caso NUEVO.
+
+    Mantiene compatibilidad con la funcionalidad anterior y ahora además
+    guarda la trazabilidad del hilo en la tabla cases.
+    """
     status_id = get_status_id_by_code(db, "NUEVO")
     case_number = next_case_number(db)
 
     db.execute(
         text("""
             INSERT INTO cases (
-              mailbox_id, case_number, subject, requester_email, requester_name,
-              status_id, category_id,
-              assigned_user_id, assigned_group_id,
-              received_at, assigned_at, first_response_at, closed_at, last_activity_at,
-              is_responded, due_at, sla_state,
-              locked_by, locked_at,
-              created_at, updated_at
+              mailbox_id,
+              thread_conversation_id,
+              parent_case_id,
+              root_internet_message_id,
+              reply_to_internet_message_id,
+              case_number,
+              subject,
+              requester_email,
+              requester_name,
+              status_id,
+              category_id,
+              assigned_user_id,
+              assigned_group_id,
+              received_at,
+              assigned_at,
+              first_response_at,
+              closed_at,
+              last_activity_at,
+              is_responded,
+              due_at,
+              sla_state,
+              locked_by,
+              locked_at,
+              created_at,
+              updated_at
             )
             VALUES (
-              :mailbox_id, :case_number, :subject, :requester_email, :requester_name,
-              :status_id, NULL,
-              NULL, NULL,
-              :received_at, NULL, NULL, NULL, :last_activity_at,
-              0, NULL, 'OK',
-              NULL, NULL,
-              NOW(6), NOW(6)
+              :mailbox_id,
+              :thread_conversation_id,
+              :parent_case_id,
+              :root_internet_message_id,
+              :reply_to_internet_message_id,
+              :case_number,
+              :subject,
+              :requester_email,
+              :requester_name,
+              :status_id,
+              NULL,
+              NULL,
+              NULL,
+              :received_at,
+              NULL,
+              NULL,
+              NULL,
+              :last_activity_at,
+              0,
+              NULL,
+              'OK',
+              NULL,
+              NULL,
+              NOW(6),
+              NOW(6)
             )
         """),
         {
             "mailbox_id": mailbox_id,
+            "thread_conversation_id": (thread_conversation_id[:190] if thread_conversation_id else None),
+            "parent_case_id": parent_case_id,
+            "root_internet_message_id": (root_internet_message_id[:255] if root_internet_message_id else None),
+            "reply_to_internet_message_id": (reply_to_internet_message_id[:255] if reply_to_internet_message_id else None),
             "case_number": case_number,
             "subject": subject[:255],
             "requester_email": requester_email[:190],
@@ -203,7 +284,12 @@ def create_case(
             "last_activity_at": received_at,
         },
     )
-    row = db.execute(text("SELECT id FROM cases WHERE case_number = :cn LIMIT 1"), {"cn": case_number}).fetchone()
+
+    row = db.execute(
+        text("SELECT id FROM cases WHERE case_number = :cn LIMIT 1"),
+        {"cn": case_number}
+    ).fetchone()
+
     return int(row[0])
 
 
@@ -223,8 +309,10 @@ def touch_case_activity(db: Session, *, case_id: int, last_activity_at: datetime
 def get_case_by_message_dedupe(db: Session, mailbox_id: int, provider_message_id: str) -> int | None:
     row = db.execute(
         text("""
-            SELECT case_id FROM messages
-            WHERE mailbox_id = :mailbox_id AND provider_message_id = :pmid
+            SELECT case_id
+            FROM messages
+            WHERE mailbox_id = :mailbox_id
+              AND provider_message_id = :pmid
             LIMIT 1
         """),
         {"mailbox_id": mailbox_id, "pmid": provider_message_id},
@@ -233,6 +321,10 @@ def get_case_by_message_dedupe(db: Session, mailbox_id: int, provider_message_id
 
 
 def get_case_by_conversation_id(db: Session, *, mailbox_id: int, conversation_id: str) -> int | None:
+    """
+    Se mantiene por compatibilidad con código legado.
+    OJO: en el nuevo modelo NO debe usarse para reutilizar el caso.
+    """
     row = db.execute(
         text("""
             SELECT case_id
@@ -240,6 +332,25 @@ def get_case_by_conversation_id(db: Session, *, mailbox_id: int, conversation_id
             WHERE mailbox_id = :mailbox_id
               AND conversation_id = :cid
             ORDER BY id ASC
+            LIMIT 1
+        """),
+        {"mailbox_id": mailbox_id, "cid": conversation_id},
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
+def get_last_case_by_conversation_id(db: Session, *, mailbox_id: int, conversation_id: str) -> int | None:
+    """
+    Devuelve el último case_id asociado a un conversation_id.
+    Sirve para parent_case_id / trazabilidad, NO para reutilizar el caso.
+    """
+    row = db.execute(
+        text("""
+            SELECT case_id
+            FROM messages
+            WHERE mailbox_id = :mailbox_id
+              AND conversation_id = :cid
+            ORDER BY id DESC
             LIMIT 1
         """),
         {"mailbox_id": mailbox_id, "cid": conversation_id},
@@ -272,21 +383,47 @@ def insert_message_inbound(
     db.execute(
         text("""
             INSERT INTO messages (
-              case_id, mailbox_id, folder_id, direction,
-              provider_message_id, conversation_id, internet_message_id, in_reply_to,
-              from_email, to_emails, cc_emails, bcc_emails,
-              subject, body_text, body_html,
-              received_at, sent_at,
-              has_attachments, processed_by_worker,
+              case_id,
+              mailbox_id,
+              folder_id,
+              direction,
+              provider_message_id,
+              conversation_id,
+              internet_message_id,
+              in_reply_to,
+              from_email,
+              to_emails,
+              cc_emails,
+              bcc_emails,
+              subject,
+              body_text,
+              body_html,
+              received_at,
+              sent_at,
+              has_attachments,
+              processed_by_worker,
               created_at
             )
             VALUES (
-              :case_id, :mailbox_id, :folder_id, 'IN',
-              :provider_message_id, :conversation_id, :internet_message_id, :in_reply_to,
-              :from_email, :to_emails, :cc_emails, :bcc_emails,
-              :subject, :body_text, :body_html,
-              :received_at, :sent_at,
-              :has_attachments, :processed_by_worker,
+              :case_id,
+              :mailbox_id,
+              :folder_id,
+              'IN',
+              :provider_message_id,
+              :conversation_id,
+              :internet_message_id,
+              :in_reply_to,
+              :from_email,
+              :to_emails,
+              :cc_emails,
+              :bcc_emails,
+              :subject,
+              :body_text,
+              :body_html,
+              :received_at,
+              :sent_at,
+              :has_attachments,
+              :processed_by_worker,
               NOW(6)
             )
         """),
@@ -317,7 +454,7 @@ def insert_attachment(
     db: Session,
     *,
     message_id_pk: int,
-    graph_attachment_id: str | None, 
+    graph_attachment_id: str | None,
     filename: str,
     content_type: str,
     size_bytes: int,
@@ -329,16 +466,32 @@ def insert_attachment(
     db.execute(
         text("""
             INSERT IGNORE INTO attachments (
-              message_id, graph_attachment_id, filename, content_type, size_bytes,
-              sha256, is_inline, content_id, storage_path, created_at
+              message_id,
+              graph_attachment_id,
+              filename,
+              content_type,
+              size_bytes,
+              sha256,
+              is_inline,
+              content_id,
+              storage_path,
+              created_at
             )
             VALUES (
-              :message_id, :graph_attachment_id, :filename, :content_type, :size_bytes,
-              :sha256, :is_inline, :content_id, :storage_path, NOW(6)
+              :message_id,
+              :graph_attachment_id,
+              :filename,
+              :content_type,
+              :size_bytes,
+              :sha256,
+              :is_inline,
+              :content_id,
+              :storage_path,
+              NOW(6)
             )
         """),
         {
-            "message_id": message_id_pk,  
+            "message_id": message_id_pk,
             "graph_attachment_id": graph_attachment_id,
             "filename": filename[:255],
             "content_type": content_type[:120],
@@ -350,17 +503,22 @@ def insert_attachment(
         },
     )
 
+
 def get_message_pk(db: Session, mailbox_id: int, provider_message_id: str) -> int:
     row = db.execute(
         text("""
-            SELECT id FROM messages
-            WHERE mailbox_id = :mailbox_id AND provider_message_id = :pmid
+            SELECT id
+            FROM messages
+            WHERE mailbox_id = :mailbox_id
+              AND provider_message_id = :pmid
             LIMIT 1
         """),
         {"mailbox_id": mailbox_id, "pmid": provider_message_id},
     ).fetchone()
+
     if not row:
         raise RuntimeError("Message PK not found after insert")
+
     return int(row[0])
 
 
@@ -380,16 +538,28 @@ def insert_case_event(
     db.execute(
         text("""
             INSERT INTO case_events (
-              case_id, actor_user_id,
-              source, ip_address, user_agent,
-              event_type, from_status_id, to_status_id,
-              details_json, created_at
+              case_id,
+              actor_user_id,
+              source,
+              ip_address,
+              user_agent,
+              event_type,
+              from_status_id,
+              to_status_id,
+              details_json,
+              created_at
             )
             VALUES (
-              :case_id, :actor_user_id,
-              :source, :ip_address, :user_agent,
-              :event_type, :from_status_id, :to_status_id,
-              :details_json, NOW(6)
+              :case_id,
+              :actor_user_id,
+              :source,
+              :ip_address,
+              :user_agent,
+              :event_type,
+              :from_status_id,
+              :to_status_id,
+              :details_json,
+              NOW(6)
             )
         """),
         {
@@ -411,8 +581,9 @@ def load_system_config(db: Session) -> dict[str, str]:
     return {str(k): ("" if v is None else str(v)) for k, v in rows}
 
 
-
+# ============================================================
 # Subscriptions persistence (graph_subscriptions table)
+# ============================================================
 
 def ensure_graph_subscriptions_table(db: Session) -> None:
     db.execute(text("""
@@ -488,7 +659,9 @@ def mark_subscription_status(db: Session, *, subscription_id: str, status: str) 
     """), {"subscription_id": subscription_id, "status": status})
 
 
+# ============================================================
 # Delta state persistence (graph_delta_state table)
+# ============================================================
 
 def ensure_graph_delta_state_table(db: Session) -> None:
     """
@@ -593,7 +766,6 @@ def reset_delta_state(db: Session, *, mailbox_id: int, folder_id: int, note: str
     )
 
 
-
 def get_user_email(db: Session, *, user_id: int) -> str | None:
     row = db.execute(
         text("SELECT email FROM users WHERE id = :uid LIMIT 1"),
@@ -601,6 +773,7 @@ def get_user_email(db: Session, *, user_id: int) -> str | None:
     ).fetchone()
     if not row:
         return None
+
     email = row[0]
     return str(email) if email else None
 
@@ -609,7 +782,7 @@ def try_mark_agent_notified(db: Session, *, user_id: int, cooldown_minutes: int 
     """
     Anti-spam ATÓMICO:
     Actualiza last_notify_at SOLO si ya pasó el cooldown o si es NULL.
-    Devuelve True si se permitió notificar (rowcount>0), False si está en cooldown.
+    Devuelve True si se permitió notificar (rowcount > 0), False si está en cooldown.
     """
     res = db.execute(
         text("""

@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import logging
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any
 
 from sqlalchemy import text
 
@@ -128,12 +128,18 @@ def _should_accept(notification: dict[str, Any]) -> bool:
     return bool(cs) and cs == settings.GRAPH_CLIENT_STATE
 
 
-def _find_case_by_conversation(db, *, mailbox_id: int, conversation_id: str) -> int | None:
+def _find_last_case_by_conversation(db, *, mailbox_id: int, conversation_id: str) -> int | None:
+    """
+    Solo para trazabilidad.
+    IMPORTANTE: NO reutiliza el caso. Solo devuelve el último case_id
+    que tuvo ese conversation_id para poder auditar / enlazar a futuro.
+    """
     row = db.execute(
         text("""
             SELECT case_id
             FROM messages
-            WHERE mailbox_id = :mbid AND conversation_id = :cid
+            WHERE mailbox_id = :mbid
+              AND conversation_id = :cid
             ORDER BY id DESC
             LIMIT 1
         """),
@@ -276,56 +282,82 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
     message_pk_existing: int | None = None
     message_pk: int | None = None
     should_process_attachments_even_if_dedupe = False
-    event_type: str = "CASE_CREATED"
-
     assigned_agent_id: int | None = None
 
     with get_db_session() as db:
-        existing = _get_existing_message_row(db, mailbox_id=mailbox_id, provider_message_id=provider_message_id)
+        # ============================================================
+        # 1) DEDUPE REAL: si ya existe exactamente el mismo correo
+        #    por provider_message_id, NO creamos nuevo caso
+        # ============================================================
+        existing = _get_existing_message_row(
+            db,
+            mailbox_id=mailbox_id,
+            provider_message_id=provider_message_id,
+        )
+
         if existing:
             message_pk_existing, case_id_existing, has_att_db = existing
             message_pk = message_pk_existing
-            logger.info("DEDUPE_HIT | message_id=%s | case_id=%s", provider_message_id, case_id_existing)
+            case_id = case_id_existing
+
+            logger.info(
+                "DEDUPE_HIT | message_id=%s | case_id=%s",
+                provider_message_id,
+                case_id_existing,
+            )
 
             if has_att_db or has_attachments:
                 if _attachments_count(db, message_pk=message_pk_existing) == 0:
                     should_process_attachments_even_if_dedupe = True
                     logger.warning(
                         "Attachments missing in DB for message_id=%s -> will fetch now",
-                        provider_message_id
+                        provider_message_id,
                     )
 
-            case_id = case_id_existing
+            return_after_attachments = True
 
         else:
+            return_after_attachments = False
+
+            # ============================================================
+            # 2) Trazabilidad del hilo SOLO como referencia
+            #    IMPORTANTE: NO reutilizamos el caso anterior
+            # ============================================================
+            parent_case_id: int | None = None
             if conversation_id:
-                case_id = _find_case_by_conversation(
+                parent_case_id = _find_last_case_by_conversation(
                     db,
                     mailbox_id=mailbox_id,
-                    conversation_id=str(conversation_id)
+                    conversation_id=str(conversation_id),
                 )
 
-            if case_id:
-                event_type = "MESSAGE_ADDED"
-            else:
-                case_id = repos.create_case(
-                    db,
-                    mailbox_id=mailbox_id,
-                    subject=subject,
-                    requester_email=str(from_email),
-                    requester_name=(str(from_name) if from_name else None),
-                    received_at=received_at,
-                )
-                event_type = "CASE_CREATED"
+            # ============================================================
+            # 3) SIEMPRE crear caso nuevo para todo inbound nuevo
+            # ============================================================
+            case_id = repos.create_case(
+                db,
+                mailbox_id=mailbox_id,
+                subject=subject,
+                requester_email=str(from_email),
+                requester_name=(str(from_name) if from_name else None),
+                received_at=received_at,
+                thread_conversation_id=(str(conversation_id) if conversation_id else None),
+                parent_case_id=parent_case_id,
+                root_internet_message_id=(str(internet_message_id) if internet_message_id else None),
+                reply_to_internet_message_id=(str(in_reply_to) if in_reply_to else None),
+            )
 
-                logger.info(
-                    "CASE_CREATED | case_id=%s | message_id=%s | from_email=%s | subject=%s",
-                    case_id,
-                    provider_message_id,
-                    from_email,
-                    subject,
-                )
+            logger.info(
+                "CASE_CREATED_FROM_INBOUND | case_id=%s | message_id=%s | from_email=%s | subject=%s",
+                case_id,
+                provider_message_id,
+                from_email,
+                subject,
+            )
 
+            # ============================================================
+            # 4) Insertar mensaje SIEMPRE en el caso recién creado
+            # ============================================================
             repos.insert_message_inbound(
                 db,
                 case_id=case_id,
@@ -371,50 +403,132 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
 
             _touch_case_activity(db, case_id=case_id, last_activity_at=received_at)
 
+            # ============================================================
+            # 5) Evento principal de creación
+            # ============================================================
             repos.insert_case_event(
                 db,
                 case_id=case_id,
                 actor_user_id=None,
                 source="WORKER",
-                event_type=event_type,
+                event_type="CASE_CREATED_FROM_INBOUND",
                 from_status_id=None,
                 to_status_id=None,
                 details={
                     "provider_message_id": provider_message_id,
                     "conversation_id": (str(conversation_id) if conversation_id else None),
+                    "internet_message_id": (str(internet_message_id) if internet_message_id else None),
+                    "in_reply_to": (str(in_reply_to) if in_reply_to else None),
                     "from_email": from_email,
                     "subject": subject,
                 },
             )
 
-            if event_type == "CASE_CREATED":
-                assigned_agent_id = repos.auto_assign_case(db, case_id=case_id)
-                if assigned_agent_id:
-                    logger.info("AUTO_ASSIGNED | case_id=%s | agent_id=%s", case_id, assigned_agent_id)
-                else:
-                    logger.warning("No eligible agents found for auto-assign case_id=%s", case_id)
+            # ============================================================
+            # 6) Si viene dentro de un hilo existente, lo registramos
+            #    solo como trazabilidad, NO como reuse del caso
+            # ============================================================
+            if conversation_id:
+                repos.insert_case_event(
+                    db,
+                    case_id=case_id,
+                    actor_user_id=None,
+                    source="WORKER",
+                    event_type="CASE_LINKED_TO_THREAD",
+                    from_status_id=None,
+                    to_status_id=None,
+                    details={
+                        "provider_message_id": provider_message_id,
+                        "conversation_id": str(conversation_id),
+                        "internet_message_id": (str(internet_message_id) if internet_message_id else None),
+                        "in_reply_to": (str(in_reply_to) if in_reply_to else None),
+                        "parent_case_id": parent_case_id,
+                    },
+                )
 
+                if parent_case_id:
                     repos.insert_case_event(
                         db,
                         case_id=case_id,
                         actor_user_id=None,
                         source="WORKER",
-                        event_type="AUTO_ASSIGN_SKIPPED",
+                        event_type="CASE_PARENT_LINKED",
                         from_status_id=None,
                         to_status_id=None,
-                        details={"reason": "no_eligible_agents"},
+                        details={
+                            "provider_message_id": provider_message_id,
+                            "conversation_id": str(conversation_id),
+                            "parent_case_id": parent_case_id,
+                        },
                     )
 
+            # ============================================================
+            # 7) Autoasignación del caso NUEVO
+            # ============================================================
+            assigned_agent_id = repos.auto_assign_case(db, case_id=case_id)
+            if assigned_agent_id:
+                logger.info(
+                    "AUTO_ASSIGNED | case_id=%s | agent_id=%s",
+                    case_id,
+                    assigned_agent_id,
+                )
+
+                repos.insert_case_event(
+                    db,
+                    case_id=case_id,
+                    actor_user_id=None,
+                    source="WORKER",
+                    event_type="AUTO_ASSIGNED",
+                    from_status_id=None,
+                    to_status_id=None,
+                    details={
+                        "agent_id": assigned_agent_id,
+                        "provider_message_id": provider_message_id,
+                    },
+                )
+            else:
+                logger.warning("No eligible agents found for auto-assign case_id=%s", case_id)
+
+                repos.insert_case_event(
+                    db,
+                    case_id=case_id,
+                    actor_user_id=None,
+                    source="WORKER",
+                    event_type="AUTO_ASSIGN_SKIPPED",
+                    from_status_id=None,
+                    to_status_id=None,
+                    details={
+                        "reason": "no_eligible_agents",
+                        "provider_message_id": provider_message_id,
+                    },
+                )
+
+    # ============================================================
+    # 8) Procesamiento de adjuntos fuera de la transacción
+    # ============================================================
     if (has_attachments or should_process_attachments_even_if_dedupe) and message_pk is not None:
         await _process_attachments(
             mailbox_email=mb,
             graph_message_id=message_id,
             message_pk=message_pk,
             provider_message_id=provider_message_id,
+            case_id=case_id,
+            conversation_id=(str(conversation_id) if conversation_id else None),
         )
 
+    # Si fue dedupe, ya no seguimos con notificación
+    if return_after_attachments:
+        return
+
+    # ============================================================
+    # 9) Notificación al agente solo si hubo caso NUEVO + asignación
+    # ============================================================
     if settings.NOTIFICATIONS_ENABLED and assigned_agent_id and case_id is not None:
-        await _notify_agent_new_case(case_id=case_id, agent_id=assigned_agent_id, case_subject=subject)
+        await _notify_agent_new_case(
+            case_id=case_id,
+            agent_id=assigned_agent_id,
+            case_subject=subject,
+        )
 
 
 async def _notify_agent_new_case(*, case_id: int, agent_id: int, case_subject: str) -> None:
@@ -540,7 +654,15 @@ async def _notify_agent_new_case(*, case_id: int, agent_id: int, case_subject: s
         logger.warning("Notification failed case_id=%s agent_id=%s err=%s", case_id, agent_id, e)
 
 
-async def _process_attachments(*, mailbox_email: str, graph_message_id: str, message_pk: int, provider_message_id: str) -> None:
+async def _process_attachments(
+    *,
+    mailbox_email: str,
+    graph_message_id: str,
+    message_pk: int,
+    provider_message_id: str,
+    case_id: int | None = None,
+    conversation_id: str | None = None,
+) -> None:
     """
     ✅ Importante:
     - NO hacemos awaits dentro de una transacción DB.
@@ -625,6 +747,7 @@ async def _process_attachments(*, mailbox_email: str, graph_message_id: str, mes
                 existing_count,
             )
 
+        inserted = 0
         for p in prepared:
             repos.insert_attachment(
                 db,
@@ -637,6 +760,24 @@ async def _process_attachments(*, mailbox_email: str, graph_message_id: str, mes
                 is_inline=p["is_inline"],
                 content_id=p["content_id"],
                 storage_path=p["storage_path"],
+            )
+            inserted += 1
+
+        if case_id:
+            repos.insert_case_event(
+                db,
+                case_id=case_id,
+                actor_user_id=None,
+                source="WORKER",
+                event_type="ATTACHMENTS_SYNCED",
+                from_status_id=None,
+                to_status_id=None,
+                details={
+                    "provider_message_id": provider_message_id,
+                    "conversation_id": conversation_id,
+                    "message_pk": message_pk,
+                    "attachments_count": inserted,
+                },
             )
 
     logger.info("Inserted attachments=%s for provider_message_id=%s", len(prepared), provider_message_id)
