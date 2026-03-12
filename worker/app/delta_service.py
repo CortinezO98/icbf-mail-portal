@@ -32,7 +32,7 @@ def _unpack_delta_state(st: Any) -> tuple[str | None, str | None]:
     """
     Tu repos.get_delta_state puede devolver:
       - (id, delta_link, next_link, last_sync_at, last_status_code, last_error)
-    o (delta_link, next_link, last_sync_at, last_status_code, last_error)
+      - (delta_link, next_link, last_sync_at, last_status_code, last_error)
     según cómo lo tengas.
 
     Aquí lo hacemos tolerante.
@@ -117,7 +117,14 @@ async def run_delta_backstop(*, mailbox_email: str | None = None) -> dict[str, A
             results.append(r)
         except Exception as e:
             logger.exception("Delta failed folder_id=%s code=%s err=%s", folder_id, folder_code, e)
-            results.append({"folder_id": folder_id, "folder_code": folder_code, "ok": False, "error": str(e)})
+            results.append(
+                {
+                    "folder_id": folder_id,
+                    "folder_code": folder_code,
+                    "ok": False,
+                    "error": str(e),
+                }
+            )
 
     return {"ok": True, "mailbox": mb, "folders": results}
 
@@ -157,6 +164,7 @@ async def _run_delta_for_folder(
     pages = 0
     total_items = 0
     enqueued_messages = 0
+    skipped_known_messages = 0
     finished = False
 
     while True:
@@ -222,6 +230,7 @@ async def _run_delta_for_folder(
                 "pages": pages,
                 "total_items": total_items,
                 "enqueued_messages": enqueued_messages,
+                "skipped_known_messages": skipped_known_messages,
                 "finished": False,
             }
 
@@ -242,8 +251,9 @@ async def _run_delta_for_folder(
                 msg_ids.append(str(mid))
 
         if msg_ids and not priming:
-            enqueued_ok = await _enqueue_message_ids(msg_ids, mailbox_email=mailbox_email)
-            enqueued_messages += enqueued_ok
+            enqueue_result = await _enqueue_message_ids(msg_ids, mailbox_email=mailbox_email)
+            enqueued_messages += int(enqueue_result.get("enqueued", 0))
+            skipped_known_messages += int(enqueue_result.get("skipped", 0))
 
         new_next = data.get("@odata.nextLink")
         new_delta = data.get("@odata.deltaLink")
@@ -281,23 +291,30 @@ async def _run_delta_for_folder(
         "pages": pages,
         "total_items": total_items,
         "enqueued_messages": enqueued_messages,
+        "skipped_known_messages": skipped_known_messages,
         "finished": bool(finished),
         "note": ("stopped_by_limits" if not finished else None),
     }
 
 
-async def _enqueue_message_ids(message_ids: list[str], *, mailbox_email: str) -> int:
+async def _enqueue_message_ids(message_ids: list[str], *, mailbox_email: str) -> dict[str, int]:
     """
     Encola provider_message_id encontrados por delta para que los procese
-    inbound_queue_worker. Evita procesar directo aquí y centraliza retries.
+    inbound_queue_worker.
+
+    Alineado con inbound_queue_repo.enqueue_event():
+    - si el mensaje ya existe en messages o en cola, enqueue_event() puede devolver None
+    - solo se cuenta como encolado real cuando sí regresa event_id
     """
     concurrency = int(getattr(settings, "DELTA_CONCURRENCY", 3))
     sem = asyncio.Semaphore(concurrency)
 
     enqueued_count = 0
+    skipped_count = 0
 
     async def _one(mid: str) -> None:
-        nonlocal enqueued_count
+        nonlocal enqueued_count, skipped_count
+
         async with sem:
             try:
                 with get_db_session() as db:
@@ -309,14 +326,26 @@ async def _enqueue_message_ids(message_ids: list[str], *, mailbox_email: str) ->
                         payload=None,
                     )
 
-                logger.info(
-                    "QUEUE_EVENT_CREATED | source=delta | event_id=%s | message_id=%s",
-                    event_id,
-                    mid,
-                )
-                enqueued_count += 1
+                if event_id is not None:
+                    logger.info(
+                        "QUEUE_EVENT_CREATED | source=delta | event_id=%s | message_id=%s",
+                        event_id,
+                        mid,
+                    )
+                    enqueued_count += 1
+                else:
+                    logger.info(
+                        "QUEUE_EVENT_SKIPPED_ALREADY_KNOWN | source=delta | message_id=%s",
+                        mid,
+                    )
+                    skipped_count += 1
+
             except Exception:
                 logger.exception("Delta enqueue failed message_id=%s", mid)
 
     await asyncio.gather(*[_one(m) for m in message_ids])
-    return enqueued_count
+
+    return {
+        "enqueued": enqueued_count,
+        "skipped": skipped_count,
+    }

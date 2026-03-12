@@ -16,7 +16,11 @@ logger = logging.getLogger("app.reconcile_service")
 async def reconcile_recent_inbox() -> dict:
     """
     Escanea mensajes recientes del Inbox y encola cualquier faltante
-    que no exista todavía en messages ni esté ya pending/processing.
+    que no exista todavía en messages ni esté ya registrado en cola.
+
+    Alineado con la regla operativa:
+    - cada correo real nuevo debe crear un caso nuevo
+    - solo el mismo provider_message_id no debe volver a encolarse/procesarse
     """
     mailbox = settings.MAILBOX_EMAIL
     if not mailbox:
@@ -52,6 +56,7 @@ async def reconcile_recent_inbox() -> dict:
 
     found = 0
     enqueued = 0
+    skipped = 0
 
     with get_db_session() as db:
         for item in values:
@@ -77,6 +82,10 @@ async def reconcile_recent_inbox() -> dict:
 
             found += 1
 
+            # ============================================================
+            # Validación rápida de existencia en messages
+            # (se conserva tu lógica original)
+            # ============================================================
             row = db.execute(
                 text("""
                     SELECT id
@@ -91,6 +100,11 @@ async def reconcile_recent_inbox() -> dict:
             ).fetchone()
 
             if row:
+                skipped += 1
+                logger.info(
+                    "RECONCILE_EVENT_SKIPPED_ALREADY_MATERIALIZED | message_id=%s",
+                    msg_id,
+                )
                 continue
 
             event_id = inbound_queue_repo.enqueue_event(
@@ -101,17 +115,30 @@ async def reconcile_recent_inbox() -> dict:
                 payload=None,
             )
 
-            enqueued += 1
-            logger.info(
-                "RECONCILE_EVENT_ENQUEUED | event_id=%s | message_id=%s",
-                event_id,
-                msg_id,
-            )
+            if event_id is not None:
+                enqueued += 1
+                logger.info(
+                    "RECONCILE_EVENT_ENQUEUED | event_id=%s | message_id=%s",
+                    event_id,
+                    msg_id,
+                )
+            else:
+                skipped += 1
+                logger.info(
+                    "RECONCILE_EVENT_SKIPPED_ALREADY_KNOWN | message_id=%s",
+                    msg_id,
+                )
 
     logger.info(
-        "RECONCILE_SCAN_DONE | found=%s | enqueued=%s",
+        "RECONCILE_SCAN_DONE | found=%s | enqueued=%s | skipped=%s",
         found,
         enqueued,
+        skipped,
     )
 
-    return {"ok": True, "found": found, "enqueued": enqueued}
+    return {
+        "ok": True,
+        "found": found,
+        "enqueued": enqueued,
+        "skipped": skipped,
+    }

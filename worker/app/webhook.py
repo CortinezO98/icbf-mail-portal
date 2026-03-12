@@ -136,8 +136,9 @@ async def graph_webhook_post(request: Request) -> Response:
             )
         return Response(content="OK", media_type="text/plain", status_code=202)
 
-    enqueued = 0
     persisted = 0
+    enqueued = 0
+    skipped = 0
 
     for n in valid:
         msg_id = sync_service._extract_message_id(n)
@@ -155,12 +156,20 @@ async def graph_webhook_post(request: Request) -> Response:
                     payload=n,
                 )
 
-            persisted += 1
-            logger.info(
-                "QUEUE_EVENT_CREATED | source=webhook | event_id=%s | message_id=%s",
-                event_id,
-                msg_id,
-            )
+            if event_id is not None:
+                persisted += 1
+                logger.info(
+                    "QUEUE_EVENT_CREATED | source=webhook | event_id=%s | message_id=%s",
+                    event_id,
+                    msg_id,
+                )
+            else:
+                skipped += 1
+                logger.info(
+                    "QUEUE_EVENT_SKIPPED_ALREADY_KNOWN | source=webhook | message_id=%s",
+                    msg_id,
+                )
+
 
             if _webhook_queue is not None:
                 try:
@@ -171,17 +180,19 @@ async def graph_webhook_post(request: Request) -> Response:
                     logger.error("WEBHOOK_QUEUE_FULL | message_id=%s", msg_id)
             else:
                 logger.warning(
-                    "WEBHOOK_QUEUE_NOT_AVAILABLE | message_id=%s | persisted_only=true",
+                    "WEBHOOK_QUEUE_NOT_AVAILABLE | message_id=%s | persisted_only=%s",
                     msg_id,
+                    "true" if event_id is not None else "false",
                 )
 
         except Exception as e:
             logger.exception("WEBHOOK_PERSIST_FAILED | message_id=%s | err=%s", msg_id, e)
 
     logger.info(
-        "Webhook processed notifications | persisted=%s | enqueued=%s",
+        "Webhook processed notifications | persisted=%s | enqueued=%s | skipped=%s",
         persisted,
         enqueued,
+        skipped,
     )
     return Response(content="OK", media_type="text/plain", status_code=202)
 

@@ -325,10 +325,14 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
     assigned_agent_id: int | None = None
 
     with get_db_session() as db:
-        # ============================================================
-        # 1) DEDUPE REAL: si ya existe exactamente el mismo correo
-        #    por provider_message_id, NO creamos nuevo caso
-        # ============================================================
+        # 1 DEDUPE REAL SOLO POR MENSAJE EXACTO
+        #    IMPORTANTE:
+        #    - Solo se deduplica por provider_message_id.
+        #    - NO se deduplica por conversation_id.
+        #    - NO se deduplica por in_reply_to.
+        #    - NO se deduplica por asunto/remitente.
+        #    - Por lo tanto, una respuesta a un hilo SIEMPRE crea un caso nuevo
+        #      si trae un provider_message_id distinto.
         existing = _get_existing_message_row(
             db,
             mailbox_id=mailbox_id,
@@ -341,7 +345,7 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
             case_id = case_id_existing
 
             logger.info(
-                "DEDUPE_HIT | message_id=%s | case_id=%s",
+                "DEDUPE_HIT | reason=same_provider_message_id | message_id=%s | case_id=%s",
                 provider_message_id,
                 case_id_existing,
             )
@@ -388,11 +392,13 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
             )
 
             logger.info(
-                "CASE_CREATED_FROM_INBOUND | case_id=%s | message_id=%s | from_email=%s | subject=%s | message_kind=%s",
+                "CASE_CREATED_FROM_INBOUND | case_id=%s | message_id=%s | from_email=%s | subject=%s | conversation_id=%s | in_reply_to=%s | message_kind=%s",
                 case_id,
                 provider_message_id,
                 from_email,
                 subject,
+                str(conversation_id) if conversation_id else None,
+                str(in_reply_to) if in_reply_to else None,
                 message_kind,
             )
 

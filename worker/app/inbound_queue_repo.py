@@ -15,25 +15,111 @@ def enqueue_event(
     payload: dict[str, Any] | None = None,
 ) -> int | None:
     """
-    Inserta evento pendiente si no existe otro pending/processing reciente
-    para el mismo provider_message_id + mailbox_email.
+    Regla operativa alineada al portal:
+
+    - Cada correo real NUEVO debe crear un caso nuevo.
+    - Solo el mismo provider_message_id NO debe volver a procesarse.
+    - Se conserva la resiliencia del doble camino (webhook + cola DB),
+      pero evitando reprocesos innecesarios del mismo mensaje exacto.
+
+    Comportamiento:
+    1) Si el mensaje ya fue materializado en `messages`, NO reinsertar en cola.
+    2) Si ya existe en cola en pending/processing/done, NO duplicar el evento.
+    3) Si existe en failed, reciclar ese mismo evento a pending.
+    4) Si no existe en ningún lado, insertar nuevo evento pending.
     """
-    row = db.execute(
+
+    payload_json = json.dumps(payload, ensure_ascii=False) if payload else None
+
+    # ============================================================
+    # 1) Si ya existe en messages, significa que ese correo exacto
+    #    ya fue procesado/materializado. No reinsertar en cola.
+    # ============================================================
+    row_msg = db.execute(
+        text("""
+            SELECT m.id
+            FROM messages m
+            JOIN mailboxes mb ON mb.id = m.mailbox_id
+            WHERE mb.email = :mailbox
+              AND m.provider_message_id = :pmid
+            LIMIT 1
+        """),
+        {"mailbox": mailbox_email, "pmid": provider_message_id},
+    ).fetchone()
+
+    if row_msg:
+        return None
+
+    # ============================================================
+    # 2) Si ya existe un evento activo o ya completado para este
+    #    mismo provider_message_id, no crear otro.
+    #
+    #    Ojo:
+    #    - pending / processing evita carreras y duplicados simultáneos
+    #    - done evita reprocesar una y otra vez el mismo mensaje exacto
+    # ============================================================
+    row_existing = db.execute(
         text("""
             SELECT id
             FROM inbound_event_queue
             WHERE provider_message_id = :pmid
               AND mailbox_email = :mailbox
-              AND status IN ('pending', 'processing')
+              AND status IN ('pending', 'processing', 'done')
             ORDER BY id DESC
             LIMIT 1
         """),
         {"pmid": provider_message_id, "mailbox": mailbox_email},
     ).fetchone()
 
-    if row:
-        return int(row[0])
+    if row_existing:
+        return int(row_existing[0])
 
+    # ============================================================
+    # 3) Si existe failed para el mismo mensaje exacto, reciclamos
+    #    ese evento para reintento controlado en vez de crear otro.
+    # ============================================================
+    row_failed = db.execute(
+        text("""
+            SELECT id
+            FROM inbound_event_queue
+            WHERE provider_message_id = :pmid
+              AND mailbox_email = :mailbox
+              AND status = 'failed'
+            ORDER BY id DESC
+            LIMIT 1
+        """),
+        {"pmid": provider_message_id, "mailbox": mailbox_email},
+    ).fetchone()
+
+    if row_failed:
+        event_id = int(row_failed[0])
+
+        db.execute(
+            text("""
+                UPDATE inbound_event_queue
+                SET source = :source,
+                    payload_json = :payload,
+                    status = 'pending',
+                    attempts = 0,
+                    last_error = NULL,
+                    available_at = NOW(6),
+                    locked_at = NULL,
+                    processed_at = NULL,
+                    updated_at = NOW(6)
+                WHERE id = :id
+            """),
+            {
+                "id": event_id,
+                "source": source,
+                "payload": payload_json,
+            },
+        )
+
+        return event_id
+
+    # ============================================================
+    # 4) Insertar evento nuevo
+    # ============================================================
     db.execute(
         text("""
             INSERT INTO inbound_event_queue (
@@ -63,7 +149,7 @@ def enqueue_event(
             "source": source,
             "pmid": provider_message_id,
             "mailbox": mailbox_email,
-            "payload": json.dumps(payload, ensure_ascii=False) if payload else None,
+            "payload": payload_json,
         },
     )
 
@@ -152,6 +238,7 @@ def mark_retry(
                 SET status = 'failed',
                     attempts = :attempts,
                     last_error = :err,
+                    locked_at = NULL,
                     updated_at = NOW(6)
                 WHERE id = :id
             """),
@@ -199,6 +286,7 @@ def queue_stats(db) -> dict[str, int]:
         out[str(status)] = int(total)
     return out
 
+
 def list_failed_events(db, *, limit: int = 100) -> list[dict[str, Any]]:
     rows = db.execute(
         text("""
@@ -219,8 +307,11 @@ def requeue_failed_events(db, *, limit: int = 1000) -> int:
         text("""
             UPDATE inbound_event_queue
             SET status = 'pending',
+                attempts = 0,
+                last_error = NULL,
                 available_at = NOW(6),
                 locked_at = NULL,
+                processed_at = NULL,
                 updated_at = NOW(6)
             WHERE status = 'failed'
             ORDER BY updated_at DESC
@@ -241,5 +332,3 @@ def _retry_delay_seconds(attempt_no: int) -> int:
     if attempt_no == 4:
         return 900
     return 1800
-
-
