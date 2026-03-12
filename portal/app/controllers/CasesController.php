@@ -74,11 +74,16 @@ final class CasesController
                 ];
             }
         } catch (\Throwable $e) {
-            error_log('[CasesController::inbox] Error listando bandeja: ' . $e->getMessage());
-            error_log('[CasesController::inbox] Trace: ' . $e->getTraceAsString());
-
             http_response_code(500);
-            echo 'Error interno al consultar la bandeja de casos.';
+
+            echo '<h2>Error real en inbox()</h2>';
+            echo '<pre style="white-space:pre-wrap; font-size:14px;">';
+            echo 'CLASE: ' . htmlspecialchars(get_class($e)) . "\n";
+            echo 'MENSAJE: ' . htmlspecialchars($e->getMessage()) . "\n";
+            echo 'ARCHIVO: ' . htmlspecialchars($e->getFile()) . "\n";
+            echo 'LINEA: ' . (int)$e->getLine() . "\n\n";
+            echo "TRACE:\n" . htmlspecialchars($e->getTraceAsString());
+            echo '</pre>';
             exit;
         }
 
