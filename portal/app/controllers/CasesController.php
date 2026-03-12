@@ -56,17 +56,11 @@ final class CasesController
             $assignedUserId = Auth::id();
         }
 
-        /*
-         * Solo poner NUEVO por defecto cuando el usuario entra a /cases
-         * sin haber enviado explícitamente el parámetro status.
-         * Si viene status=ALL desde el filtro "Todos", se respetará como null
-         * y mostrará todos los casos.
-         */
         if (
             !$statusWasProvided &&
             (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN'))
         ) {
-            $status = 'NUEVO';
+            $status = null;
         }
 
         try {
