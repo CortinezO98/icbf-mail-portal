@@ -55,28 +55,42 @@ final class CasesController
             $status = 'NUEVO';
         }
 
-        $result = $this->casesRepo->listInbox($status, $assignedUserId, $q, $page, $perPage);
+        try {
+            $result = $this->casesRepo->listInbox($status, $assignedUserId, $q, $page, $perPage);
 
-        if (isset($result['data']) && isset($result['pagination'])) {
-            $cases = $result['data'];
-            $pagination = $result['pagination'];
-        } else {
-            $cases = $result;
-            $pagination = [
-                'page' => 1,
-                'per_page' => count($cases),
-                'total_rows' => count($cases),
-                'total_pages' => 1,
-                'has_prev' => false,
-                'has_next' => false,
-                'offset' => 0
-            ];
+            if (isset($result['data']) && isset($result['pagination'])) {
+                $cases = $result['data'];
+                $pagination = $result['pagination'];
+            } else {
+                $cases = is_array($result) ? $result : [];
+                $pagination = [
+                    'page' => 1,
+                    'per_page' => count($cases),
+                    'total_rows' => count($cases),
+                    'total_pages' => 1,
+                    'has_prev' => false,
+                    'has_next' => false,
+                    'offset' => 0
+                ];
+            }
+        } catch (\Throwable $e) {
+            error_log('[CasesController::inbox] Error listando bandeja: ' . $e->getMessage());
+            error_log('[CasesController::inbox] Trace: ' . $e->getTraceAsString());
+
+            http_response_code(500);
+            echo 'Error interno al consultar la bandeja de casos.';
+            exit;
         }
 
         $unassignedCount = 0;
         if (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN')) {
-            $statusNuevoId = $this->casesRepo->getStatusIdByCode('NUEVO');
-            $unassignedCount = $statusNuevoId ? $this->casesRepo->countUnassignedByStatus($statusNuevoId) : 0;
+            try {
+                $statusNuevoId = $this->casesRepo->getStatusIdByCode('NUEVO');
+                $unassignedCount = $statusNuevoId ? $this->casesRepo->countUnassignedByStatus($statusNuevoId) : 0;
+            } catch (\Throwable $e) {
+                error_log('[CasesController::inbox] Error contando no asignados: ' . $e->getMessage());
+                $unassignedCount = 0;
+            }
         }
 
         $flash = $_SESSION['_flash'] ?? null;
@@ -91,7 +105,6 @@ final class CasesController
             'flash' => $flash,
         ]);
     }
-
     public function detail(int $caseId): void
     {
         $case = $this->casesRepo->findCase($caseId);
