@@ -212,4 +212,31 @@ final class UsersRepo
         ");
         $st->execute([':id' => $userId]);
     }
+
+
+    public function listAssignableAgents(): array
+    {
+        $sql = "
+            SELECT DISTINCT
+                u.id,
+                u.full_name,
+                u.username,
+                u.email
+            FROM users u
+            INNER JOIN user_roles ur ON ur.user_id = u.id
+            INNER JOIN roles r ON r.id = ur.role_id
+            WHERE u.is_active = 1
+            AND u.assign_enabled = 1
+            AND UPPER(TRIM(r.code)) IN ('AGENTE', 'AGENT')
+            ORDER BY u.full_name ASC, u.username ASC
+        ";
+
+        $st = $this->pdo->query($sql);
+        return $st ? ($st->fetchAll(PDO::FETCH_ASSOC) ?: []) : [];
+    }
+
+
+
+
+
 }
