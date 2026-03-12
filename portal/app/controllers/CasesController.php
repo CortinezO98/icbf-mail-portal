@@ -36,8 +36,13 @@ final class CasesController
 
     public function inbox(): void
     {
-        $status = isset($_GET['status']) ? strtoupper(trim((string)$_GET['status'])) : null;
-        if ($status === '') {
+        $statusWasProvided = array_key_exists('status', $_GET);
+
+        $status = $statusWasProvided
+            ? strtoupper(trim((string)($_GET['status'] ?? '')))
+            : null;
+
+        if ($status === 'ALL' || $status === '') {
             $status = null;
         }
 
@@ -51,7 +56,16 @@ final class CasesController
             $assignedUserId = Auth::id();
         }
 
-        if (($status === null || $status === '') && (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN'))) {
+        /*
+         * Solo poner NUEVO por defecto cuando el usuario entra a /cases
+         * sin haber enviado explícitamente el parámetro status.
+         * Si viene status=ALL desde el filtro "Todos", se respetará como null
+         * y mostrará todos los casos.
+         */
+        if (
+            !$statusWasProvided &&
+            (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN'))
+        ) {
             $status = 'NUEVO';
         }
 
@@ -74,16 +88,10 @@ final class CasesController
                 ];
             }
         } catch (\Throwable $e) {
-            http_response_code(500);
+            error_log('[CasesController::inbox] ' . $e->getMessage());
 
-            echo '<h2>Error real en inbox()</h2>';
-            echo '<pre style="white-space:pre-wrap; font-size:14px;">';
-            echo 'CLASE: ' . htmlspecialchars(get_class($e)) . "\n";
-            echo 'MENSAJE: ' . htmlspecialchars($e->getMessage()) . "\n";
-            echo 'ARCHIVO: ' . htmlspecialchars($e->getFile()) . "\n";
-            echo 'LINEA: ' . (int)$e->getLine() . "\n\n";
-            echo "TRACE:\n" . htmlspecialchars($e->getTraceAsString());
-            echo '</pre>';
+            http_response_code(500);
+            echo 'Error interno al consultar la bandeja de casos.';
             exit;
         }
 
@@ -110,6 +118,7 @@ final class CasesController
             'flash' => $flash,
         ]);
     }
+
     public function detail(int $caseId): void
     {
         $case = $this->casesRepo->findCase($caseId);

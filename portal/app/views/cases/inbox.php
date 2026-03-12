@@ -87,7 +87,7 @@ if (!function_exists('buildPaginationUrl')) {
 if (!function_exists('buildStatusUrl')) {
     function buildStatusUrl(?string $status = null): string {
         return buildCasesUrl([
-            'status' => $status ?: null,
+            'status' => $status === null ? 'ALL' : $status,
             'page' => null,
         ]);
     }
