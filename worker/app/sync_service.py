@@ -63,24 +63,59 @@ def _header_value(headers: list[dict[str, Any]] | None, name: str) -> str | None
     return None
 
 
-def _is_ndr(subject: str, from_email: str, body_html: str | None, body_text: str | None) -> bool:
+def _classify_message_kind(
+    subject: str,
+    from_email: str,
+    body_html: str | None,
+    body_text: str | None,
+) -> tuple[str, str | None]:
+    """
+    Clasifica el mensaje sin descartarlo.
+
+    Regla clave:
+    - NO se debe usar esta clasificación para hacer skip.
+    - Solo se usa para trazabilidad y auditoría.
+    """
     s = (subject or "").strip().lower()
     f = (from_email or "").strip().lower()
     b = ((body_text or "") + " " + (body_html or "")).lower()
 
-    if s.startswith("no se puede entregar:") or s.startswith("undeliverable:"):
-        return True
+    subject_prefixes = [
+        "no se puede entregar:",
+        "undeliverable:",
+        "delivery status notification",
+        "mail delivery failed",
+        "returned mail",
+        "your mailbox is full",
+    ]
 
-    if "microsoftexchange" in f or f.startswith("postmaster@"):
-        return True
+    system_sender_tokens = [
+        "microsoftexchange",
+        "postmaster@",
+        "mailer-daemon",
+    ]
 
-    if "delivery has failed" in b or "no se pudo entregar" in b:
-        return True
+    body_tokens = [
+        "delivery has failed",
+        "no se pudo entregar",
+        "5.2.2",
+        "quotaexceeded",
+        "mailbox full",
+    ]
 
-    if "5.2.2" in b or "quotaexceeded" in b or "mailbox full" in b:
-        return True
+    subject_match = next((p for p in subject_prefixes if s.startswith(p)), None)
+    sender_match = next((t for t in system_sender_tokens if t in f), None)
+    body_match = next((t for t in body_tokens if t in b), None)
 
-    return False
+    # Solo clasificamos como NDR cuando la evidencia es relativamente fuerte.
+    # IMPORTANTE: esto NO bloquea la creación del caso.
+    if subject_match and sender_match:
+        return "ndr", f"subject={subject_match};sender={sender_match}"
+
+    if sender_match and body_match:
+        return "ndr", f"sender={sender_match};body={body_match}"
+
+    return "normal", None
 
 
 def _extract_message_id(notification: dict[str, Any]) -> str | None:
@@ -264,19 +299,24 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
 
     has_attachments = 1 if msg.get("hasAttachments") else 0
 
-    if _is_ndr(
+    # ============================================================
+    # Clasificación SOLO informativa. NO hace skip.
+    # ============================================================
+    message_kind, classification_reason = _classify_message_kind(
         subject=subject,
         from_email=str(from_email),
         body_html=body_html,
         body_text=body_text,
-    ):
+    )
+
+    if message_kind == "ndr":
         logger.warning(
-            "Skipping NDR/Undeliverable message_id=%s subject=%s from=%s",
+            "NDR_DETECTED_BUT_ACCEPTED | message_id=%s | subject=%s | from=%s | reason=%s",
             provider_message_id,
             subject,
             from_email,
+            classification_reason,
         )
-        return
 
     case_id: int | None = None
     message_pk_existing: int | None = None
@@ -348,11 +388,12 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
             )
 
             logger.info(
-                "CASE_CREATED_FROM_INBOUND | case_id=%s | message_id=%s | from_email=%s | subject=%s",
+                "CASE_CREATED_FROM_INBOUND | case_id=%s | message_id=%s | from_email=%s | subject=%s | message_kind=%s",
                 case_id,
                 provider_message_id,
                 from_email,
                 subject,
+                message_kind,
             )
 
             # ============================================================
@@ -394,11 +435,12 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
             message_pk = int(row[0]) if row else None
 
             logger.info(
-                "MESSAGE_INSERTED | message_pk=%s | case_id=%s | message_id=%s | received_at=%s",
+                "MESSAGE_INSERTED | message_pk=%s | case_id=%s | message_id=%s | received_at=%s | message_kind=%s",
                 message_pk,
                 case_id,
                 provider_message_id,
                 received_at,
+                message_kind,
             )
 
             _touch_case_activity(db, case_id=case_id, last_activity_at=received_at)
@@ -421,6 +463,8 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
                     "in_reply_to": (str(in_reply_to) if in_reply_to else None),
                     "from_email": from_email,
                     "subject": subject,
+                    "message_kind": message_kind,
+                    "classification_reason": classification_reason,
                 },
             )
 
@@ -443,6 +487,7 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
                         "internet_message_id": (str(internet_message_id) if internet_message_id else None),
                         "in_reply_to": (str(in_reply_to) if in_reply_to else None),
                         "parent_case_id": parent_case_id,
+                        "message_kind": message_kind,
                     },
                 )
 
@@ -459,8 +504,33 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
                             "provider_message_id": provider_message_id,
                             "conversation_id": str(conversation_id),
                             "parent_case_id": parent_case_id,
+                            "message_kind": message_kind,
                         },
                     )
+
+            # ============================================================
+            # 6.1) Evento adicional si fue clasificado como NDR
+            #      pero aceptado para crear caso
+            # ============================================================
+            if message_kind == "ndr":
+                repos.insert_case_event(
+                    db,
+                    case_id=case_id,
+                    actor_user_id=None,
+                    source="WORKER",
+                    event_type="NDR_DETECTED_BUT_ACCEPTED",
+                    from_status_id=None,
+                    to_status_id=None,
+                    details={
+                        "provider_message_id": provider_message_id,
+                        "conversation_id": (str(conversation_id) if conversation_id else None),
+                        "internet_message_id": (str(internet_message_id) if internet_message_id else None),
+                        "from_email": from_email,
+                        "subject": subject,
+                        "message_kind": message_kind,
+                        "classification_reason": classification_reason,
+                    },
+                )
 
             # ============================================================
             # 7) Autoasignación del caso NUEVO
@@ -484,6 +554,7 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
                     details={
                         "agent_id": assigned_agent_id,
                         "provider_message_id": provider_message_id,
+                        "message_kind": message_kind,
                     },
                 )
             else:
@@ -500,6 +571,7 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
                     details={
                         "reason": "no_eligible_agents",
                         "provider_message_id": provider_message_id,
+                        "message_kind": message_kind,
                     },
                 )
 
