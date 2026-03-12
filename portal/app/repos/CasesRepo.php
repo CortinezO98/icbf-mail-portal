@@ -53,13 +53,19 @@ final class CasesRepo
 
         if ($q !== '') {
             $where[] = "(
-                c.case_number LIKE :q
-                OR c.subject LIKE :q
-                OR c.requester_name LIKE :q
-                OR c.requester_email LIKE :q
-                OR CONCAT('', c.id) LIKE :q
+                c.case_number LIKE :q_case_number
+                OR c.subject LIKE :q_subject
+                OR c.requester_name LIKE :q_requester_name
+                OR c.requester_email LIKE :q_requester_email
+                OR CONCAT('', c.id) LIKE :q_case_id
             )";
-            $params[':q'] = '%' . $q . '%';
+
+            $search = '%' . $q . '%';
+            $params[':q_case_number'] = $search;
+            $params[':q_subject'] = $search;
+            $params[':q_requester_name'] = $search;
+            $params[':q_requester_email'] = $search;
+            $params[':q_case_id'] = $search;
         }
 
         return [$where, $params];
