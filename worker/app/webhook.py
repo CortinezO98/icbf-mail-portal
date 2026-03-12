@@ -68,15 +68,17 @@ async def _webhook_consumer(worker_no: int) -> None:
                 message_id,
             )
 
-            await sync_service.process_message_id_async(
+            result = await sync_service.process_message_id_async(
                 message_id,
                 source="webhook",
             )
 
             logger.info(
-                "WEBHOOK_PROCESS_DONE | worker=%s | message_id=%s",
+                "WEBHOOK_PROCESS_DONE | worker=%s | message_id=%s | result_status=%s | materialized=%s",
                 worker_no,
                 message_id,
+                result.get("status"),
+                result.get("materialized"),
             )
 
         except Exception as e:
@@ -183,14 +185,10 @@ async def graph_webhook_post(request: Request) -> Response:
             else:
                 skipped += 1
                 logger.info(
-                    "QUEUE_EVENT_SKIPPED_ALREADY_KNOWN | source=webhook | message_id=%s",
+                    "QUEUE_EVENT_SKIPPED_ALREADY_MATERIALIZED | source=webhook | message_id=%s",
                     msg_id,
                 )
 
-            # Se conserva el procesamiento rápido en memoria.
-            # Aunque el evento ya exista o ya haya sido materializado,
-            # este camino en memoria ayuda a reaccionar rápido cuando el
-            # webhook es el primer canal en recibir el mensaje.
             if _webhook_queue is not None:
                 try:
                     _webhook_queue.put_nowait(msg_id)

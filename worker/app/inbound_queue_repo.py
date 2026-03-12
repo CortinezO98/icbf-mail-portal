@@ -6,36 +6,8 @@ from typing import Any
 from sqlalchemy import text
 
 
-def enqueue_event(
-    db,
-    *,
-    source: str,
-    provider_message_id: str,
-    mailbox_email: str,
-    payload: dict[str, Any] | None = None,
-) -> int | None:
-    """
-    Regla operativa alineada al portal:
-
-    - Cada correo real NUEVO debe crear un caso nuevo.
-    - Solo el mismo provider_message_id NO debe volver a procesarse.
-    - Se conserva la resiliencia del doble camino (webhook + cola DB),
-      pero evitando reprocesos innecesarios del mismo mensaje exacto.
-
-    Comportamiento:
-    1) Si el mensaje ya fue materializado en `messages`, NO reinsertar en cola.
-    2) Si ya existe en cola en pending/processing/done, NO duplicar el evento.
-    3) Si existe en failed, reciclar ese mismo evento a pending.
-    4) Si no existe en ningún lado, insertar nuevo evento pending.
-    """
-
-    payload_json = json.dumps(payload, ensure_ascii=False) if payload else None
-
-    # ============================================================
-    # 1) Si ya existe en messages, significa que ese correo exacto
-    #    ya fue procesado/materializado. No reinsertar en cola.
-    # ============================================================
-    row_msg = db.execute(
+def _is_materialized_message(db, *, mailbox_email: str, provider_message_id: str) -> bool:
+    row = db.execute(
         text("""
             SELECT m.id
             FROM messages m
@@ -46,25 +18,41 @@ def enqueue_event(
         """),
         {"mailbox": mailbox_email, "pmid": provider_message_id},
     ).fetchone()
+    return bool(row)
 
-    if row_msg:
+
+def enqueue_event(
+    db,
+    *,
+    source: str,
+    provider_message_id: str,
+    mailbox_email: str,
+    payload: dict[str, Any] | None = None,
+) -> int | None:
+    """
+    Regla corregida:
+
+    - Solo se considera "ya procesado" si existe en messages.
+    - Si hay eventos previos done/processing/pending pero NO existe messages,
+      se recicla el más reciente a pending.
+    - Evita el hueco operativo de done sin materialización.
+    """
+
+    payload_json = json.dumps(payload, ensure_ascii=False) if payload else None
+
+    if _is_materialized_message(
+        db,
+        mailbox_email=mailbox_email,
+        provider_message_id=provider_message_id,
+    ):
         return None
 
-    # ============================================================
-    # 2) Si ya existe un evento activo o ya completado para este
-    #    mismo provider_message_id, no crear otro.
-    #
-    #    Ojo:
-    #    - pending / processing evita carreras y duplicados simultáneos
-    #    - done evita reprocesar una y otra vez el mismo mensaje exacto
-    # ============================================================
     row_existing = db.execute(
         text("""
-            SELECT id
+            SELECT id, status
             FROM inbound_event_queue
             WHERE provider_message_id = :pmid
               AND mailbox_email = :mailbox
-              AND status IN ('pending', 'processing', 'done')
             ORDER BY id DESC
             LIMIT 1
         """),
@@ -72,27 +60,8 @@ def enqueue_event(
     ).fetchone()
 
     if row_existing:
-        return int(row_existing[0])
-
-    # ============================================================
-    # 3) Si existe failed para el mismo mensaje exacto, reciclamos
-    #    ese evento para reintento controlado en vez de crear otro.
-    # ============================================================
-    row_failed = db.execute(
-        text("""
-            SELECT id
-            FROM inbound_event_queue
-            WHERE provider_message_id = :pmid
-              AND mailbox_email = :mailbox
-              AND status = 'failed'
-            ORDER BY id DESC
-            LIMIT 1
-        """),
-        {"pmid": provider_message_id, "mailbox": mailbox_email},
-    ).fetchone()
-
-    if row_failed:
-        event_id = int(row_failed[0])
+        event_id = int(row_existing[0])
+        current_status = str(row_existing[1] or "").lower()
 
         db.execute(
             text("""
@@ -100,7 +69,10 @@ def enqueue_event(
                 SET source = :source,
                     payload_json = :payload,
                     status = 'pending',
-                    attempts = 0,
+                    attempts = CASE
+                        WHEN status = 'failed' THEN 0
+                        ELSE attempts
+                    END,
                     last_error = NULL,
                     available_at = NOW(6),
                     locked_at = NULL,
@@ -117,9 +89,6 @@ def enqueue_event(
 
         return event_id
 
-    # ============================================================
-    # 4) Insertar evento nuevo
-    # ============================================================
     db.execute(
         text("""
             INSERT INTO inbound_event_queue (
@@ -158,11 +127,6 @@ def enqueue_event(
 
 
 def claim_pending_events(db, *, batch_size: int) -> list[dict[str, Any]]:
-    """
-    Reclama eventos pending disponibles y los marca processing.
-    Además, libera eventos atascados en processing.
-    """
-    # 1) Liberar eventos atascados en processing por más de 10 minutos
     db.execute(
         text("""
             UPDATE inbound_event_queue
@@ -175,7 +139,6 @@ def claim_pending_events(db, *, batch_size: int) -> list[dict[str, Any]]:
         """)
     )
 
-    # 2) Reclamar nuevos pending
     rows = db.execute(
         text("""
             SELECT id, source, provider_message_id, mailbox_email, attempts

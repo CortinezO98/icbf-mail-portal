@@ -92,20 +92,43 @@ async def _run_loop() -> None:
                             attempts,
                         )
 
-                        await sync_service.process_message_id_async(
+                        result = await sync_service.process_message_id_async(
                             message_id,
                             source=source,
                         )
 
-                        with get_db_session() as db:
-                            inbound_queue_repo.mark_done(db, event_id=event_id)
+                        materialized = bool(result.get("materialized"))
+                        status = str(result.get("status") or "unknown")
 
-                        logger.info(
-                            "QUEUE_EVENT_DONE | event_id=%s | source=%s | message_id=%s",
+                        if materialized:
+                            with get_db_session() as db:
+                                inbound_queue_repo.mark_done(db, event_id=event_id)
+
+                            logger.info(
+                                "QUEUE_EVENT_DONE | event_id=%s | source=%s | message_id=%s | result_status=%s",
+                                event_id,
+                                source,
+                                message_id,
+                                status,
+                            )
+                            return
+
+                        logger.warning(
+                            "QUEUE_EVENT_NOT_MATERIALIZED | event_id=%s | source=%s | message_id=%s | result_status=%s",
                             event_id,
                             source,
                             message_id,
+                            status,
                         )
+
+                        with get_db_session() as db:
+                            inbound_queue_repo.mark_retry(
+                                db,
+                                event_id=event_id,
+                                attempts=attempts,
+                                error=f"not_materialized:{status}",
+                                max_attempts=max_attempts,
+                            )
 
                     except Exception as e:
                         logger.exception(

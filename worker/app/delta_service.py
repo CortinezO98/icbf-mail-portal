@@ -29,14 +29,6 @@ def _safe_json(resp) -> dict[str, Any]:
 
 
 def _unpack_delta_state(st: Any) -> tuple[str | None, str | None]:
-    """
-    Tu repos.get_delta_state puede devolver:
-      - (id, delta_link, next_link, last_sync_at, last_status_code, last_error)
-      - (delta_link, next_link, last_sync_at, last_status_code, last_error)
-    según cómo lo tengas.
-
-    Aquí lo hacemos tolerante.
-    """
     if not st:
         return None, None
 
@@ -57,11 +49,6 @@ def _unpack_delta_state(st: Any) -> tuple[str | None, str | None]:
 
 
 def _iter_folders(folders: Any) -> Iterable[tuple[int, str, str | None]]:
-    """
-    Soporta:
-      - list[dict] como tú lo tienes hoy: {"folder_id","folder_code","graph_folder_id"...}
-      - list[tuple] si luego migras a tuples (folder_id, folder_code, graph_folder_id)
-    """
     if not folders:
         return []
 
@@ -84,10 +71,6 @@ def _iter_folders(folders: Any) -> Iterable[tuple[int, str, str | None]]:
 
 
 async def run_delta_backstop(*, mailbox_email: str | None = None) -> dict[str, Any]:
-    """
-    Ejecuta delta para todas las carpetas monitoreadas del mailbox.
-    Guarda deltaLink/nextLink en DB.
-    """
     mb = mailbox_email or settings.MAILBOX_EMAIL
     if not mb:
         return {"ok": False, "error": "MAILBOX_EMAIL is required"}
@@ -298,14 +281,6 @@ async def _run_delta_for_folder(
 
 
 async def _enqueue_message_ids(message_ids: list[str], *, mailbox_email: str) -> dict[str, int]:
-    """
-    Encola provider_message_id encontrados por delta para que los procese
-    inbound_queue_worker.
-
-    Alineado con inbound_queue_repo.enqueue_event():
-    - si el mensaje ya existe en messages o en cola, enqueue_event() puede devolver None
-    - solo se cuenta como encolado real cuando sí regresa event_id
-    """
     concurrency = int(getattr(settings, "DELTA_CONCURRENCY", 3))
     sem = asyncio.Semaphore(concurrency)
 
@@ -335,7 +310,7 @@ async def _enqueue_message_ids(message_ids: list[str], *, mailbox_email: str) ->
                     enqueued_count += 1
                 else:
                     logger.info(
-                        "QUEUE_EVENT_SKIPPED_ALREADY_KNOWN | source=delta | message_id=%s",
+                        "QUEUE_EVENT_SKIPPED_ALREADY_MATERIALIZED | source=delta | message_id=%s",
                         mid,
                     )
                     skipped_count += 1

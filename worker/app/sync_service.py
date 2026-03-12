@@ -4,6 +4,7 @@ import base64
 import logging
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
@@ -12,7 +13,6 @@ from app.graph_client import graph_client
 from app.db import get_db_session
 from app import repos
 from app.storage import save_attachment_bytes
-from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("app.sync_service")
 
@@ -47,10 +47,6 @@ def _emails(recipients: list[dict[str, Any]] | None) -> str | None:
 
 
 def _header_value(headers: list[dict[str, Any]] | None, name: str) -> str | None:
-    """
-    Busca un header por nombre (case-insensitive) en internetMessageHeaders.
-    Devuelve el value como string o None.
-    """
     if not headers:
         return None
     lname = name.lower()
@@ -69,13 +65,6 @@ def _classify_message_kind(
     body_html: str | None,
     body_text: str | None,
 ) -> tuple[str, str | None]:
-    """
-    Clasifica el mensaje sin descartarlo.
-
-    Regla clave:
-    - NO se debe usar esta clasificación para hacer skip.
-    - Solo se usa para trazabilidad y auditoría.
-    """
     s = (subject or "").strip().lower()
     f = (from_email or "").strip().lower()
     b = ((body_text or "") + " " + (body_html or "")).lower()
@@ -107,8 +96,6 @@ def _classify_message_kind(
     sender_match = next((t for t in system_sender_tokens if t in f), None)
     body_match = next((t for t in body_tokens if t in b), None)
 
-    # Solo clasificamos como NDR cuando la evidencia es relativamente fuerte.
-    # IMPORTANTE: esto NO bloquea la creación del caso.
     if subject_match and sender_match:
         return "ndr", f"subject={subject_match};sender={sender_match}"
 
@@ -119,10 +106,6 @@ def _classify_message_kind(
 
 
 def _extract_message_id(notification: dict[str, Any]) -> str | None:
-    """
-    Preferimos resourceData.id (Graph normalmente lo trae).
-    Si no viene, intentamos parsear resource.
-    """
     rd = notification.get("resourceData")
     if isinstance(rd, dict) and rd.get("id"):
         return str(rd["id"])
@@ -141,10 +124,6 @@ def _extract_message_id(notification: dict[str, Any]) -> str | None:
 
 
 def _normalize_notifications(payload_or_list: dict[str, Any] | list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """
-    Webhook manda {"value":[...]}.
-    Pero dejamos compatibilidad si alguien llama directo con una lista.
-    """
     if isinstance(payload_or_list, list):
         return [n for n in payload_or_list if isinstance(n, dict)]
     if isinstance(payload_or_list, dict):
@@ -155,20 +134,11 @@ def _normalize_notifications(payload_or_list: dict[str, Any] | list[dict[str, An
 
 
 def _should_accept(notification: dict[str, Any]) -> bool:
-    """
-    Defensa extra: el webhook ya filtró por clientState,
-    pero aquí evitamos procesar basura si llega algo sucio.
-    """
     cs = notification.get("clientState")
     return bool(cs) and cs == settings.GRAPH_CLIENT_STATE
 
 
 def _find_last_case_by_conversation(db, *, mailbox_id: int, conversation_id: str) -> int | None:
-    """
-    Solo para trazabilidad.
-    IMPORTANTE: NO reutiliza el caso. Solo devuelve el último case_id
-    que tuvo ese conversation_id para poder auditar / enlazar a futuro.
-    """
     row = db.execute(
         text("""
             SELECT case_id
@@ -196,9 +166,6 @@ def _touch_case_activity(db, *, case_id: int, last_activity_at: datetime) -> Non
 
 
 def _get_existing_message_row(db, *, mailbox_id: int, provider_message_id: str) -> tuple[int, int, int] | None:
-    """
-    Retorna (message_pk, case_id, has_attachments)
-    """
     row = db.execute(
         text("""
             SELECT id, case_id, COALESCE(has_attachments, 0)
@@ -221,40 +188,72 @@ def _attachments_count(db, *, message_pk: int) -> int:
     return int(row[0]) if row else 0
 
 
-async def process_notifications_async(payload_or_list: dict[str, Any] | list[dict[str, Any]]) -> None:
-    """
-    Entrada esperada desde webhook:
-      {"value":[{notification},{notification},...]}
-    """
+def _message_exists(db, *, mailbox_id: int, provider_message_id: str) -> bool:
+    row = db.execute(
+        text("""
+            SELECT id
+            FROM messages
+            WHERE mailbox_id = :mbid
+              AND provider_message_id = :pmid
+            LIMIT 1
+        """),
+        {"mbid": mailbox_id, "pmid": provider_message_id},
+    ).fetchone()
+    return bool(row)
+
+
+async def process_notifications_async(payload_or_list: dict[str, Any] | list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not settings.MAILBOX_EMAIL:
         logger.error("MAILBOX_EMAIL missing - cannot process")
-        return
+        return []
 
     notifications = _normalize_notifications(payload_or_list)
     notifications = [n for n in notifications if _should_accept(n)]
 
     if not notifications:
         logger.info("No valid notifications to process")
-        return
+        return []
 
     logger.info("Processing notifications=%s", len(notifications))
 
     with get_db_session() as db:
         mailbox_id = repos.get_or_create_mailbox(db, settings.MAILBOX_EMAIL)
 
+    results: list[dict[str, Any]] = []
+
     for n in notifications:
         msg_id = _extract_message_id(n)
         if not msg_id:
             logger.warning("Skipping notification without message id")
+            results.append(
+                {
+                    "ok": False,
+                    "status": "invalid_notification",
+                    "materialized": False,
+                    "provider_message_id": None,
+                }
+            )
             continue
 
         try:
-            await _process_single_message(mailbox_id=mailbox_id, message_id=msg_id)
+            result = await _process_single_message(mailbox_id=mailbox_id, message_id=msg_id)
+            results.append(result)
         except Exception as e:
             logger.exception("Failed processing message_id=%s err=%s", msg_id, e)
+            results.append(
+                {
+                    "ok": False,
+                    "status": "exception",
+                    "materialized": False,
+                    "provider_message_id": msg_id,
+                    "error": str(e)[:500],
+                }
+            )
+
+    return results
 
 
-async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
+async def _process_single_message(*, mailbox_id: int, message_id: str) -> dict[str, Any]:
     mb = settings.MAILBOX_EMAIL
     msg = await graph_client.get_message(mb, message_id)
 
@@ -280,9 +279,18 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
     if go_live and received_at and received_at < go_live:
         logger.warning(
             "Skipping message before GO_LIVE_AT | msg=%s received_at=%s go_live=%s",
-            provider_message_id, received_at, go_live
+            provider_message_id,
+            received_at,
+            go_live,
         )
-        return
+        return {
+            "ok": True,
+            "status": "before_go_live",
+            "materialized": False,
+            "provider_message_id": provider_message_id,
+            "case_id": None,
+            "message_pk": None,
+        }
 
     internet_message_id = msg.get("internetMessageId")
     conversation_id = msg.get("conversationId")
@@ -299,9 +307,6 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
 
     has_attachments = 1 if msg.get("hasAttachments") else 0
 
-    # ============================================================
-    # Clasificación SOLO informativa. NO hace skip.
-    # ============================================================
     message_kind, classification_reason = _classify_message_kind(
         subject=subject,
         from_email=str(from_email),
@@ -319,20 +324,12 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
         )
 
     case_id: int | None = None
-    message_pk_existing: int | None = None
     message_pk: int | None = None
     should_process_attachments_even_if_dedupe = False
     assigned_agent_id: int | None = None
+    return_after_attachments = False
 
     with get_db_session() as db:
-        # 1 DEDUPE REAL SOLO POR MENSAJE EXACTO
-        #    IMPORTANTE:
-        #    - Solo se deduplica por provider_message_id.
-        #    - NO se deduplica por conversation_id.
-        #    - NO se deduplica por in_reply_to.
-        #    - NO se deduplica por asunto/remitente.
-        #    - Por lo tanto, una respuesta a un hilo SIEMPRE crea un caso nuevo
-        #      si trae un provider_message_id distinto.
         existing = _get_existing_message_row(
             db,
             mailbox_id=mailbox_id,
@@ -361,12 +358,6 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
             return_after_attachments = True
 
         else:
-            return_after_attachments = False
-
-            # ============================================================
-            # 2) Trazabilidad del hilo SOLO como referencia
-            #    IMPORTANTE: NO reutilizamos el caso anterior
-            # ============================================================
             parent_case_id: int | None = None
             if conversation_id:
                 parent_case_id = _find_last_case_by_conversation(
@@ -375,9 +366,6 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
                     conversation_id=str(conversation_id),
                 )
 
-            # ============================================================
-            # 3) SIEMPRE crear caso nuevo para todo inbound nuevo
-            # ============================================================
             case_id = repos.create_case(
                 db,
                 mailbox_id=mailbox_id,
@@ -402,9 +390,6 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
                 message_kind,
             )
 
-            # ============================================================
-            # 4) Insertar mensaje SIEMPRE en el caso recién creado
-            # ============================================================
             repos.insert_message_inbound(
                 db,
                 case_id=case_id,
@@ -451,9 +436,6 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
 
             _touch_case_activity(db, case_id=case_id, last_activity_at=received_at)
 
-            # ============================================================
-            # 5) Evento principal de creación
-            # ============================================================
             repos.insert_case_event(
                 db,
                 case_id=case_id,
@@ -474,10 +456,6 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
                 },
             )
 
-            # ============================================================
-            # 6) Si viene dentro de un hilo existente, lo registramos
-            #    solo como trazabilidad, NO como reuse del caso
-            # ============================================================
             if conversation_id:
                 repos.insert_case_event(
                     db,
@@ -514,10 +492,6 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
                         },
                     )
 
-            # ============================================================
-            # 6.1) Evento adicional si fue clasificado como NDR
-            #      pero aceptado para crear caso
-            # ============================================================
             if message_kind == "ndr":
                 repos.insert_case_event(
                     db,
@@ -538,9 +512,6 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
                     },
                 )
 
-            # ============================================================
-            # 7) Autoasignación del caso NUEVO
-            # ============================================================
             assigned_agent_id = repos.auto_assign_case(db, case_id=case_id)
             if assigned_agent_id:
                 logger.info(
@@ -581,9 +552,6 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
                     },
                 )
 
-    # ============================================================
-    # 8) Procesamiento de adjuntos fuera de la transacción
-    # ============================================================
     if (has_attachments or should_process_attachments_even_if_dedupe) and message_pk is not None:
         await _process_attachments(
             mailbox_email=mb,
@@ -594,13 +562,40 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
             conversation_id=(str(conversation_id) if conversation_id else None),
         )
 
-    # Si fue dedupe, ya no seguimos con notificación
-    if return_after_attachments:
-        return
+    materialized = False
+    with get_db_session() as db:
+        materialized = _message_exists(
+            db,
+            mailbox_id=mailbox_id,
+            provider_message_id=provider_message_id,
+        )
 
-    # ============================================================
-    # 9) Notificación al agente solo si hubo caso NUEVO + asignación
-    # ============================================================
+    if return_after_attachments:
+        return {
+            "ok": True,
+            "status": "dedupe_materialized" if materialized else "dedupe_not_materialized",
+            "materialized": materialized,
+            "provider_message_id": provider_message_id,
+            "case_id": case_id,
+            "message_pk": message_pk,
+        }
+
+    if not materialized:
+        logger.error(
+            "MESSAGE_NOT_MATERIALIZED_AFTER_PROCESS | message_id=%s | case_id=%s | message_pk=%s",
+            provider_message_id,
+            case_id,
+            message_pk,
+        )
+        return {
+            "ok": False,
+            "status": "not_materialized",
+            "materialized": False,
+            "provider_message_id": provider_message_id,
+            "case_id": case_id,
+            "message_pk": message_pk,
+        }
+
     if settings.NOTIFICATIONS_ENABLED and assigned_agent_id and case_id is not None:
         await _notify_agent_new_case(
             case_id=case_id,
@@ -608,12 +603,17 @@ async def _process_single_message(*, mailbox_id: int, message_id: str) -> None:
             case_subject=subject,
         )
 
+    return {
+        "ok": True,
+        "status": "created",
+        "materialized": True,
+        "provider_message_id": provider_message_id,
+        "case_id": case_id,
+        "message_pk": message_pk,
+    }
+
 
 async def _notify_agent_new_case(*, case_id: int, agent_id: int, case_subject: str) -> None:
-    """
-    Envía notificación al agente asignado + trazabilidad en case_events.
-    MVP: cooldown 5 min por agente (anti-spam).
-    """
     mb = settings.MAILBOX_EMAIL
     if not mb:
         return
@@ -741,12 +741,6 @@ async def _process_attachments(
     case_id: int | None = None,
     conversation_id: str | None = None,
 ) -> None:
-    """
-    ✅ Importante:
-    - NO hacemos awaits dentro de una transacción DB.
-    - Primero traemos/decodificamos/guardamos a disco.
-    - Luego persistimos rows en attachments.
-    """
     atts = await graph_client.list_attachments(mailbox_email, graph_message_id)
     if not atts:
         return
@@ -861,21 +855,24 @@ async def _process_attachments(
     logger.info("Inserted attachments=%s for provider_message_id=%s", len(prepared), provider_message_id)
 
 
-async def process_message_id_async(message_id: str, source: str = "unknown") -> None:
-    """
-    Entry-point unificado para webhook, delta, reconcile y manual.
-    Reusa la misma lógica de _process_single_message.
-    """
+async def process_message_id_async(message_id: str, source: str = "unknown") -> dict[str, Any]:
     if not settings.MAILBOX_EMAIL:
         logger.error("MAILBOX_EMAIL missing - cannot process message_id=%s", message_id)
-        return
+        return {
+            "ok": False,
+            "status": "no_mailbox_configured",
+            "materialized": False,
+            "provider_message_id": message_id,
+            "case_id": None,
+            "message_pk": None,
+        }
 
     logger.info("MESSAGE_PROCESS_START | source=%s | message_id=%s", source, message_id)
 
     with get_db_session() as db:
         mailbox_id = repos.get_or_create_mailbox(db, settings.MAILBOX_EMAIL)
 
-    await _process_single_message(
+    return await _process_single_message(
         mailbox_id=mailbox_id,
         message_id=message_id,
     )

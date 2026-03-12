@@ -14,14 +14,6 @@ logger = logging.getLogger("app.reconcile_service")
 
 
 async def reconcile_recent_inbox() -> dict:
-    """
-    Escanea mensajes recientes del Inbox y encola cualquier faltante
-    que no exista todavía en messages ni esté ya registrado en cola.
-
-    Alineado con la regla operativa:
-    - cada correo real nuevo debe crear un caso nuevo
-    - solo el mismo provider_message_id no debe volver a encolarse/procesarse
-    """
     mailbox = settings.MAILBOX_EMAIL
     if not mailbox:
         logger.warning("RECONCILE_SCAN_SKIPPED | reason=no_mailbox")
@@ -36,8 +28,6 @@ async def reconcile_recent_inbox() -> dict:
         page_size,
     )
 
-    # Usa delta simple como fuente de ids recientes
-    # Si quieres luego lo refinamos por filtro de fechas.
     status, data = await graph_client.messages_delta_page(
         mailbox_email=mailbox,
         folder_code="INBOX",
@@ -82,10 +72,6 @@ async def reconcile_recent_inbox() -> dict:
 
             found += 1
 
-            # ============================================================
-            # Validación rápida de existencia en messages
-            # (se conserva tu lógica original)
-            # ============================================================
             row = db.execute(
                 text("""
                     SELECT id
@@ -125,7 +111,7 @@ async def reconcile_recent_inbox() -> dict:
             else:
                 skipped += 1
                 logger.info(
-                    "RECONCILE_EVENT_SKIPPED_ALREADY_KNOWN | message_id=%s",
+                    "RECONCILE_EVENT_SKIPPED_ALREADY_MATERIALIZED | message_id=%s",
                     msg_id,
                 )
 
