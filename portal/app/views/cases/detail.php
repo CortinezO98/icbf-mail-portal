@@ -11,6 +11,7 @@ $isSupervisor = Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN');
 $case   = $case ?? [];
 $flash  = $flash ?? null; // ya no se usa aquí (lo maneja layout)
 $_csrf  = $_csrf ?? '';
+$relatedCases = $relatedCases ?? [];
 
 // -----------------------------
 // Render correcto de correos
@@ -74,9 +75,6 @@ function sanitize_email_html(string $html): string {
         $attr->ownerElement?->removeAttributeNode($attr);
         continue;
       }
-
-      // Permite cid: (inline email). Si NO lo quieres, bórralo aquí también.
-      // if (str_starts_with($low, 'cid:')) { ... }
     }
 
     // Quita estilos inline
@@ -93,7 +91,7 @@ function sanitize_email_html(string $html): string {
     'table','thead','tbody','tr','td','th',
     'h1','h2','h3','h4','h5','h6',
     'pre','code',
-    'img' // ✅ clave para correos
+    'img'
   ];
 
   $all = $dom->getElementsByTagName('*');
@@ -156,19 +154,16 @@ function render_message_body(array $m): string {
       return '<div class="email-body email-body--html">' . $safe . '</div>';
     }
 
-    // 🔥 Fallback inteligente: convierte bloques HTML en saltos reales
+    // Fallback inteligente: convierte bloques HTML en saltos reales
     $plain = $html;
 
-    // Convertir bloques a saltos
     $plain = preg_replace('/<\/p>/i', "\n\n", $plain);
     $plain = preg_replace('/<br\s*\/?>/i', "\n", $plain);
     $plain = preg_replace('/<\/div>/i', "\n", $plain);
     $plain = preg_replace('/<\/h[1-6]>/i', "\n\n", $plain);
     $plain = preg_replace('/<\/li>/i', "\n", $plain);
 
-    // Quitar lo demás
     $plain = strip_tags($plain);
-
     $plain = html_entity_decode($plain, ENT_QUOTES | ENT_HTML5, 'UTF-8');
     $plain = normalize_text($plain);
     $plain = trim($plain);
@@ -235,11 +230,9 @@ $showStart      = $canAgentFlowActions && $statusCode === 'ASIGNADO';
 $showInProc     = $canAgentFlowActions && $statusCode === 'EN_PROCESO';
 $showEscFinish  = $canAgentFlowActions && $statusCode === 'ESCALATED';
 $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
-
 ?>
 
 <style>
-/* ---- estilos del cuerpo de correo (NO rompen nada) ---- */
 .msg .body {
   background: #fff;
   border: 1px solid rgba(0,0,0,.08);
@@ -254,14 +247,12 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
   color: #1f2937;
 }
 
-/* Texto plano: respeta espacios y saltos */
 .email-body--text {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
 }
 
-/* HTML: que no reviente el layout */
 .email-body--html img {
   max-width: 100%;
   height: auto;
@@ -337,7 +328,84 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
               <div class="text-muted small">Asignado: <?= esc($case['assigned_at']) ?></div>
             <?php endif; ?>
           </div>
+
+          <?php if (!empty($case['thread_conversation_id'])): ?>
+            <div class="col-md-6">
+              <div class="text-muted small">Conversation ID</div>
+              <div class="small text-break"><?= esc((string)$case['thread_conversation_id']) ?></div>
+            </div>
+          <?php endif; ?>
+
+          <?php if (!empty($case['parent_case_id'])): ?>
+            <div class="col-md-6">
+              <div class="text-muted small">Caso padre</div>
+              <div class="fw-semibold">
+                <a href="<?= esc(url('/cases/' . (int)$case['parent_case_id'])) ?>" class="text-decoration-none">
+                  #<?= (int)$case['parent_case_id'] ?>
+                </a>
+              </div>
+            </div>
+          <?php endif; ?>
         </div>
+      </div>
+    </div>
+
+    <!-- Casos relacionados del mismo hilo -->
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span>Casos relacionados del mismo hilo</span>
+        <span class="text-muted small">
+          <?= !empty($relatedCases) ? count($relatedCases) . ' relacionado(s)' : '—' ?>
+        </span>
+      </div>
+
+      <div class="card-body">
+        <?php if (empty($relatedCases)): ?>
+          <div class="empty">
+            <i class="bi bi-link-45deg"></i>
+            <div class="fw-semibold mt-2">Sin casos relacionados</div>
+            <div class="small">No hay otros casos asociados a este mismo hilo.</div>
+          </div>
+        <?php else: ?>
+          <div class="list-group">
+            <?php foreach ($relatedCases as $rc): ?>
+              <?php
+                $rcStatusCode  = strtoupper((string)($rc['status_code'] ?? ''));
+                $rcStatusName  = (string)($rc['status_name'] ?? $rcStatusCode);
+                $rcStatusClass = badge_status_class($rcStatusCode);
+              ?>
+              <div class="list-group-item">
+                <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+                  <div>
+                    <div class="fw-semibold">
+                      <a href="<?= esc(url('/cases/' . (int)$rc['id'])) ?>" class="text-decoration-none">
+                        <?= esc($rc['case_number'] ?? '') ?>
+                      </a>
+                    </div>
+                    <div><?= esc($rc['subject'] ?? '') ?></div>
+                    <div class="text-muted small">
+                      <?= esc(($rc['requester_name'] ?? '') !== '' ? (string)$rc['requester_name'] : (string)($rc['requester_email'] ?? '—')) ?>
+                    </div>
+                    <div class="text-muted small">
+                      Recibido: <?= esc($rc['received_at'] ?? '—') ?>
+                    </div>
+                    <?php if (!empty($rc['assigned_user_name'])): ?>
+                      <div class="text-muted small">
+                        Asignado a: <?= esc($rc['assigned_user_name']) ?>
+                      </div>
+                    <?php endif; ?>
+                  </div>
+
+                  <div class="text-end">
+                    <span class="badge badge-status <?= esc($rcStatusClass) ?>">
+                      <?= esc($rcStatusName) ?>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            <?php endforeach; ?>
+          </div>
+        <?php endif; ?>
       </div>
     </div>
 

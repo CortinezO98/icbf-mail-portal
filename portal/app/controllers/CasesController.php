@@ -109,6 +109,13 @@ final class CasesController
         $attachments = $this->attachmentsRepo->listByCase($caseId);
         $events = $this->eventsRepo->listByCase($caseId);
 
+        // NUEVO: casos relacionados por el mismo hilo
+        $relatedCases = [];
+        $threadConversationId = trim((string)($case['thread_conversation_id'] ?? ''));
+        if ($threadConversationId !== '') {
+            $relatedCases = $this->casesRepo->listRelatedByThread($threadConversationId, $caseId);
+        }
+
         $agents = [];
         if (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN')) {
             $agents = $this->usersRepo->listAgents();
@@ -122,6 +129,7 @@ final class CasesController
             'messages' => $messages,
             'attachments' => $attachments,
             'events' => $events,
+            'relatedCases' => $relatedCases,
             'agents' => $agents,
             'flash' => $flash,
             '_csrf' => Csrf::token(),
@@ -430,7 +438,4 @@ final class CasesController
             $this->redirect('/cases/' . $caseId);
         }
     }
-
-
-
 }

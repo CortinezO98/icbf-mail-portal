@@ -65,7 +65,7 @@ final class CasesRepo
 
         $st = $this->pdo->prepare($sql);
         $st->execute($params);
-        return $st->fetchAll();
+        return $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
     }
 
     /**
@@ -117,7 +117,6 @@ final class CasesRepo
 
         $whereClause = $where ? " WHERE " . implode(" AND ", $where) : "";
 
-        // Count total
         $countSql .= $whereClause;
         $stCount = $this->pdo->prepare($countSql);
         $stCount->execute($params);
@@ -143,7 +142,7 @@ final class CasesRepo
         $st->bindValue(':offset', $offset, PDO::PARAM_INT);
 
         $st->execute();
-        $rows = $st->fetchAll();
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
         return [
             'data' => $rows,
@@ -225,8 +224,52 @@ final class CasesRepo
                 LIMIT 1";
         $st = $this->pdo->prepare($sql);
         $st->execute([':cid' => $caseId]);
-        $row = $st->fetch();
+        $row = $st->fetch(PDO::FETCH_ASSOC);
         return $row ?: null;
+    }
+
+    /**
+     * NUEVO:
+     * Lista casos relacionados por el mismo thread_conversation_id,
+     * excluyendo el caso actual.
+     */
+    public function listRelatedByThread(string $conversationId, int $excludeCaseId): array
+    {
+        $conversationId = trim($conversationId);
+        if ($conversationId === '') {
+            return [];
+        }
+
+        $sql = "
+            SELECT
+                c.id,
+                c.case_number,
+                c.subject,
+                c.requester_email,
+                c.requester_name,
+                c.received_at,
+                c.thread_conversation_id,
+                c.parent_case_id,
+                c.root_internet_message_id,
+                c.reply_to_internet_message_id,
+                cs.code AS status_code,
+                cs.name AS status_name,
+                u.full_name AS assigned_user_name
+            FROM cases c
+            JOIN case_statuses cs ON cs.id = c.status_id
+            LEFT JOIN users u ON u.id = c.assigned_user_id
+            WHERE c.thread_conversation_id = :conversation_id
+              AND c.id <> :exclude_case_id
+            ORDER BY c.received_at DESC, c.id DESC
+        ";
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute([
+            ':conversation_id' => $conversationId,
+            ':exclude_case_id' => $excludeCaseId,
+        ]);
+
+        return $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
     }
 
     /**
@@ -236,7 +279,7 @@ final class CasesRepo
     {
         $st = $this->pdo->prepare("SELECT id FROM case_statuses WHERE code=:c LIMIT 1");
         $st->execute([':c' => $code]);
-        $row = $st->fetch();
+        $row = $st->fetch(PDO::FETCH_ASSOC);
         return $row ? (int)$row['id'] : null;
     }
 
@@ -567,7 +610,4 @@ final class CasesRepo
             throw $e;
         }
     }
-
-
-
 }
