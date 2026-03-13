@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+# =============================================================================
+# delta_service.py — Portal ICBF
+# CAMBIOS v2 (2026-03-12):
+#   - _enqueue_message_ids ahora acepta force=True para re-encolar mensajes
+#     aunque ya existan en messages, permitiendo crear casos faltantes.
+#   - run_delta_backstop acepta force_reprocess=True para el modo de
+#     recuperación masiva.
+#   - Se mejora el log: QUEUE_EVENT_CREATED vs QUEUE_EVENT_SKIPPED_KNOWN
+#     para mayor claridad.
+# =============================================================================
+
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -31,7 +42,6 @@ def _safe_json(resp) -> dict[str, Any]:
 def _unpack_delta_state(st: Any) -> tuple[str | None, str | None]:
     if not st:
         return None, None
-
     try:
         if len(st) >= 3 and (isinstance(st[0], int) or str(st[0]).isdigit()):
             delta_link = str(st[1]) if st[1] else None
@@ -39,7 +49,6 @@ def _unpack_delta_state(st: Any) -> tuple[str | None, str | None]:
             return delta_link, next_link
     except Exception:
         pass
-
     try:
         delta_link = str(st[0]) if st[0] else None
         next_link = str(st[1]) if len(st) > 1 and st[1] else None
@@ -51,7 +60,6 @@ def _unpack_delta_state(st: Any) -> tuple[str | None, str | None]:
 def _iter_folders(folders: Any) -> Iterable[tuple[int, str, str | None]]:
     if not folders:
         return []
-
     out: list[tuple[int, str, str | None]] = []
     for f in folders:
         if isinstance(f, dict):
@@ -70,7 +78,22 @@ def _iter_folders(folders: Any) -> Iterable[tuple[int, str, str | None]]:
     return out
 
 
-async def run_delta_backstop(*, mailbox_email: str | None = None) -> dict[str, Any]:
+# ---------------------------------------------------------------------------
+# Punto de entrada público
+# ---------------------------------------------------------------------------
+
+async def run_delta_backstop(
+    *,
+    mailbox_email: str | None = None,
+    force_reprocess: bool = False,
+) -> dict[str, Any]:
+    """
+    Ejecuta el delta para todas las carpetas monitoreadas.
+
+    Args:
+        force_reprocess: Si True, re-encola mensajes aunque ya existan en
+                         messages, para crear casos que se hayan perdido.
+    """
     mb = mailbox_email or settings.MAILBOX_EMAIL
     if not mb:
         return {"ok": False, "error": "MAILBOX_EMAIL is required"}
@@ -86,7 +109,12 @@ async def run_delta_backstop(*, mailbox_email: str | None = None) -> dict[str, A
     folders = list(_iter_folders(folders_raw))
 
     if not folders:
-        return {"ok": True, "mailbox": mb, "note": "No monitored folders in mailbox_folders", "folders": []}
+        return {
+            "ok": True,
+            "mailbox": mb,
+            "note": "No monitored folders in mailbox_folders",
+            "folders": [],
+        }
 
     for folder_id, folder_code, graph_folder_id in folders:
         try:
@@ -96,10 +124,14 @@ async def run_delta_backstop(*, mailbox_email: str | None = None) -> dict[str, A
                 folder_id=folder_id,
                 folder_code=folder_code,
                 graph_folder_id=graph_folder_id,
+                force_reprocess=force_reprocess,
             )
             results.append(r)
         except Exception as e:
-            logger.exception("Delta failed folder_id=%s code=%s err=%s", folder_id, folder_code, e)
+            logger.exception(
+                "Delta failed folder_id=%s code=%s err=%s",
+                folder_id, folder_code, e,
+            )
             results.append(
                 {
                     "folder_id": folder_id,
@@ -112,6 +144,50 @@ async def run_delta_backstop(*, mailbox_email: str | None = None) -> dict[str, A
     return {"ok": True, "mailbox": mb, "folders": results}
 
 
+async def run_delta_force_reprocess(
+    *, mailbox_email: str | None = None
+) -> dict[str, Any]:
+    """
+    Atajo para reprocesar el delta completo y crear casos faltantes.
+    También resetea el deltaLink para asegurar que se leen todos los mensajes.
+    """
+    mb = mailbox_email or settings.MAILBOX_EMAIL
+    if not mb:
+        return {"ok": False, "error": "MAILBOX_EMAIL is required"}
+
+    logger.warning(
+        "DELTA_FORCE_REPROCESS_START | mailbox=%s | "
+        "This will reset deltaLink and reprocess all messages.",
+        mb,
+    )
+
+    # Resetear el deltaLink para forzar lectura desde el principio
+    with get_db_session() as db:
+        mailbox_id = repos.get_or_create_mailbox(db, mb)
+        folders_raw = repos.list_monitored_folders(db, mailbox_id=mailbox_id)
+        folders = list(_iter_folders(folders_raw))
+
+        for folder_id, folder_code, _ in folders:
+            repos.reset_delta_state(
+                db,
+                mailbox_id=mailbox_id,
+                folder_id=folder_id,
+                note="Manual force_reprocess reset",
+            )
+            logger.info(
+                "DELTA_STATE_RESET | folder_id=%s | folder_code=%s",
+                folder_id, folder_code,
+            )
+
+    return await run_delta_backstop(
+        mailbox_email=mb, force_reprocess=True
+    )
+
+
+# ---------------------------------------------------------------------------
+# Procesamiento por carpeta
+# ---------------------------------------------------------------------------
+
 async def _run_delta_for_folder(
     *,
     mailbox_email: str,
@@ -119,10 +195,16 @@ async def _run_delta_for_folder(
     folder_id: int,
     folder_code: str,
     graph_folder_id: str | None,
+    force_reprocess: bool = False,
 ) -> dict[str, Any]:
 
     page_size = int(getattr(settings, "DELTA_PAGE_SIZE", 50))
-    max_pages = int(getattr(settings, "DELTA_MAX_PAGES_PER_RUN", getattr(settings, "DELTA_MAX_PAGES", 50)))
+    max_pages = int(
+        getattr(
+            settings, "DELTA_MAX_PAGES_PER_RUN",
+            getattr(settings, "DELTA_MAX_PAGES", 50),
+        )
+    )
     max_messages = int(getattr(settings, "DELTA_MAX_MESSAGES", 500))
 
     with get_db_session() as db:
@@ -137,11 +219,12 @@ async def _run_delta_for_folder(
         return bool(v)
 
     is_first_run = (delta_link is None and next_link is None)
-
     prime_on_empty = _cfg_bool("DELTA_PRIME_ON_EMPTY_STATE", True)
     prime_only = _cfg_bool("DELTA_PRIME_ONLY", False)
 
-    priming = prime_only or (prime_on_empty and is_first_run)
+    # En force_reprocess no hacemos priming: queremos procesar los mensajes
+    priming = (not force_reprocess) and (prime_only or (prime_on_empty and is_first_run))
+
     url = next_link or delta_link
 
     pages = 0
@@ -153,13 +236,10 @@ async def _run_delta_for_folder(
     while True:
         if pages >= max_pages:
             break
-        if not priming and enqueued_messages >= max_messages:
+        if not priming and not force_reprocess and enqueued_messages >= max_messages:
             break
 
         pages += 1
-
-        status: int
-        data: dict[str, Any]
 
         if url:
             resp = await graph_client._request("GET", url)
@@ -234,7 +314,11 @@ async def _run_delta_for_folder(
                 msg_ids.append(str(mid))
 
         if msg_ids and not priming:
-            enqueue_result = await _enqueue_message_ids(msg_ids, mailbox_email=mailbox_email)
+            enqueue_result = await _enqueue_message_ids(
+                msg_ids,
+                mailbox_email=mailbox_email,
+                force=force_reprocess,
+            )
             enqueued_messages += int(enqueue_result.get("enqueued", 0))
             skipped_known_messages += int(enqueue_result.get("skipped", 0))
 
@@ -271,6 +355,7 @@ async def _run_delta_for_folder(
         "ok": True,
         "action": ("primed" if priming else "synced"),
         "priming": bool(priming),
+        "force_reprocess": bool(force_reprocess),
         "pages": pages,
         "total_items": total_items,
         "enqueued_messages": enqueued_messages,
@@ -280,7 +365,22 @@ async def _run_delta_for_folder(
     }
 
 
-async def _enqueue_message_ids(message_ids: list[str], *, mailbox_email: str) -> dict[str, int]:
+# ---------------------------------------------------------------------------
+# Encolado de mensajes
+# ---------------------------------------------------------------------------
+
+async def _enqueue_message_ids(
+    message_ids: list[str],
+    *,
+    mailbox_email: str,
+    force: bool = False,
+) -> dict[str, int]:
+    """
+    Encola los message_ids para procesamiento.
+
+    Args:
+        force: Si True, re-encola aunque ya existan en messages.
+    """
     concurrency = int(getattr(settings, "DELTA_CONCURRENCY", 3))
     sem = asyncio.Semaphore(concurrency)
 
@@ -299,18 +399,20 @@ async def _enqueue_message_ids(message_ids: list[str], *, mailbox_email: str) ->
                         provider_message_id=mid,
                         mailbox_email=mailbox_email,
                         payload=None,
+                        force=force,
                     )
 
                 if event_id is not None:
                     logger.info(
-                        "QUEUE_EVENT_CREATED | source=delta | event_id=%s | message_id=%s",
-                        event_id,
-                        mid,
+                        "QUEUE_EVENT_CREATED | source=delta | event_id=%s"
+                        " | message_id=%s | force=%s",
+                        event_id, mid, force,
                     )
                     enqueued_count += 1
                 else:
                     logger.info(
-                        "QUEUE_EVENT_SKIPPED_ALREADY_MATERIALIZED | source=delta | message_id=%s",
+                        "QUEUE_EVENT_SKIPPED_ALREADY_IN_QUEUE | source=delta"
+                        " | message_id=%s",
                         mid,
                     )
                     skipped_count += 1
