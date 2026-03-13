@@ -1,37 +1,5 @@
 from __future__ import annotations
 
-# =============================================================================
-# reconcile_service.py — Portal ICBF
-# CAMBIOS v3 (2026-03-13):
-#
-#   PROBLEMA RESUELTO:
-#   El reconcile v2 usaba messages_delta_page() (incremental/deltaLink) para
-#   obtener los mensajes del inbox. Si el webhook fallaba Y el delta ya había
-#   avanzado pasando el correo, el reconcile nunca lo veía porque el deltaLink
-#   ya no lo incluía. Resultado: correos en Graph sin caso en DB.
-#
-#   SOLUCIÓN:
-#   El reconcile ahora hace un GET directo al inbox de Graph ordenado por
-#   receivedDateTime desc, filtrando por la ventana de lookback. Esto es
-#   independiente del deltaLink y garantiza que SIEMPRE comparamos los
-#   mensajes reales del inbox contra la DB.
-#
-#   FLUJO NORMAL (force_reprocess=False):
-#   1. Obtener IDs del inbox Graph (últimas RECONCILE_LOOKBACK_MINUTES)
-#   2. Bulk query: cuáles ya existen en messages
-#   3. Los que NO están → enqueue_event() → crean caso nuevo automáticamente
-#   4. Los que SÍ están → skip
-#
-#   FLUJO FORZADO (force_reprocess=True):
-#   1. Igual pero todos se encolan con force=True
-#   2. sync_service crea caso nuevo aunque el message_id ya exista
-#
-#   VENTAJA vs v2:
-#   - No depende del deltaLink
-#   - Detecta correos que nunca llegaron al worker (webhook fallido)
-#   - Bulk query a DB: una sola consulta para todos los IDs de la página
-# =============================================================================
-
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -50,17 +18,24 @@ _graph = GraphClient()
 async def reconcile_recent_inbox(*, force_reprocess: bool = False) -> dict:
     """
     Escanea el inbox de Graph directamente (NO via deltaLink) y encola
-    los mensajes que no existen en la tabla messages.
+    los mensajes que no tienen caso en la DB.
+
+    Lógica de decisión por mensaje:
+      - No existe en messages                → encolar (caso nuevo)
+      - Existe en messages sin case_id       → encolar (recuperar hueco)
+      - Existe en messages con case_id       → skip (ya procesado)
 
     Args:
-        force_reprocess: Si True, encola TODOS los mensajes aunque ya
-                         existan en messages. Crea un caso nuevo por cada uno.
+        force_reprocess: Si True, loguea más detalle y es equivalente
+                         al modo normal en cuanto a seguridad. Solo encola
+                         mensajes sin caso. No genera duplicados.
     """
     mailbox = settings.MAILBOX_EMAIL
     if not mailbox:
         logger.warning("RECONCILE_SCAN_SKIPPED | reason=no_mailbox")
         return {"ok": False, "reason": "no_mailbox"}
 
+    # Leer configuración de .env en cada ciclo (permite cambio en caliente)
     if not force_reprocess:
         cfg = getattr(settings, "RECONCILE_FORCE_REPROCESS", False)
         if isinstance(cfg, str):
@@ -125,31 +100,58 @@ async def reconcile_recent_inbox(*, force_reprocess: bool = False) -> dict:
         return {"ok": True, "found": 0, "enqueued": 0, "skipped": 0, "force_reprocess": force_reprocess}
 
     # -------------------------------------------------------------------------
-    # Bulk check: cuáles de estos IDs ya existen en messages (1 sola query)
+    # Bulk check: para cada ID del inbox, saber su estado en DB.
+    #
+    # Retorna DOS conjuntos:
+    #   - existing_with_case:    mensajes en DB con case_id válido → SKIP
+    #   - existing_without_case: mensajes en DB sin case_id → ENCOLAR
+    #
+    # Los IDs que no aparecen en ninguno de los dos → ENCOLAR (nuevos)
     # -------------------------------------------------------------------------
     graph_ids = [m["id"] for m in all_messages if isinstance(m, dict) and m.get("id")]
-    existing_ids: set[str] = set()
 
-    if not force_reprocess and graph_ids:
+    # Mensajes con caso correcto → no tocar
+    existing_with_case: set[str] = set()
+    # Mensajes en DB pero sin caso → recuperar
+    existing_without_case: set[str] = set()
+
+    if graph_ids:
         try:
             with get_db_session() as db:
                 placeholders = ", ".join([f":id{i}" for i in range(len(graph_ids))])
                 params = {f"id{i}": gid for i, gid in enumerate(graph_ids)}
+
                 rows = db.execute(
-                    text(f"SELECT provider_message_id FROM messages WHERE provider_message_id IN ({placeholders})"),
+                    text(f"""
+                        SELECT provider_message_id,
+                               CASE WHEN case_id IS NOT NULL THEN 1 ELSE 0 END AS has_case
+                        FROM messages
+                        WHERE provider_message_id IN ({placeholders})
+                    """),
                     params,
                 ).fetchall()
-                existing_ids = {r[0] for r in rows}
+
+                for row in rows:
+                    pmid = row[0]
+                    has_case = int(row[1])
+                    if has_case:
+                        existing_with_case.add(pmid)
+                    else:
+                        existing_without_case.add(pmid)
+
         except Exception as e:
             logger.error("RECONCILE_DB_CHECK_ERROR | err=%s", e)
             return {"ok": False, "error": str(e)}
 
     # -------------------------------------------------------------------------
-    # Encolar los mensajes faltantes
+    # Encolar los mensajes que necesitan caso
     # -------------------------------------------------------------------------
     found = len(graph_ids)
     enqueued = 0
     skipped = 0
+    skipped_has_case = 0
+    enqueued_new = 0
+    enqueued_no_case = 0
 
     try:
         with get_db_session() as db:
@@ -160,9 +162,31 @@ async def reconcile_recent_inbox(*, force_reprocess: bool = False) -> dict:
                 if not msg_id:
                     continue
 
-                if not force_reprocess and msg_id in existing_ids:
+                subject_preview = str(item.get("subject", ""))[:80]
+
+                # Caso 3: Ya existe con caso correcto → SKIP siempre
+                if msg_id in existing_with_case:
                     skipped += 1
+                    skipped_has_case += 1
+                    if force_reprocess:
+                        # En modo force, logueamos explícitamente que lo saltamos
+                        logger.info(
+                            "RECONCILE_SKIP_HAS_CASE | message_id=%s | subject=%s"
+                            " | reason=already_has_case",
+                            msg_id,
+                            subject_preview,
+                        )
                     continue
+
+                # Caso 1 y 2: No existe en DB O existe sin case_id → encolar
+                # Usamos force=False siempre para que inbound_queue_repo
+                # maneje correctamente el reciclaje de eventos existentes
+                # y no genere duplicados en vuelo.
+                reason = (
+                    "no_case_in_db"
+                    if msg_id in existing_without_case
+                    else "not_in_db"
+                )
 
                 event_id = inbound_queue_repo.enqueue_event(
                     db,
@@ -170,23 +194,31 @@ async def reconcile_recent_inbox(*, force_reprocess: bool = False) -> dict:
                     provider_message_id=str(msg_id),
                     mailbox_email=mailbox,
                     payload=None,
-                    force=force_reprocess,
+                    force=False,  # Siempre False: no queremos duplicados
                 )
 
                 if event_id is not None:
                     enqueued += 1
+                    if reason == "no_case_in_db":
+                        enqueued_no_case += 1
+                    else:
+                        enqueued_new += 1
                     logger.info(
-                        "RECONCILE_EVENT_ENQUEUED | event_id=%s | message_id=%s | subject=%s | force=%s",
+                        "RECONCILE_EVENT_ENQUEUED | event_id=%s | message_id=%s"
+                        " | subject=%s | reason=%s | force_mode=%s",
                         event_id,
                         msg_id,
-                        str(item.get("subject", ""))[:80],
+                        subject_preview,
+                        reason,
                         force_reprocess,
                     )
                 else:
                     skipped += 1
                     logger.info(
-                        "RECONCILE_EVENT_SKIPPED_ALREADY_IN_QUEUE | message_id=%s",
+                        "RECONCILE_EVENT_SKIPPED_ALREADY_IN_QUEUE | message_id=%s"
+                        " | reason=%s",
                         msg_id,
+                        reason,
                     )
 
     except Exception as e:
@@ -194,10 +226,16 @@ async def reconcile_recent_inbox(*, force_reprocess: bool = False) -> dict:
         return {"ok": False, "error": str(e)}
 
     logger.info(
-        "RECONCILE_SCAN_DONE | found=%s | enqueued=%s | skipped=%s | pages=%s | force=%s",
+        "RECONCILE_SCAN_DONE | found=%s | enqueued=%s"
+        " | enqueued_new=%s | enqueued_no_case=%s"
+        " | skipped=%s | skipped_has_case=%s"
+        " | pages=%s | force_mode=%s",
         found,
         enqueued,
+        enqueued_new,
+        enqueued_no_case,
         skipped,
+        skipped_has_case,
         pages_fetched,
         force_reprocess,
     )
@@ -206,7 +244,10 @@ async def reconcile_recent_inbox(*, force_reprocess: bool = False) -> dict:
         "ok": True,
         "found": found,
         "enqueued": enqueued,
+        "enqueued_new": enqueued_new,
+        "enqueued_no_case": enqueued_no_case,
         "skipped": skipped,
+        "skipped_has_case": skipped_has_case,
         "pages_fetched": pages_fetched,
         "force_reprocess": force_reprocess,
     }
@@ -214,7 +255,10 @@ async def reconcile_recent_inbox(*, force_reprocess: bool = False) -> dict:
 
 async def reconcile_force_reprocess_all() -> dict:
     """
-    Atajo para reprocesar todos los correos recientes y crear los casos
-    faltantes. Equivalente a reconcile_recent_inbox(force_reprocess=True).
+    Atajo para el endpoint POST /admin/reconcile/force.
+
+    IMPORTANTE v4: Este modo ya NO crea duplicados. Solo encola mensajes
+    que no tienen caso (nuevos o con hueco). Para forzar un caso duplicado
+    en un mensaje específico, usar POST /admin/reprocess?message_id=...
     """
     return await reconcile_recent_inbox(force_reprocess=True)
