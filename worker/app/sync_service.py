@@ -1,16 +1,6 @@
 from __future__ import annotations
 
-# =============================================================================
-# sync_service.py — Portal ICBF
-# CAMBIOS v2 (2026-03-12):
-#   - SIEMPRE se crea un caso nuevo por cada provider_message_id recibido.
-#     Ya no se hace DEDUPE_HIT que bloquee la creación del caso.
-#   - La deduplicación ahora es SOLO para adjuntos (idempotente).
-#   - Se agrega log DUPLICATE_MESSAGE_NEW_CASE para trazabilidad.
-#   - _get_existing_message_row se mantiene solo para decidir si
-#     ya existe el mensaje en DB (para no re-insertar el mensaje,
-#     pero SÍ crear un caso nuevo si no tiene caso activo visible).
-# =============================================================================
+
 
 import base64
 import logging
@@ -156,6 +146,7 @@ def _find_last_case_by_conversation(db, *, mailbox_id: int, conversation_id: str
             FROM messages
             WHERE mailbox_id = :mbid
               AND conversation_id = :cid
+              AND case_id IS NOT NULL
             ORDER BY id DESC
             LIMIT 1
         """),
@@ -178,8 +169,11 @@ def _touch_case_activity(db, *, case_id: int, last_activity_at: datetime) -> Non
 
 def _get_existing_message_row(
     db, *, mailbox_id: int, provider_message_id: str
-) -> tuple[int, int, int] | None:
-    """Retorna (message_pk, case_id, has_attachments) si el mensaje ya existe en DB."""
+) -> tuple[int, int | None, int] | None:
+    """
+    Retorna (message_pk, case_id_or_None, has_attachments) si el mensaje
+    ya existe en DB. case_id puede ser None si el mensaje quedó huérfano.
+    """
     row = db.execute(
         text("""
             SELECT id, case_id, COALESCE(has_attachments, 0)
@@ -191,7 +185,10 @@ def _get_existing_message_row(
     ).fetchone()
     if not row:
         return None
-    return int(row[0]), int(row[1]), int(row[2])
+    msg_pk = int(row[0])
+    case_id = int(row[1]) if row[1] is not None else None
+    has_att = int(row[2])
+    return msg_pk, case_id, has_att
 
 
 def _attachments_count(db, *, message_pk: int) -> int:
@@ -377,15 +374,15 @@ async def _process_single_message(
     case_id: int | None = None
     message_pk: int | None = None
     assigned_agent_id: int | None = None
-    is_duplicate_message = False  # el mensaje ya existía en DB
 
     with get_db_session() as db:
 
         # ----------------------------------------------------------------
-        # ¿Ya existe este provider_message_id en messages?
-        # Si existe: lo reutilizamos para adjuntos, pero creamos caso nuevo.
-        # Si no existe: insertamos mensaje Y creamos caso nuevo.
-        # SIEMPRE se crea un caso por cada correo que llega.
+        # VERIFICAR ESTADO DEL MENSAJE EN DB
+        #
+        # CASO 1: No existe → insertar + crear caso (flujo normal)
+        # CASO 2: Existe CON case_id → ya materializado, skip
+        # CASO 3: Existe SIN case_id → hueco operativo, crear caso
         # ----------------------------------------------------------------
         existing = _get_existing_message_row(
             db,
@@ -393,18 +390,67 @@ async def _process_single_message(
             provider_message_id=provider_message_id,
         )
 
-        if existing:
-            # Mensaje duplicado en DB — aún así creamos caso nuevo
+        # ----------------------------------------------------------------
+        # CASO 2: Mensaje ya materializado con caso → skip
+        # ----------------------------------------------------------------
+        if existing is not None:
             message_pk_existing, case_id_existing, has_att_db = existing
-            message_pk = message_pk_existing
-            is_duplicate_message = True
 
+            if case_id_existing is not None:
+                # Ya tiene caso → idempotente, no duplicar
+                logger.info(
+                    "MESSAGE_ALREADY_MATERIALIZED | message_id=%s"
+                    " | case_id=%s | message_pk=%s",
+                    provider_message_id,
+                    case_id_existing,
+                    message_pk_existing,
+                )
+
+                # Reprocesar adjuntos solo si el mensaje los tiene pero no
+                # están en DB todavía (recuperación de adjuntos perdidos)
+                if has_attachments and has_att_db:
+                    att_count = _attachments_count(db, message_pk=message_pk_existing)
+                    if att_count == 0:
+                        logger.info(
+                            "MESSAGE_ALREADY_MATERIALIZED_MISSING_ATTACHMENTS"
+                            " | message_pk=%s | case_id=%s — will re-sync attachments",
+                            message_pk_existing,
+                            case_id_existing,
+                        )
+                        # Procesar adjuntos fuera del with (al final)
+                        message_pk = message_pk_existing
+                        case_id = case_id_existing
+                    else:
+                        message_pk = message_pk_existing
+                        case_id = case_id_existing
+                else:
+                    message_pk = message_pk_existing
+                    case_id = case_id_existing
+
+                # Retornar sin crear nuevo caso
+                return {
+                    "ok": True,
+                    "status": "already_materialized",
+                    "materialized": True,
+                    "provider_message_id": provider_message_id,
+                    "case_id": case_id,
+                    "message_pk": message_pk,
+                }
+
+            # ----------------------------------------------------------------
+            # CASO 3: Existe en messages SIN case_id → hueco, recuperar
+            # ----------------------------------------------------------------
+            message_pk = message_pk_existing
             logger.info(
-                "DUPLICATE_MESSAGE_NEW_CASE | message_id=%s | prev_case_id=%s"
-                " | Creating new case as requested.",
+                "ORPHAN_MESSAGE_DETECTED | message_id=%s | message_pk=%s"
+                " — message exists in DB without case_id, creating case.",
                 provider_message_id,
-                case_id_existing,
+                message_pk,
             )
+
+        # ----------------------------------------------------------------
+        # CASO 1 y 3: Crear caso nuevo
+        # ----------------------------------------------------------------
 
         # Buscar caso padre por conversación (para threading)
         parent_case_id: int | None = None
@@ -415,7 +461,6 @@ async def _process_single_message(
                 conversation_id=str(conversation_id),
             )
 
-        # Siempre crear caso nuevo
         case_id = repos.create_case(
             db,
             mailbox_id=mailbox_id,
@@ -435,10 +480,12 @@ async def _process_single_message(
             ),
         )
 
+        is_orphan_recovery = existing is not None  # Caso 3
+
         logger.info(
             "CASE_CREATED_FROM_INBOUND | case_id=%s | message_id=%s"
             " | from_email=%s | subject=%s | conversation_id=%s"
-            " | in_reply_to=%s | message_kind=%s | is_duplicate_message=%s",
+            " | in_reply_to=%s | message_kind=%s | is_orphan_recovery=%s",
             case_id,
             provider_message_id,
             from_email,
@@ -446,11 +493,26 @@ async def _process_single_message(
             str(conversation_id) if conversation_id else None,
             str(in_reply_to) if in_reply_to else None,
             message_kind,
-            is_duplicate_message,
+            is_orphan_recovery,
         )
 
-        # Si el mensaje no existe en DB, insertarlo ahora
-        if not is_duplicate_message:
+        if is_orphan_recovery:
+            # CASO 3: enlazar el mensaje huérfano al nuevo caso
+            db.execute(
+                text("""
+                    UPDATE messages
+                    SET case_id = :new_case_id
+                    WHERE id = :msg_pk
+                    LIMIT 1
+                """),
+                {"new_case_id": case_id, "msg_pk": message_pk},
+            )
+            logger.info(
+                "CASE_LINKED_TO_ORPHAN_MESSAGE | message_pk=%s | case_id=%s",
+                message_pk, case_id,
+            )
+        else:
+            # CASO 1: insertar mensaje nuevo
             repos.insert_message_inbound(
                 db,
                 case_id=case_id,
@@ -494,27 +556,10 @@ async def _process_single_message(
                 message_pk, case_id, provider_message_id,
                 received_at, message_kind,
             )
-        else:
-            # Mensaje duplicado: actualizar su case_id al nuevo caso
-            # para que los adjuntos queden ligados al caso correcto
-            db.execute(
-                text("""
-                    UPDATE messages
-                    SET case_id = :new_case_id, updated_at = NOW(6)
-                    WHERE id = :msg_pk
-                    LIMIT 1
-                """),
-                {"new_case_id": case_id, "msg_pk": message_pk},
-            )
-            logger.info(
-                "DUPLICATE_MESSAGE_RELINKED | message_pk=%s"
-                " | new_case_id=%s",
-                message_pk, case_id,
-            )
 
         _touch_case_activity(db, case_id=case_id, last_activity_at=received_at)
 
-        # Eventos de auditoría
+        # Auditoría
         repos.insert_case_event(
             db,
             case_id=case_id,
@@ -536,7 +581,7 @@ async def _process_single_message(
                 "subject": subject,
                 "message_kind": message_kind,
                 "classification_reason": classification_reason,
-                "is_duplicate_message": is_duplicate_message,
+                "is_orphan_recovery": is_orphan_recovery,
             },
         )
 
@@ -639,7 +684,7 @@ async def _process_single_message(
                 },
             )
 
-    # Adjuntos
+    # Adjuntos (fuera del with para no bloquear la sesión DB)
     if has_attachments and message_pk is not None:
         await _process_attachments(
             mailbox_email=mb,
@@ -689,7 +734,6 @@ async def _process_single_message(
         "provider_message_id": provider_message_id,
         "case_id": case_id,
         "message_pk": message_pk,
-        "is_duplicate_message": is_duplicate_message,
     }
 
 
