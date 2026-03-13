@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-
-
 import base64
 import logging
 from datetime import datetime, timezone
@@ -139,7 +137,9 @@ def _should_accept(notification: dict[str, Any]) -> bool:
 # Helpers de BD
 # ---------------------------------------------------------------------------
 
-def _find_last_case_by_conversation(db, *, mailbox_id: int, conversation_id: str) -> int | None:
+def _find_last_case_by_conversation(
+    db, *, mailbox_id: int, conversation_id: str
+) -> int | None:
     row = db.execute(
         text("""
             SELECT case_id
@@ -178,7 +178,8 @@ def _get_existing_message_row(
         text("""
             SELECT id, case_id, COALESCE(has_attachments, 0)
             FROM messages
-            WHERE mailbox_id = :mbid AND provider_message_id = :pmid
+            WHERE mailbox_id = :mbid
+              AND provider_message_id = :pmid
             LIMIT 1
         """),
         {"mbid": mailbox_id, "pmid": provider_message_id},
@@ -202,8 +203,10 @@ def _attachments_count(db, *, message_pk: int) -> int:
 def _message_exists(db, *, mailbox_id: int, provider_message_id: str) -> bool:
     row = db.execute(
         text("""
-            SELECT id FROM messages
-            WHERE mailbox_id = :mbid AND provider_message_id = :pmid
+            SELECT id
+            FROM messages
+            WHERE mailbox_id = :mbid
+              AND provider_message_id = :pmid
             LIMIT 1
         """),
         {"mbid": mailbox_id, "pmid": provider_message_id},
@@ -252,13 +255,12 @@ async def process_notifications_async(
 
         try:
             result = await _process_single_message(
-                mailbox_id=mailbox_id, message_id=msg_id
+                mailbox_id=mailbox_id,
+                message_id=msg_id,
             )
             results.append(result)
         except Exception as e:
-            logger.exception(
-                "Failed processing message_id=%s err=%s", msg_id, e
-            )
+            logger.exception("Failed processing message_id=%s err=%s", msg_id, e)
             results.append(
                 {
                     "ok": False,
@@ -288,13 +290,18 @@ async def process_message_id_async(
             "message_pk": None,
         }
 
-    logger.info("MESSAGE_PROCESS_START | source=%s | message_id=%s", source, message_id)
+    logger.info(
+        "MESSAGE_PROCESS_START | source=%s | message_id=%s",
+        source,
+        message_id,
+    )
 
     with get_db_session() as db:
         mailbox_id = repos.get_or_create_mailbox(db, settings.MAILBOX_EMAIL)
 
     return await _process_single_message(
-        mailbox_id=mailbox_id, message_id=message_id
+        mailbox_id=mailbox_id,
+        message_id=message_id,
     )
 
 
@@ -328,12 +335,13 @@ async def _process_single_message(
     )
     sent_at = _iso_to_dt(msg.get("sentDateTime"))
 
-    # Guardia GO_LIVE
     go_live = settings.go_live_dt() if hasattr(settings, "go_live_dt") else None
     if go_live and received_at and received_at < go_live:
         logger.warning(
             "Skipping message before GO_LIVE_AT | msg=%s received_at=%s go_live=%s",
-            provider_message_id, received_at, go_live,
+            provider_message_id,
+            received_at,
+            go_live,
         )
         return {
             "ok": True,
@@ -368,15 +376,20 @@ async def _process_single_message(
     if message_kind == "ndr":
         logger.warning(
             "NDR_DETECTED_BUT_ACCEPTED | message_id=%s | subject=%s | from=%s | reason=%s",
-            provider_message_id, subject, from_email, classification_reason,
+            provider_message_id,
+            subject,
+            from_email,
+            classification_reason,
         )
 
     case_id: int | None = None
     message_pk: int | None = None
     assigned_agent_id: int | None = None
+    existing: tuple[int, int | None, int] | None = None
+    should_resync_attachments = False
+    should_return_already_materialized = False
 
     with get_db_session() as db:
-
         # ----------------------------------------------------------------
         # VERIFICAR ESTADO DEL MENSAJE EN DB
         #
@@ -391,245 +404,177 @@ async def _process_single_message(
         )
 
         # ----------------------------------------------------------------
-        # CASO 2: Mensaje ya materializado con caso → skip
+        # CASO 2: Mensaje ya materializado con caso
         # ----------------------------------------------------------------
         if existing is not None:
-            message_pk_existing, case_id_existing, has_att_db = existing
+            message_pk_existing, case_id_existing, _has_att_db = existing
 
             if case_id_existing is not None:
-                # Ya tiene caso → idempotente, no duplicar
                 logger.info(
-                    "MESSAGE_ALREADY_MATERIALIZED | message_id=%s"
-                    " | case_id=%s | message_pk=%s",
+                    "MESSAGE_ALREADY_MATERIALIZED | message_id=%s | case_id=%s | message_pk=%s",
                     provider_message_id,
                     case_id_existing,
                     message_pk_existing,
                 )
 
-                # Reprocesar adjuntos solo si el mensaje los tiene pero no
-                # están en DB todavía (recuperación de adjuntos perdidos)
-                if has_attachments and has_att_db:
+                message_pk = message_pk_existing
+                case_id = case_id_existing
+
+                if has_attachments:
                     att_count = _attachments_count(db, message_pk=message_pk_existing)
                     if att_count == 0:
                         logger.info(
-                            "MESSAGE_ALREADY_MATERIALIZED_MISSING_ATTACHMENTS"
-                            " | message_pk=%s | case_id=%s — will re-sync attachments",
+                            "MESSAGE_ALREADY_MATERIALIZED_MISSING_ATTACHMENTS | message_pk=%s | case_id=%s",
                             message_pk_existing,
                             case_id_existing,
                         )
-                        # Procesar adjuntos fuera del with (al final)
-                        message_pk = message_pk_existing
-                        case_id = case_id_existing
-                    else:
-                        message_pk = message_pk_existing
-                        case_id = case_id_existing
-                else:
-                    message_pk = message_pk_existing
-                    case_id = case_id_existing
+                        should_resync_attachments = True
 
-                # Retornar sin crear nuevo caso
-                return {
-                    "ok": True,
-                    "status": "already_materialized",
-                    "materialized": True,
-                    "provider_message_id": provider_message_id,
-                    "case_id": case_id,
-                    "message_pk": message_pk,
-                }
+                if not should_resync_attachments:
+                    return {
+                        "ok": True,
+                        "status": "already_materialized",
+                        "materialized": True,
+                        "provider_message_id": provider_message_id,
+                        "case_id": case_id,
+                        "message_pk": message_pk,
+                    }
 
-            # ----------------------------------------------------------------
-            # CASO 3: Existe en messages SIN case_id → hueco, recuperar
-            # ----------------------------------------------------------------
-            message_pk = message_pk_existing
-            logger.info(
-                "ORPHAN_MESSAGE_DETECTED | message_id=%s | message_pk=%s"
-                " — message exists in DB without case_id, creating case.",
-                provider_message_id,
-                message_pk,
-            )
+                should_return_already_materialized = True
+
+            else:
+                # ----------------------------------------------------------------
+                # CASO 3: Existe en messages SIN case_id → hueco, recuperar
+                # ----------------------------------------------------------------
+                message_pk = message_pk_existing
+                logger.info(
+                    "ORPHAN_MESSAGE_DETECTED | message_id=%s | message_pk=%s"
+                    " — message exists in DB without case_id, creating case.",
+                    provider_message_id,
+                    message_pk,
+                )
 
         # ----------------------------------------------------------------
         # CASO 1 y 3: Crear caso nuevo
         # ----------------------------------------------------------------
-
-        # Buscar caso padre por conversación (para threading)
-        parent_case_id: int | None = None
-        if conversation_id:
-            parent_case_id = _find_last_case_by_conversation(
-                db,
-                mailbox_id=mailbox_id,
-                conversation_id=str(conversation_id),
-            )
-
-        case_id = repos.create_case(
-            db,
-            mailbox_id=mailbox_id,
-            subject=subject,
-            requester_email=str(from_email),
-            requester_name=(str(from_name) if from_name else None),
-            received_at=received_at,
-            thread_conversation_id=(
-                str(conversation_id) if conversation_id else None
-            ),
-            parent_case_id=parent_case_id,
-            root_internet_message_id=(
-                str(internet_message_id) if internet_message_id else None
-            ),
-            reply_to_internet_message_id=(
-                str(in_reply_to) if in_reply_to else None
-            ),
-        )
-
-        is_orphan_recovery = existing is not None  # Caso 3
-
-        logger.info(
-            "CASE_CREATED_FROM_INBOUND | case_id=%s | message_id=%s"
-            " | from_email=%s | subject=%s | conversation_id=%s"
-            " | in_reply_to=%s | message_kind=%s | is_orphan_recovery=%s",
-            case_id,
-            provider_message_id,
-            from_email,
-            subject,
-            str(conversation_id) if conversation_id else None,
-            str(in_reply_to) if in_reply_to else None,
-            message_kind,
-            is_orphan_recovery,
-        )
-
-        if is_orphan_recovery:
-            # CASO 3: enlazar el mensaje huérfano al nuevo caso
-            db.execute(
-                text("""
-                    UPDATE messages
-                    SET case_id = :new_case_id
-                    WHERE id = :msg_pk
-                    LIMIT 1
-                """),
-                {"new_case_id": case_id, "msg_pk": message_pk},
-            )
-            logger.info(
-                "CASE_LINKED_TO_ORPHAN_MESSAGE | message_pk=%s | case_id=%s",
-                message_pk, case_id,
-            )
-        else:
-            # CASO 1: insertar mensaje nuevo
-            repos.insert_message_inbound(
-                db,
-                case_id=case_id,
-                mailbox_id=mailbox_id,
-                folder_id=None,
-                provider_message_id=provider_message_id,
-                conversation_id=(
-                    str(conversation_id) if conversation_id else None
-                ),
-                internet_message_id=(
-                    str(internet_message_id) if internet_message_id else None
-                ),
-                in_reply_to=(str(in_reply_to) if in_reply_to else None),
-                from_email=str(from_email),
-                to_emails=to_emails,
-                cc_emails=cc_emails,
-                bcc_emails=bcc_emails,
-                subject=subject,
-                body_text=body_text,
-                body_html=body_html,
-                received_at=received_at,
-                sent_at=sent_at,
-                has_attachments=has_attachments,
-                processed_by_worker=settings.WORKER_INSTANCE_ID,
-            )
-
-            row = db.execute(
-                text("""
-                    SELECT id FROM messages
-                    WHERE mailbox_id = :mbid AND provider_message_id = :pmid
-                    ORDER BY id DESC LIMIT 1
-                """),
-                {"mbid": mailbox_id, "pmid": provider_message_id},
-            ).fetchone()
-
-            message_pk = int(row[0]) if row else None
-
-            logger.info(
-                "MESSAGE_INSERTED | message_pk=%s | case_id=%s"
-                " | message_id=%s | received_at=%s | message_kind=%s",
-                message_pk, case_id, provider_message_id,
-                received_at, message_kind,
-            )
-
-        _touch_case_activity(db, case_id=case_id, last_activity_at=received_at)
-
-        # Auditoría
-        repos.insert_case_event(
-            db,
-            case_id=case_id,
-            actor_user_id=None,
-            source="WORKER",
-            event_type="CASE_CREATED_FROM_INBOUND",
-            from_status_id=None,
-            to_status_id=None,
-            details={
-                "provider_message_id": provider_message_id,
-                "conversation_id": (
-                    str(conversation_id) if conversation_id else None
-                ),
-                "internet_message_id": (
-                    str(internet_message_id) if internet_message_id else None
-                ),
-                "in_reply_to": (str(in_reply_to) if in_reply_to else None),
-                "from_email": from_email,
-                "subject": subject,
-                "message_kind": message_kind,
-                "classification_reason": classification_reason,
-                "is_orphan_recovery": is_orphan_recovery,
-            },
-        )
-
-        if conversation_id:
-            repos.insert_case_event(
-                db,
-                case_id=case_id,
-                actor_user_id=None,
-                source="WORKER",
-                event_type="CASE_LINKED_TO_THREAD",
-                from_status_id=None,
-                to_status_id=None,
-                details={
-                    "provider_message_id": provider_message_id,
-                    "conversation_id": str(conversation_id),
-                    "internet_message_id": (
-                        str(internet_message_id) if internet_message_id else None
-                    ),
-                    "in_reply_to": (str(in_reply_to) if in_reply_to else None),
-                    "parent_case_id": parent_case_id,
-                    "message_kind": message_kind,
-                },
-            )
-
-            if parent_case_id:
-                repos.insert_case_event(
+        if existing is None or (existing is not None and existing[1] is None):
+            parent_case_id: int | None = None
+            if conversation_id:
+                parent_case_id = _find_last_case_by_conversation(
                     db,
-                    case_id=case_id,
-                    actor_user_id=None,
-                    source="WORKER",
-                    event_type="CASE_PARENT_LINKED",
-                    from_status_id=None,
-                    to_status_id=None,
-                    details={
-                        "provider_message_id": provider_message_id,
-                        "conversation_id": str(conversation_id),
-                        "parent_case_id": parent_case_id,
-                        "message_kind": message_kind,
-                    },
+                    mailbox_id=mailbox_id,
+                    conversation_id=str(conversation_id),
                 )
 
-        if message_kind == "ndr":
+            case_id = repos.create_case(
+                db,
+                mailbox_id=mailbox_id,
+                subject=subject,
+                requester_email=str(from_email),
+                requester_name=(str(from_name) if from_name else None),
+                received_at=received_at,
+                thread_conversation_id=(
+                    str(conversation_id) if conversation_id else None
+                ),
+                parent_case_id=parent_case_id,
+                root_internet_message_id=(
+                    str(internet_message_id) if internet_message_id else None
+                ),
+                reply_to_internet_message_id=(
+                    str(in_reply_to) if in_reply_to else None
+                ),
+            )
+
+            is_orphan_recovery = existing is not None
+
+            logger.info(
+                "CASE_CREATED_FROM_INBOUND | case_id=%s | message_id=%s"
+                " | from_email=%s | subject=%s | conversation_id=%s"
+                " | in_reply_to=%s | message_kind=%s | is_orphan_recovery=%s",
+                case_id,
+                provider_message_id,
+                from_email,
+                subject,
+                str(conversation_id) if conversation_id else None,
+                str(in_reply_to) if in_reply_to else None,
+                message_kind,
+                is_orphan_recovery,
+            )
+
+            if is_orphan_recovery:
+                db.execute(
+                    text("""
+                        UPDATE messages
+                        SET case_id = :new_case_id
+                        WHERE id = :msg_pk
+                        LIMIT 1
+                    """),
+                    {"new_case_id": case_id, "msg_pk": message_pk},
+                )
+                logger.info(
+                    "CASE_LINKED_TO_ORPHAN_MESSAGE | message_pk=%s | case_id=%s",
+                    message_pk,
+                    case_id,
+                )
+            else:
+                repos.insert_message_inbound(
+                    db,
+                    case_id=case_id,
+                    mailbox_id=mailbox_id,
+                    folder_id=None,
+                    provider_message_id=provider_message_id,
+                    conversation_id=(
+                        str(conversation_id) if conversation_id else None
+                    ),
+                    internet_message_id=(
+                        str(internet_message_id) if internet_message_id else None
+                    ),
+                    in_reply_to=(str(in_reply_to) if in_reply_to else None),
+                    from_email=str(from_email),
+                    to_emails=to_emails,
+                    cc_emails=cc_emails,
+                    bcc_emails=bcc_emails,
+                    subject=subject,
+                    body_text=body_text,
+                    body_html=body_html,
+                    received_at=received_at,
+                    sent_at=sent_at,
+                    has_attachments=has_attachments,
+                    processed_by_worker=settings.WORKER_INSTANCE_ID,
+                )
+
+                row = db.execute(
+                    text("""
+                        SELECT id
+                        FROM messages
+                        WHERE mailbox_id = :mbid
+                          AND provider_message_id = :pmid
+                        ORDER BY id DESC
+                        LIMIT 1
+                    """),
+                    {"mbid": mailbox_id, "pmid": provider_message_id},
+                ).fetchone()
+
+                message_pk = int(row[0]) if row else None
+
+                logger.info(
+                    "MESSAGE_INSERTED | message_pk=%s | case_id=%s"
+                    " | message_id=%s | received_at=%s | message_kind=%s",
+                    message_pk,
+                    case_id,
+                    provider_message_id,
+                    received_at,
+                    message_kind,
+                )
+
+            _touch_case_activity(db, case_id=case_id, last_activity_at=received_at)
+
             repos.insert_case_event(
                 db,
                 case_id=case_id,
                 actor_user_id=None,
                 source="WORKER",
-                event_type="NDR_DETECTED_BUT_ACCEPTED",
+                event_type="CASE_CREATED_FROM_INBOUND",
                 from_status_id=None,
                 to_status_id=None,
                 details={
@@ -637,52 +582,118 @@ async def _process_single_message(
                     "conversation_id": (
                         str(conversation_id) if conversation_id else None
                     ),
+                    "internet_message_id": (
+                        str(internet_message_id) if internet_message_id else None
+                    ),
+                    "in_reply_to": (str(in_reply_to) if in_reply_to else None),
                     "from_email": from_email,
                     "subject": subject,
                     "message_kind": message_kind,
                     "classification_reason": classification_reason,
+                    "is_orphan_recovery": is_orphan_recovery,
                 },
             )
 
-        # Auto-asignación
-        assigned_agent_id = repos.auto_assign_case(db, case_id=case_id)
-        if assigned_agent_id:
-            logger.info(
-                "AUTO_ASSIGNED | case_id=%s | agent_id=%s",
-                case_id, assigned_agent_id,
-            )
-            repos.insert_case_event(
-                db,
-                case_id=case_id,
-                actor_user_id=None,
-                source="WORKER",
-                event_type="AUTO_ASSIGNED",
-                from_status_id=None,
-                to_status_id=None,
-                details={
-                    "agent_id": assigned_agent_id,
-                    "provider_message_id": provider_message_id,
-                    "message_kind": message_kind,
-                },
-            )
-        else:
-            logger.warning(
-                "No eligible agents found for auto-assign case_id=%s", case_id
-            )
-            repos.insert_case_event(
-                db,
-                case_id=case_id,
-                actor_user_id=None,
-                source="WORKER",
-                event_type="AUTO_ASSIGN_SKIPPED",
-                from_status_id=None,
-                to_status_id=None,
-                details={
-                    "reason": "no_eligible_agents",
-                    "provider_message_id": provider_message_id,
-                    "message_kind": message_kind,
-                },
-            )
+            if conversation_id:
+                repos.insert_case_event(
+                    db,
+                    case_id=case_id,
+                    actor_user_id=None,
+                    source="WORKER",
+                    event_type="CASE_LINKED_TO_THREAD",
+                    from_status_id=None,
+                    to_status_id=None,
+                    details={
+                        "provider_message_id": provider_message_id,
+                        "conversation_id": str(conversation_id),
+                        "internet_message_id": (
+                            str(internet_message_id)
+                            if internet_message_id else None
+                        ),
+                        "in_reply_to": (str(in_reply_to) if in_reply_to else None),
+                        "parent_case_id": parent_case_id,
+                        "message_kind": message_kind,
+                    },
+                )
+
+                if parent_case_id:
+                    repos.insert_case_event(
+                        db,
+                        case_id=case_id,
+                        actor_user_id=None,
+                        source="WORKER",
+                        event_type="CASE_PARENT_LINKED",
+                        from_status_id=None,
+                        to_status_id=None,
+                        details={
+                            "provider_message_id": provider_message_id,
+                            "conversation_id": str(conversation_id),
+                            "parent_case_id": parent_case_id,
+                            "message_kind": message_kind,
+                        },
+                    )
+
+            if message_kind == "ndr":
+                repos.insert_case_event(
+                    db,
+                    case_id=case_id,
+                    actor_user_id=None,
+                    source="WORKER",
+                    event_type="NDR_DETECTED_BUT_ACCEPTED",
+                    from_status_id=None,
+                    to_status_id=None,
+                    details={
+                        "provider_message_id": provider_message_id,
+                        "conversation_id": (
+                            str(conversation_id) if conversation_id else None
+                        ),
+                        "from_email": from_email,
+                        "subject": subject,
+                        "message_kind": message_kind,
+                        "classification_reason": classification_reason,
+                    },
+                )
+
+            assigned_agent_id = repos.auto_assign_case(db, case_id=case_id)
+            if assigned_agent_id:
+                logger.info(
+                    "AUTO_ASSIGNED | case_id=%s | agent_id=%s",
+                    case_id,
+                    assigned_agent_id,
+                )
+                repos.insert_case_event(
+                    db,
+                    case_id=case_id,
+                    actor_user_id=None,
+                    source="WORKER",
+                    event_type="AUTO_ASSIGNED",
+                    from_status_id=None,
+                    to_status_id=None,
+                    details={
+                        "agent_id": assigned_agent_id,
+                        "provider_message_id": provider_message_id,
+                        "message_kind": message_kind,
+                    },
+                )
+            else:
+                logger.warning(
+                    "No eligible agents found for auto-assign case_id=%s",
+                    case_id,
+                )
+                repos.insert_case_event(
+                    db,
+                    case_id=case_id,
+                    actor_user_id=None,
+                    source="WORKER",
+                    event_type="AUTO_ASSIGN_SKIPPED",
+                    from_status_id=None,
+                    to_status_id=None,
+                    details={
+                        "reason": "no_eligible_agents",
+                        "provider_message_id": provider_message_id,
+                        "message_kind": message_kind,
+                    },
+                )
 
     # Adjuntos (fuera del with para no bloquear la sesión DB)
     if has_attachments and message_pk is not None:
@@ -695,7 +706,16 @@ async def _process_single_message(
             conversation_id=(str(conversation_id) if conversation_id else None),
         )
 
-    # Verificar materialización final
+    if should_return_already_materialized:
+        return {
+            "ok": True,
+            "status": "already_materialized",
+            "materialized": True,
+            "provider_message_id": provider_message_id,
+            "case_id": case_id,
+            "message_pk": message_pk,
+        }
+
     materialized = False
     with get_db_session() as db:
         materialized = _message_exists(
@@ -708,7 +728,9 @@ async def _process_single_message(
         logger.error(
             "MESSAGE_NOT_MATERIALIZED_AFTER_PROCESS | message_id=%s"
             " | case_id=%s | message_pk=%s",
-            provider_message_id, case_id, message_pk,
+            provider_message_id,
+            case_id,
+            message_pk,
         )
         return {
             "ok": False,
@@ -719,7 +741,6 @@ async def _process_single_message(
             "message_pk": message_pk,
         }
 
-    # Notificación al agente
     if settings.NOTIFICATIONS_ENABLED and assigned_agent_id and case_id is not None:
         await _notify_agent_new_case(
             case_id=case_id,
@@ -770,13 +791,13 @@ async def _notify_agent_new_case(
                 ip_address=None,
                 user_agent=ua,
             )
-            logger.info(
-                "Agent has no email user_id=%s -> skip notify", agent_id
-            )
+            logger.info("Agent has no email user_id=%s -> skip notify", agent_id)
             return
 
         allowed = repos.try_mark_agent_notified(
-            db, user_id=agent_id, cooldown_minutes=5
+            db,
+            user_id=agent_id,
+            cooldown_minutes=5,
         )
         if not allowed:
             repos.insert_case_event(
@@ -798,7 +819,8 @@ async def _notify_agent_new_case(
                 user_agent=ua,
             )
             logger.info(
-                "Notify cooldown active agent_id=%s -> skip notify", agent_id
+                "Notify cooldown active agent_id=%s -> skip notify",
+                agent_id,
             )
             return
 
@@ -822,7 +844,10 @@ async def _notify_agent_new_case(
 
     try:
         await graph_client.send_mail(
-            mb, to_email=to_email, subject=subject, body_html=body_html
+            mb,
+            to_email=to_email,
+            subject=subject,
+            body_html=body_html,
         )
         with get_db_session() as db:
             repos.insert_case_event(
@@ -845,7 +870,9 @@ async def _notify_agent_new_case(
             )
         logger.info(
             "Notification sent case_id=%s agent_id=%s to=%s",
-            case_id, agent_id, to_email,
+            case_id,
+            agent_id,
+            to_email,
         )
     except Exception as e:
         with get_db_session() as db:
@@ -870,7 +897,9 @@ async def _notify_agent_new_case(
             )
         logger.warning(
             "Notification failed case_id=%s agent_id=%s err=%s",
-            case_id, agent_id, e,
+            case_id,
+            agent_id,
+            e,
         )
 
 
@@ -899,7 +928,9 @@ async def _process_attachments(
 
         if "fileAttachment" not in odata_type:
             logger.warning(
-                "Skipping non-file attachment type=%s id=%s", odata_type, att_id
+                "Skipping non-file attachment type=%s id=%s",
+                odata_type,
+                att_id,
             )
             continue
 
@@ -912,14 +943,17 @@ async def _process_attachments(
         content_b64 = a.get("contentBytes")
         if not content_b64 and att_id:
             full = await graph_client.get_attachment(
-                mailbox_email, graph_message_id, att_id
+                mailbox_email,
+                graph_message_id,
+                att_id,
             )
             content_b64 = full.get("contentBytes")
 
         if not content_b64:
             logger.warning(
                 "Attachment without contentBytes filename=%s id=%s",
-                filename, att_id,
+                filename,
+                att_id,
             )
             continue
 
@@ -927,7 +961,9 @@ async def _process_attachments(
             raw = base64.b64decode(content_b64)
         except Exception:
             logger.warning(
-                "Invalid base64 attachment filename=%s id=%s", filename, att_id
+                "Invalid base64 attachment filename=%s id=%s",
+                filename,
+                att_id,
             )
             continue
 
@@ -941,15 +977,11 @@ async def _process_attachments(
                 content_type=content_type,
             )
         except Exception as e:
-            logger.warning(
-                "Attachment rejected filename=%s reason=%s", filename, e
-            )
+            logger.warning("Attachment rejected filename=%s reason=%s", filename, e)
             continue
 
         if not stored.sha256:
-            logger.warning(
-                "Attachment without sha256 filename=%s -> skip", filename
-            )
+            logger.warning("Attachment without sha256 filename=%s -> skip", filename)
             continue
 
         prepared.append(
@@ -966,8 +998,7 @@ async def _process_attachments(
         )
 
         logger.info(
-            "Prepared attachment msg_pk=%s graph_msg_id=%s"
-            " filename=%s bytes=%s sha=%s",
+            "Prepared attachment msg_pk=%s graph_msg_id=%s filename=%s bytes=%s sha=%s",
             message_pk,
             graph_message_id,
             filename,
@@ -984,7 +1015,8 @@ async def _process_attachments(
             logger.info(
                 "Attachments already exist for message_pk=%s count=%s"
                 " -> will continue (idempotent insert)",
-                message_pk, existing_count,
+                message_pk,
+                existing_count,
             )
 
         inserted = 0
@@ -1022,5 +1054,6 @@ async def _process_attachments(
 
     logger.info(
         "Inserted attachments=%s for provider_message_id=%s",
-        len(prepared), provider_message_id,
+        len(prepared),
+        provider_message_id,
     )

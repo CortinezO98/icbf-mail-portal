@@ -34,6 +34,7 @@ def _is_materialized_message(
             JOIN mailboxes mb ON mb.id = m.mailbox_id
             WHERE mb.email = :mailbox
               AND m.provider_message_id = :pmid
+              AND m.case_id IS NOT NULL
             LIMIT 1
         """),
         {"mailbox": mailbox_email, "pmid": provider_message_id},
