@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+# =============================================================================
+# webhook.py — Portal ICBF
+# CAMBIOS v2 (2026-03-12):
+#   - El enqueue_event del webhook ya NO bloquea mensajes conocidos gracias
+#     al nuevo inbound_queue_repo. El log QUEUE_EVENT_SKIPPED_ALREADY_MATERIALIZED
+#     se renombra a QUEUE_EVENT_SKIPPED_ALREADY_IN_QUEUE para mayor claridad.
+#   - El webhook siempre encola en la cola en memoria (_webhook_queue)
+#     independientemente de si el evento fue persistido o reciclado.
+#     Esto garantiza que ningún correo nuevo se pierda por timing.
+# =============================================================================
+
 import asyncio
 import json
 import logging
@@ -166,6 +177,7 @@ async def graph_webhook_post(request: Request) -> Response:
             continue
 
         try:
+            # Persistir en la cola durable (inbound_event_queue)
             with get_db_session() as db:
                 event_id = inbound_queue_repo.enqueue_event(
                     db,
@@ -173,6 +185,9 @@ async def graph_webhook_post(request: Request) -> Response:
                     provider_message_id=msg_id,
                     mailbox_email=settings.MAILBOX_EMAIL,
                     payload=n,
+                    # force=False en webhook: el inbound_queue_repo ya maneja
+                    # el reciclaje correcto. No forzamos aquí porque el webhook
+                    # trae mensajes genuinamente nuevos.
                 )
 
             if event_id is not None:
@@ -183,22 +198,31 @@ async def graph_webhook_post(request: Request) -> Response:
                     msg_id,
                 )
             else:
+                # El evento ya estaba en cola pendiente o fue reciclado
                 skipped += 1
                 logger.info(
-                    "QUEUE_EVENT_SKIPPED_ALREADY_MATERIALIZED | source=webhook | message_id=%s",
+                    "QUEUE_EVENT_SKIPPED_ALREADY_IN_QUEUE | source=webhook | message_id=%s",
                     msg_id,
                 )
 
+            # Siempre encolar en la cola en memoria para procesamiento inmediato
+            # independientemente del resultado de persistencia.
+            # Esto garantiza latencia mínima para correos nuevos.
             if _webhook_queue is not None:
                 try:
                     _webhook_queue.put_nowait(msg_id)
                     enqueued += 1
                     logger.info("WEBHOOK_ENQUEUED | message_id=%s", msg_id)
                 except asyncio.QueueFull:
-                    logger.error("WEBHOOK_QUEUE_FULL | message_id=%s", msg_id)
+                    logger.error(
+                        "WEBHOOK_QUEUE_FULL | message_id=%s | "
+                        "message will be processed by inbound_queue_worker",
+                        msg_id,
+                    )
             else:
                 logger.warning(
-                    "WEBHOOK_QUEUE_NOT_AVAILABLE | message_id=%s | persisted_only=%s",
+                    "WEBHOOK_QUEUE_NOT_AVAILABLE | message_id=%s | "
+                    "persisted_only=%s | inbound_queue_worker will pick it up",
                     msg_id,
                     "true" if event_id is not None else "false",
                 )

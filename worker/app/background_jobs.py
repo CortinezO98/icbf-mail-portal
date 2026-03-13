@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+# =============================================================================
+# background_jobs.py — Portal ICBF
+# CAMBIOS v2 (2026-03-12):
+#   - _reconcile_loop ahora loguea también `skipped` para visibilidad completa.
+#   - Lee RECONCILE_FORCE_REPROCESS desde settings para activar el modo
+#     de recuperación masiva sin necesidad de reiniciar el worker.
+#   - _delta_loop loguea skipped_known_messages para trazabilidad.
+# =============================================================================
+
 import asyncio
 import logging
 import random
@@ -18,10 +27,6 @@ _reconcile_task: asyncio.Task | None = None
 
 
 def _cfg_bool(name: str, default: bool) -> bool:
-    """
-    Lee settings.<name>. Si no existe, usa default.
-    Soporta strings tipo "1", "true", "yes".
-    """
     v = getattr(settings, name, default)
     if isinstance(v, str):
         return v.strip().lower() in ("1", "true", "yes", "y", "on")
@@ -37,10 +42,8 @@ def _cfg_int(name: str, default: int) -> int:
 
 
 async def start_background_jobs() -> None:
-    """
-    Arranca loops en background. Se llama en FastAPI startup.
-    """
     global _stop_event, _tasks, _reconcile_task
+
     if _stop_event is not None:
         logger.warning("Background jobs already started - skipping")
         return
@@ -50,22 +53,27 @@ async def start_background_jobs() -> None:
     _reconcile_task = None
 
     if _cfg_bool("SUB_LOOP_ENABLED", True):
-        _tasks.append(asyncio.create_task(_subscription_loop(_stop_event), name="subscription_loop"))
+        _tasks.append(
+            asyncio.create_task(_subscription_loop(_stop_event), name="subscription_loop")
+        )
 
     if _cfg_bool("DELTA_LOOP_ENABLED", True):
-        _tasks.append(asyncio.create_task(_delta_loop(_stop_event), name="delta_loop"))
+        _tasks.append(
+            asyncio.create_task(_delta_loop(_stop_event), name="delta_loop")
+        )
 
     if _cfg_bool("RECONCILE_ENABLED", True):
-        _reconcile_task = asyncio.create_task(_reconcile_loop(_stop_event), name="reconcile_loop")
+        _reconcile_task = asyncio.create_task(
+            _reconcile_loop(_stop_event), name="reconcile_loop"
+        )
         _tasks.append(_reconcile_task)
 
-    logger.warning("Background jobs started | tasks=%s", [t.get_name() for t in _tasks])
+    logger.warning(
+        "Background jobs started | tasks=%s", [t.get_name() for t in _tasks]
+    )
 
 
 async def stop_background_jobs() -> None:
-    """
-    Detiene loops en background. Se llama en FastAPI shutdown.
-    """
     global _stop_event, _tasks, _reconcile_task
 
     if _stop_event is None:
@@ -85,10 +93,6 @@ async def stop_background_jobs() -> None:
 
 
 async def _subscription_loop(stop_event: asyncio.Event) -> None:
-    """
-    Llama ensure_subscription periódicamente.
-    Tu ensure_subscription ya decide: created / renewed / ok (según expires_at + threshold).
-    """
     interval = _cfg_int("SUB_LOOP_INTERVAL_SECONDS", 120)
     jitter = _cfg_int("SUB_LOOP_JITTER_SECONDS", 15)
     await asyncio.sleep(1)
@@ -113,9 +117,6 @@ async def _subscription_loop(stop_event: asyncio.Event) -> None:
 
 
 async def _delta_loop(stop_event: asyncio.Event) -> None:
-    """
-    Corre delta backstop periódicamente (para no depender solo del webhook).
-    """
     interval = _cfg_int("DELTA_LOOP_INTERVAL_SECONDS", 300)
     jitter = _cfg_int("DELTA_LOOP_JITTER_SECONDS", 20)
 
@@ -126,18 +127,22 @@ async def _delta_loop(stop_event: asyncio.Event) -> None:
             res: dict[str, Any] = await run_delta_backstop()
             folders = res.get("folders") or []
             enqueued = 0
+            skipped = 0
             ok_folders = 0
+
             for f in folders:
                 if isinstance(f, dict) and f.get("ok"):
                     ok_folders += 1
                     enqueued += int(f.get("enqueued_messages") or 0)
+                    skipped += int(f.get("skipped_known_messages") or 0)
 
             logger.info(
-                "Delta loop | ok=%s | folders_ok=%s/%s | enqueued_messages=%s",
+                "Delta loop | ok=%s | folders_ok=%s/%s | enqueued_messages=%s | skipped_known=%s",
                 res.get("ok"),
                 ok_folders,
                 len(folders),
                 enqueued,
+                skipped,
             )
         except Exception as e:
             logger.exception("Delta loop failed: %s", e)
@@ -150,10 +155,6 @@ async def _delta_loop(stop_event: asyncio.Event) -> None:
 
 
 async def _reconcile_loop(stop_event: asyncio.Event) -> None:
-    """
-    Corre conciliación periódica para detectar mensajes recientes faltantes
-    y encolarlos para procesamiento.
-    """
     interval = _cfg_int("RECONCILE_INTERVAL_SECONDS", 300)
 
     await asyncio.sleep(3)
@@ -161,12 +162,21 @@ async def _reconcile_loop(stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         try:
             if _cfg_bool("RECONCILE_ENABLED", True):
-                res = await reconcile_recent_inbox()
+                # Lee RECONCILE_FORCE_REPROCESS desde settings en cada ciclo.
+                # Permite activar el modo de recuperación masiva en caliente
+                # sin reiniciar el worker: solo cambiar la variable de entorno
+                # y hacer reload de la config.
+                force = _cfg_bool("RECONCILE_FORCE_REPROCESS", False)
+
+                res = await reconcile_recent_inbox(force_reprocess=force)
+
                 logger.info(
-                    "Reconcile loop | ok=%s | found=%s | enqueued=%s",
+                    "Reconcile loop | ok=%s | found=%s | enqueued=%s | skipped=%s | force=%s",
                     res.get("ok"),
                     res.get("found"),
                     res.get("enqueued"),
+                    res.get("skipped"),
+                    res.get("force_reprocess"),
                 )
         except Exception as e:
             logger.exception("Reconcile loop failed: %s", e)
