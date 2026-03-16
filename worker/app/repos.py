@@ -53,34 +53,38 @@ def get_status_id_by_code(db: Session, code: str) -> int:
 def pick_least_loaded_agent(db: Session) -> int | None:
     """
     Retorna user_id del agente con menor carga activa.
-    Carga activa = casos asignados con status IN ('ASIGNADO','EN_PROCESO').
+    Carga activa = casos con status IN ('ASIGNADO', 'EN_PROCESO').
 
     Elegibles:
       - users.is_active = 1
       - users.assign_enabled = 1
-      - roles.code = 'AGENTE' (via user_roles)
+      - roles.code = 'AGENTE'
 
     Desempate:
+      - menor carga activa (SUM explícito, no COUNT total)
       - last_assigned_at más antiguo (NULL primero)
-      - u.id asc
+      - u.id ASC
     """
     row = db.execute(
         text("""
             SELECT u.id
             FROM users u
-            JOIN user_roles ur ON ur.user_id = u.id
-            JOIN roles r ON r.id = ur.role_id AND r.code = 'AGENTE'
+            JOIN user_roles ur
+              ON ur.user_id = u.id
+            JOIN roles r
+              ON r.id = ur.role_id
+             AND r.code = 'AGENTE'
             LEFT JOIN cases c
               ON c.assigned_user_id = u.id
             LEFT JOIN case_statuses cs
               ON cs.id = c.status_id
-             AND cs.code IN ('ASIGNADO','EN_PROCESO')
             WHERE u.is_active = 1
               AND u.assign_enabled = 1
-            GROUP BY u.id
-            ORDER BY COUNT(c.id) ASC,
-                     COALESCE(u.last_assigned_at, '1970-01-01') ASC,
-                     u.id ASC
+            GROUP BY u.id, u.last_assigned_at
+            ORDER BY
+              SUM(CASE WHEN cs.code IN ('ASIGNADO', 'EN_PROCESO', 'RESPONDIDO') THEN 1 ELSE 0 END) ASC,
+              COALESCE(u.last_assigned_at, '1970-01-01') ASC,
+              u.id ASC
             LIMIT 1
         """)
     ).fetchone()
@@ -90,26 +94,28 @@ def pick_least_loaded_agent(db: Session) -> int | None:
 
 def auto_assign_case(db: Session, *, case_id: int) -> int | None:
     """
-    Asigna case_id a un agente balanceado (least-open-cases).
-    Idempotente: si ya está asignado, devuelve el assigned_user_id actual.
+    Asigna case_id al agente con menor carga activa.
 
-    Actualiza:
-      - cases.assigned_user_id
-      - cases.status_id = ASIGNADO
-      - cases.assigned_at
-      - cases.last_activity_at
+    El FOR UPDATE en el SELECT del caso evita doble asignación
+    cuando dos workers procesan el mismo case_id en paralelo.
 
-    También:
-      - users.last_assigned_at
-      - case_events: ASSIGNED mode=auto (source WORKER)
+    Idempotente: si ya está asignado, retorna el assigned_user_id actual.
     """
     row = db.execute(
-        text("SELECT assigned_user_id, status_id FROM cases WHERE id = :cid LIMIT 1"),
+        text("""
+            SELECT assigned_user_id, status_id
+            FROM cases
+            WHERE id = :cid
+            LIMIT 1
+            FOR UPDATE
+        """),
         {"cid": case_id},
     ).fetchone()
+
     if not row:
         return None
 
+    # Idempotente: otro worker ya asignó este caso
     if row[0] is not None:
         return int(row[0])
 
@@ -123,10 +129,10 @@ def auto_assign_case(db: Session, *, case_id: int) -> int | None:
         text("""
             UPDATE cases
             SET assigned_user_id = :uid,
-                status_id = :sid,
-                assigned_at = NOW(6),
+                status_id        = :sid,
+                assigned_at      = NOW(6),
                 last_activity_at = NOW(6),
-                updated_at = NOW(6)
+                updated_at       = NOW(6)
             WHERE id = :cid
             LIMIT 1
         """),
@@ -137,7 +143,7 @@ def auto_assign_case(db: Session, *, case_id: int) -> int | None:
         text("""
             UPDATE users
             SET last_assigned_at = NOW(6),
-                updated_at = NOW(6)
+                updated_at       = NOW(6)
             WHERE id = :uid
             LIMIT 1
         """),
