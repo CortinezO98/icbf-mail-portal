@@ -94,8 +94,8 @@ final class ReportsRepo
         $missing = (int)($st->fetchColumn() ?: 0);
 
         return [
-            'kpis' => $kpis,
-            'daily' => $daily,
+            'kpis'                => $kpis,
+            'daily'               => $daily,
             'missing_attachments' => $missing,
         ];
     }
@@ -123,7 +123,14 @@ final class ReportsRepo
         return $st->fetchAll() ?: [];
     }
 
-
+    /**
+     * FIX v2: Eliminado el subquery correlacionado (SELECT MIN...) dentro del CTE base.
+     * Reemplazado por un CTE previo `first_ev` que hace el MIN() una sola vez con GROUP BY.
+     * Esto evita los ~13.000 subqueries individuales que causaban el error 500 / OOM.
+     *
+     * También: PDO no permite reusar el mismo placeholder en múltiples CTEs,
+     * por eso se usan :s_base, :s_base2, :s_base3, :s_base4 con el mismo valor.
+     */
     public function exportSlaDataset(string $startDate, string $endDate, ?int $mailboxId = null): array
     {
         $whereMailbox = $mailboxId ? " AND c.mailbox_id = :mb " : "";
@@ -200,30 +207,26 @@ final class ReportsRepo
                 END
               , 2) AS horas_sla_total,
 
-              /* ==============================
-                 ✅ NUEVO: TIEMPOS POR ESTADO
-                 ============================== */
-              COALESCE(t.nuevo_min, 0) AS tiempo_nuevo_min,
-              COALESCE(t.asignado_min, 0) AS tiempo_asignado_min,
-              COALESCE(t.en_proceso_min, 0) AS tiempo_en_proceso_min,
-              COALESCE(t.respondido_min, 0) AS tiempo_respondido_min,
-              COALESCE(t.cerrado_min, 0) AS tiempo_cerrado_min,
-              COALESCE(t.escalado_min, 0) AS tiempo_escalado_min,
-              COALESCE(t.esperando_info_min, 0) AS tiempo_esperando_info_min,
+              COALESCE(t.nuevo_min, 0)          AS tiempo_nuevo_min,
+              COALESCE(t.asignado_min, 0)        AS tiempo_asignado_min,
+              COALESCE(t.en_proceso_min, 0)      AS tiempo_en_proceso_min,
+              COALESCE(t.respondido_min, 0)      AS tiempo_respondido_min,
+              COALESCE(t.cerrado_min, 0)         AS tiempo_cerrado_min,
+              COALESCE(t.escalado_min, 0)        AS tiempo_escalado_min,
+              COALESCE(t.esperando_info_min, 0)  AS tiempo_esperando_info_min,
 
-              ROUND(COALESCE(t.nuevo_min,0)/60, 2) AS tiempo_nuevo_h,
-              ROUND(COALESCE(t.asignado_min,0)/60, 2) AS tiempo_asignado_h,
-              ROUND(COALESCE(t.en_proceso_min,0)/60, 2) AS tiempo_en_proceso_h,
-              ROUND(COALESCE(t.respondido_min,0)/60, 2) AS tiempo_respondido_h,
-              ROUND(COALESCE(t.cerrado_min,0)/60, 2) AS tiempo_cerrado_h,
-              ROUND(COALESCE(t.escalado_min,0)/60, 2) AS tiempo_escalado_h,
+              ROUND(COALESCE(t.nuevo_min,0)/60, 2)         AS tiempo_nuevo_h,
+              ROUND(COALESCE(t.asignado_min,0)/60, 2)      AS tiempo_asignado_h,
+              ROUND(COALESCE(t.en_proceso_min,0)/60, 2)    AS tiempo_en_proceso_h,
+              ROUND(COALESCE(t.respondido_min,0)/60, 2)    AS tiempo_respondido_h,
+              ROUND(COALESCE(t.cerrado_min,0)/60, 2)       AS tiempo_cerrado_h,
+              ROUND(COALESCE(t.escalado_min,0)/60, 2)      AS tiempo_escalado_h,
               ROUND(COALESCE(t.esperando_info_min,0)/60, 2) AS tiempo_esperando_info_h,
 
-              COALESCE(t.ultimo_evento_at, NULL) AS ultimo_cambio_estado_at,
+              COALESCE(t.ultimo_evento_at, NULL)  AS ultimo_cambio_estado_at,
               COALESCE(t.min_estado_actual, NULL) AS minutos_en_estado_actual,
               ROUND(COALESCE(t.min_estado_actual,0)/60, 2) AS horas_en_estado_actual,
 
-              -- ✅ Alias “bonitos” solicitados (no rompe)
               cs.name AS estado_actual
 
             FROM cases c
@@ -231,39 +234,56 @@ final class ReportsRepo
             LEFT JOIN users u ON u.id = c.assigned_user_id
             LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
 
-            /* Subquery de tiempos por estado basada en case_events */
+            /* -------------------------------------------------------
+               Tiempos por estado — FIX v2
+               Subquery correlacionado eliminado. Reemplazado por CTE
+               first_ev que precalcula MIN(created_at) en un solo pass.
+               ------------------------------------------------------- */
             LEFT JOIN (
               WITH
+              /* PASO 1: calcular el primer evento de cada caso en un solo GROUP BY */
+              first_ev AS (
+                SELECT
+                  e0.case_id,
+                  MIN(e0.created_at) AS first_event_at
+                FROM case_events e0
+                WHERE e0.to_status_id IS NOT NULL
+                  AND e0.case_id IN (
+                    SELECT id FROM cases c3
+                    WHERE DATE(c3.received_at) BETWEEN :s_base AND :e_base
+                  )
+                GROUP BY e0.case_id
+              ),
+              /* PASO 2: base usa JOIN a first_ev en lugar de subquery correlacionado */
               base AS (
                 SELECT
-                  c2.id AS case_id,
-                  c2.status_id AS initial_status_id,
-                  c2.received_at AS initial_at,
-                  (
-                    SELECT MIN(e0.created_at)
-                    FROM case_events e0
-                    WHERE e0.case_id = c2.id
-                      AND e0.to_status_id IS NOT NULL
-                  ) AS first_event_at
+                  c2.id            AS case_id,
+                  c2.status_id     AS initial_status_id,
+                  c2.received_at   AS initial_at,
+                  fe.first_event_at
                 FROM cases c2
-                WHERE DATE(c2.received_at) BETWEEN :s_base AND :e_base
-
+                LEFT JOIN first_ev fe ON fe.case_id = c2.id
+                WHERE DATE(c2.received_at) BETWEEN :s_base2 AND :e_base2
               ),
               ev AS (
                 SELECT
                   e.case_id,
-                  e.to_status_id AS status_id,
-                  e.created_at AS at_time,
+                  e.to_status_id                                                          AS status_id,
+                  e.created_at                                                            AS at_time,
                   LEAD(e.created_at) OVER (PARTITION BY e.case_id ORDER BY e.created_at) AS next_time
                 FROM case_events e
                 WHERE e.to_status_id IS NOT NULL
+                  AND e.case_id IN (
+                    SELECT id FROM cases c4
+                    WHERE DATE(c4.received_at) BETWEEN :s_base3 AND :e_base3
+                  )
               ),
               timeline AS (
                 SELECT
                   b.case_id,
                   b.initial_status_id AS status_id,
-                  b.initial_at AS at_time,
-                  b.first_event_at AS next_time
+                  b.initial_at        AS at_time,
+                  b.first_event_at    AS next_time
                 FROM base b
                 UNION ALL
                 SELECT
@@ -272,6 +292,7 @@ final class ReportsRepo
                   ev.at_time,
                   ev.next_time
                 FROM ev
+                INNER JOIN base b2 ON b2.case_id = ev.case_id
               ),
               durations AS (
                 SELECT
@@ -287,22 +308,27 @@ final class ReportsRepo
                   MAX(e.created_at) AS last_at
                 FROM case_events e
                 WHERE e.to_status_id IS NOT NULL
+                  AND e.case_id IN (
+                    SELECT id FROM cases c5
+                    WHERE DATE(c5.received_at) BETWEEN :s_base4 AND :e_base4
+                  )
                 GROUP BY e.case_id
               )
               SELECT
                 d.case_id,
 
-                SUM(CASE WHEN csx.code='NUEVO' THEN d.minutes_in_status ELSE 0 END) AS nuevo_min,
-                SUM(CASE WHEN csx.code='ASIGNADO' THEN d.minutes_in_status ELSE 0 END) AS asignado_min,
-                SUM(CASE WHEN csx.code='EN_PROCESO' THEN d.minutes_in_status ELSE 0 END) AS en_proceso_min,
-                SUM(CASE WHEN csx.code='RESPONDIDO' THEN d.minutes_in_status ELSE 0 END) AS respondido_min,
-                SUM(CASE WHEN csx.code='CERRADO' THEN d.minutes_in_status ELSE 0 END) AS cerrado_min,
-                SUM(CASE WHEN csx.code IN('ESCALADO','ESCALATED') THEN d.minutes_in_status ELSE 0 END) AS escalado_min,
-                SUM(CASE WHEN csx.code='ESPERANDO_INFO' THEN d.minutes_in_status ELSE 0 END) AS esperando_info_min,
+                SUM(CASE WHEN csx.code = 'NUEVO'                      THEN d.minutes_in_status ELSE 0 END) AS nuevo_min,
+                SUM(CASE WHEN csx.code = 'ASIGNADO'                   THEN d.minutes_in_status ELSE 0 END) AS asignado_min,
+                SUM(CASE WHEN csx.code = 'EN_PROCESO'                 THEN d.minutes_in_status ELSE 0 END) AS en_proceso_min,
+                SUM(CASE WHEN csx.code = 'RESPONDIDO'                 THEN d.minutes_in_status ELSE 0 END) AS respondido_min,
+                SUM(CASE WHEN csx.code = 'CERRADO'                    THEN d.minutes_in_status ELSE 0 END) AS cerrado_min,
+                SUM(CASE WHEN csx.code IN('ESCALADO','ESCALATED')     THEN d.minutes_in_status ELSE 0 END) AS escalado_min,
+                SUM(CASE WHEN csx.code = 'ESPERANDO_INFO'             THEN d.minutes_in_status ELSE 0 END) AS esperando_info_min,
 
                 le.last_at AS ultimo_evento_at,
                 CASE
-                  WHEN le.last_at IS NOT NULL THEN GREATEST(0, TIMESTAMPDIFF(MINUTE, le.last_at, NOW(6)))
+                  WHEN le.last_at IS NOT NULL
+                    THEN GREATEST(0, TIMESTAMPDIFF(MINUTE, le.last_at, NOW(6)))
                   ELSE NULL
                 END AS min_estado_actual
 
@@ -318,13 +344,20 @@ final class ReportsRepo
         ";
 
         $st = $this->pdo->prepare($sql);
-        // outer WHERE
+
+        // WHERE principal
         $st->bindValue(':s', $startDate);
         $st->bindValue(':e', $endDate);
 
-        // CTE base
-        $st->bindValue(':s_base', $startDate);
-        $st->bindValue(':e_base', $endDate);
+        // CTEs — PDO no permite reusar el mismo placeholder, se duplican con mismo valor
+        $st->bindValue(':s_base',  $startDate);
+        $st->bindValue(':e_base',  $endDate);
+        $st->bindValue(':s_base2', $startDate);
+        $st->bindValue(':e_base2', $endDate);
+        $st->bindValue(':s_base3', $startDate);
+        $st->bindValue(':e_base3', $endDate);
+        $st->bindValue(':s_base4', $startDate);
+        $st->bindValue(':e_base4', $endDate);
 
         if ($mailboxId) {
             $st->bindValue(':mb', $mailboxId, PDO::PARAM_INT);
@@ -337,112 +370,102 @@ final class ReportsRepo
     public function exportHeaderMap(): array
     {
         return [
-            'case_id' => 'ID Caso',
-            'mailbox_id' => 'ID Buzón',
-            'case_number' => 'Número de Caso',
-            'subject' => 'Asunto',
-            'requester_email' => 'Correo del Solicitante',
-            'requester_name' => 'Nombre del Solicitante',
+            'case_id'                  => 'ID Caso',
+            'mailbox_id'               => 'ID Buzón',
+            'case_number'              => 'Número de Caso',
+            'subject'                  => 'Asunto',
+            'requester_email'          => 'Correo del Solicitante',
+            'requester_name'           => 'Nombre del Solicitante',
 
-            'status_code' => 'Código Estado',
-            'status_name' => 'Estado Actual',
+            'status_code'              => 'Código Estado',
+            'status_name'              => 'Estado Actual',
 
-            'assigned_user_id' => 'ID Agente Asignado',
-            'assigned_user' => 'Agente Asignado',
+            'assigned_user_id'         => 'ID Agente Asignado',
+            'assigned_user'            => 'Agente Asignado',
 
-            'received_at' => 'Fecha Recepción',
-            'assigned_at' => 'Fecha Asignación',
-            'in_process_at' => 'Fecha Inicio Gestión',
-            'first_response_at' => 'Fecha Primera Respuesta',
-            'closed_at' => 'Fecha Cierre',
+            'received_at'              => 'Fecha Recepción',
+            'assigned_at'              => 'Fecha Asignación',
+            'in_process_at'            => 'Fecha Inicio Gestión',
+            'first_response_at'        => 'Fecha Primera Respuesta',
+            'closed_at'                => 'Fecha Cierre',
 
-            'is_responded' => 'Respondido (1/0)',
-            'due_at' => 'Vencimiento (cases.due_at)',
-            'sla_state' => 'Estado SLA (cases)',
+            'is_responded'             => 'Respondido (1/0)',
+            'due_at'                   => 'Vencimiento (cases.due_at)',
+            'sla_state'                => 'Estado SLA (cases)',
 
-            'current_sla_state' => 'Semáforo SLA',
-            'breached' => 'Incumplió SLA (1/0)',
-            'sla_due_at' => 'Vence SLA (tracking)',
+            'current_sla_state'        => 'Semáforo SLA',
+            'breached'                 => 'Incumplió SLA (1/0)',
+            'sla_due_at'               => 'Vence SLA (tracking)',
 
-            'minutes_since_creation' => 'Minutos desde Creación (tracking)',
-            'days_since_creation' => 'Días desde Creación (tracking)',
-            'last_updated' => 'Última Actualización SLA (tracking)',
+            'minutes_since_creation'   => 'Minutos desde Creación (tracking)',
+            'days_since_creation'      => 'Días desde Creación (tracking)',
+            'last_updated'             => 'Última Actualización SLA (tracking)',
 
-            'sla_ignored' => 'SLA Ignorado (1/0)',
-            'policy_id' => 'ID Política SLA',
-            'warn_yellow_at' => 'Alerta Amarillo (fecha)',
-            'warn_red_at' => 'Alerta Rojo (fecha)',
-            'business_minutes' => 'Minutos Hábiles (tracking)',
-            'sla_started_at' => 'Inicio SLA (tracking)',
+            'sla_ignored'              => 'SLA Ignorado (1/0)',
+            'policy_id'                => 'ID Política SLA',
+            'warn_yellow_at'           => 'Alerta Amarillo (fecha)',
+            'warn_red_at'              => 'Alerta Rojo (fecha)',
+            'business_minutes'         => 'Minutos Hábiles (tracking)',
+            'sla_started_at'           => 'Inicio SLA (tracking)',
 
-            'horas_desde_recepcion' => 'Horas desde Recepción',
-            'horas_hasta_asignacion' => 'Horas hasta Asignación',
-            'horas_hasta_1ra_respuesta' => 'Horas hasta 1ra Respuesta',
-            'horas_hasta_cierre' => 'Horas hasta Cierre',
-            'horas_restantes_sla' => 'Horas Restantes SLA',
-            'horas_sla_total' => 'Horas Totales SLA',
+            'horas_desde_recepcion'    => 'Horas desde Recepción',
+            'horas_hasta_asignacion'   => 'Horas hasta Asignación',
+            'horas_hasta_1ra_respuesta'=> 'Horas hasta 1ra Respuesta',
+            'horas_hasta_cierre'       => 'Horas hasta Cierre',
+            'horas_restantes_sla'      => 'Horas Restantes SLA',
+            'horas_sla_total'          => 'Horas Totales SLA',
 
-            // Tiempos por estado
-            'tiempo_nuevo_min' => 'Tiempo en NUEVO (min)',
-            'tiempo_asignado_min' => 'Tiempo en ASIGNADO (min)',
-            'tiempo_en_proceso_min' => 'Tiempo en EN PROCESO (min)',
-            'tiempo_respondido_min' => 'Tiempo en RESPONDIDO (min)',
-            'tiempo_cerrado_min' => 'Tiempo en CERRADO (min)',
-            'tiempo_escalado_min' => 'Tiempo en ESCALADO (min)',
-            'tiempo_esperando_info_min' => 'Tiempo en ESPERANDO INFO (min)',
+            'tiempo_nuevo_min'         => 'Tiempo en NUEVO (min)',
+            'tiempo_asignado_min'      => 'Tiempo en ASIGNADO (min)',
+            'tiempo_en_proceso_min'    => 'Tiempo en EN PROCESO (min)',
+            'tiempo_respondido_min'    => 'Tiempo en RESPONDIDO (min)',
+            'tiempo_cerrado_min'       => 'Tiempo en CERRADO (min)',
+            'tiempo_escalado_min'      => 'Tiempo en ESCALADO (min)',
+            'tiempo_esperando_info_min'=> 'Tiempo en ESPERANDO INFO (min)',
 
-            'tiempo_nuevo_h' => 'Tiempo en NUEVO (h)',
-            'tiempo_asignado_h' => 'Tiempo en ASIGNADO (h)',
-            'tiempo_en_proceso_h' => 'Tiempo en EN PROCESO (h)',
-            'tiempo_respondido_h' => 'Tiempo en RESPONDIDO (h)',
-            'tiempo_cerrado_h' => 'Tiempo en CERRADO (h)',
-            'tiempo_escalado_h' => 'Tiempo en ESCALADO (h)',
-            'tiempo_esperando_info_h' => 'Tiempo en ESPERANDO INFO (h)',
+            'tiempo_nuevo_h'           => 'Tiempo en NUEVO (h)',
+            'tiempo_asignado_h'        => 'Tiempo en ASIGNADO (h)',
+            'tiempo_en_proceso_h'      => 'Tiempo en EN PROCESO (h)',
+            'tiempo_respondido_h'      => 'Tiempo en RESPONDIDO (h)',
+            'tiempo_cerrado_h'         => 'Tiempo en CERRADO (h)',
+            'tiempo_escalado_h'        => 'Tiempo en ESCALADO (h)',
+            'tiempo_esperando_info_h'  => 'Tiempo en ESPERANDO INFO (h)',
 
-            'ultimo_cambio_estado_at' => 'Último cambio de estado',
+            'ultimo_cambio_estado_at'  => 'Último cambio de estado',
             'minutos_en_estado_actual' => 'Minutos en Estado Actual',
-            'horas_en_estado_actual' => 'Horas en Estado Actual',
-            'estado_actual' => 'Estado Actual (derivado)',
+            'horas_en_estado_actual'   => 'Horas en Estado Actual',
+            'estado_actual'            => 'Estado Actual (derivado)',
         ];
     }
-
 
     public function exportColumnOrder(): array
     {
         return [
-            // Identificación del caso
             'case_id',
             'case_number',
             'mailbox_id',
 
-            // Solicitante
             'requester_email',
             'requester_name',
 
-            // Contenido
             'subject',
 
-            // Estado actual (cases)
             'status_code',
             'status_name',
 
-            // Asignación / agente
             'assigned_user_id',
             'assigned_user',
 
-            // Fechas principales
             'received_at',
             'assigned_at',
             'in_process_at',
             'first_response_at',
             'closed_at',
 
-            // Flags / SLA base (cases)
             'is_responded',
             'due_at',
             'sla_state',
 
-            // SLA tracking
             'current_sla_state',
             'breached',
             'sla_started_at',
@@ -456,7 +479,6 @@ final class ReportsRepo
             'days_since_creation',
             'last_updated',
 
-            // Métricas calculadas (horas)
             'horas_desde_recepcion',
             'horas_hasta_asignacion',
             'horas_hasta_1ra_respuesta',
@@ -464,7 +486,6 @@ final class ReportsRepo
             'horas_restantes_sla',
             'horas_sla_total',
 
-            // Tiempos por estado
             'tiempo_nuevo_min',
             'tiempo_asignado_min',
             'tiempo_en_proceso_min',
@@ -481,14 +502,12 @@ final class ReportsRepo
             'tiempo_escalado_h',
             'tiempo_esperando_info_h',
 
-            // Estado actual + duración
             'estado_actual',
             'ultimo_cambio_estado_at',
             'minutos_en_estado_actual',
             'horas_en_estado_actual',
         ];
     }
-
 
     public function insertGeneratedReport(
         int $userId,
@@ -506,7 +525,6 @@ final class ReportsRepo
         $paramsJson = json_encode($params, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         $hash = hash('sha256', $paramsJson ?: '');
 
-        // finished_at se resuelve en PHP (evita reuso de placeholders en SQL)
         $finishedAtFinal = $finishedAt;
         if ($finishedAtFinal === null && ($status === 'READY' || $status === 'FAILED')) {
             $finishedAtFinal = (new \DateTimeImmutable('now'))->format('Y-m-d H:i:s.u');
@@ -522,17 +540,17 @@ final class ReportsRepo
 
         $st = $this->pdo->prepare($sql);
         $st->execute([
-            ':rt' => $reportType,
-            ':fp' => $filePath,
+            ':rt'  => $reportType,
+            ':fp'  => $filePath,
             ':uid' => $userId ?: null,
-            ':pj' => $paramsJson,
-            ':ph' => $hash,
-            ':ps' => $periodStart,
-            ':pe' => $periodEnd,
-            ':st' => $status,
-            ':em' => $errorMessage,
-            ':rc' => $rowCount,
-            ':fa' => $finishedAtFinal,
+            ':pj'  => $paramsJson,
+            ':ph'  => $hash,
+            ':ps'  => $periodStart,
+            ':pe'  => $periodEnd,
+            ':st'  => $status,
+            ':em'  => $errorMessage,
+            ':rc'  => $rowCount,
+            ':fa'  => $finishedAtFinal,
         ]);
     }
 
@@ -554,12 +572,11 @@ final class ReportsRepo
 
     public function incrementDownloadCount(int $id): void
     {
-        $sql = "
+        $st = $this->pdo->prepare("
             UPDATE generated_reports
             SET download_count = download_count + 1
             WHERE id = :id
-        ";
-        $st = $this->pdo->prepare($sql);
+        ");
         $st->execute([':id' => $id]);
     }
 
@@ -568,7 +585,7 @@ final class ReportsRepo
         $whereMailbox = $mailboxId ? " AND c.mailbox_id = :mb " : "";
 
         $sql = "
-            SELECT 
+            SELECT
                 DATE(c.received_at) AS day,
                 COUNT(*) AS total_cases,
                 SUM(CASE WHEN cs.is_final = 0 THEN 1 ELSE 0 END) AS open_cases,
@@ -595,9 +612,9 @@ final class ReportsRepo
 
     public function recentExports(int $page = 1, int $pageSize = 20): array
     {
-        $page = max(1, $page);
+        $page     = max(1, $page);
         $pageSize = max(1, min($pageSize, 100));
-        $offset = ($page - 1) * $pageSize;
+        $offset   = ($page - 1) * $pageSize;
 
         $sql = "
             SELECT
@@ -627,8 +644,8 @@ final class ReportsRepo
         ";
 
         $st = $this->pdo->prepare($sql);
-        $st->bindValue(':limit', $pageSize, PDO::PARAM_INT);
-        $st->bindValue(':offset', $offset, PDO::PARAM_INT);
+        $st->bindValue(':limit',  $pageSize, PDO::PARAM_INT);
+        $st->bindValue(':offset', $offset,   PDO::PARAM_INT);
         $st->execute();
 
         return $st->fetchAll() ?: [];
