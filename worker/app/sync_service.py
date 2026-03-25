@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import base64
 import logging
 from datetime import datetime, timezone
@@ -17,10 +16,8 @@ from app.storage import save_attachment_bytes
 logger = logging.getLogger("app.sync_service")
 
 
-# ---------------------------------------------------------------------------
-# Utilidades
-# ---------------------------------------------------------------------------
 
+# Utilidades
 def _iso_to_dt(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -133,10 +130,8 @@ def _should_accept(notification: dict[str, Any]) -> bool:
     return bool(cs) and cs == settings.GRAPH_CLIENT_STATE
 
 
-# ---------------------------------------------------------------------------
-# Helpers de BD
-# ---------------------------------------------------------------------------
 
+# Helpers de BD
 def _find_last_case_by_conversation(
     db, *, mailbox_id: int, conversation_id: str
 ) -> int | None:
@@ -214,10 +209,8 @@ def _message_exists(db, *, mailbox_id: int, provider_message_id: str) -> bool:
     return bool(row)
 
 
-# ---------------------------------------------------------------------------
-# Punto de entrada público
-# ---------------------------------------------------------------------------
 
+# Punto de entrada público
 async def process_notifications_async(
     payload_or_list: dict[str, Any] | list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -305,10 +298,8 @@ async def process_message_id_async(
     )
 
 
-# ---------------------------------------------------------------------------
-# Núcleo: procesamiento de un mensaje
-# ---------------------------------------------------------------------------
 
+# Núcleo: procesamiento de un mensaje
 async def _process_single_message(
     *, mailbox_id: int, message_id: str
 ) -> dict[str, Any]:
@@ -335,6 +326,7 @@ async def _process_single_message(
     )
     sent_at = _iso_to_dt(msg.get("sentDateTime"))
 
+    # Filtro GO_LIVE_AT: descartar mensajes anteriores al arranque del portal
     go_live = settings.go_live_dt() if hasattr(settings, "go_live_dt") else None
     if go_live and received_at and received_at < go_live:
         logger.warning(
@@ -346,6 +338,28 @@ async def _process_single_message(
         return {
             "ok": True,
             "status": "before_go_live",
+            "materialized": False,
+            "provider_message_id": provider_message_id,
+            "case_id": None,
+            "message_pk": None,
+        }
+
+
+    stop_inbound = (
+        settings.stop_new_inbound_dt()
+        if hasattr(settings, "stop_new_inbound_dt")
+        else None
+    )
+    if stop_inbound and received_at and received_at > stop_inbound:
+        logger.warning(
+            "SKIPPED_AFTER_OPERATIONAL_CUTOFF | msg=%s | received_at=%s | cutoff=%s",
+            provider_message_id,
+            received_at,
+            stop_inbound,
+        )
+        return {
+            "ok": True,
+            "status": "after_operational_cutoff",
             "materialized": False,
             "provider_message_id": provider_message_id,
             "case_id": None,
@@ -390,22 +404,19 @@ async def _process_single_message(
     should_return_already_materialized = False
 
     with get_db_session() as db:
-        # ----------------------------------------------------------------
+        
         # VERIFICAR ESTADO DEL MENSAJE EN DB
-        #
         # CASO 1: No existe → insertar + crear caso (flujo normal)
         # CASO 2: Existe CON case_id → ya materializado, skip
         # CASO 3: Existe SIN case_id → hueco operativo, crear caso
-        # ----------------------------------------------------------------
+        
         existing = _get_existing_message_row(
             db,
             mailbox_id=mailbox_id,
             provider_message_id=provider_message_id,
         )
-
-        # ----------------------------------------------------------------
+     
         # CASO 2: Mensaje ya materializado con caso
-        # ----------------------------------------------------------------
         if existing is not None:
             message_pk_existing, case_id_existing, _has_att_db = existing
 
@@ -443,9 +454,8 @@ async def _process_single_message(
                 should_return_already_materialized = True
 
             else:
-                # ----------------------------------------------------------------
+                
                 # CASO 3: Existe en messages SIN case_id → hueco, recuperar
-                # ----------------------------------------------------------------
                 message_pk = message_pk_existing
                 logger.info(
                     "ORPHAN_MESSAGE_DETECTED | message_id=%s | message_pk=%s"
@@ -454,9 +464,8 @@ async def _process_single_message(
                     message_pk,
                 )
 
-        # ----------------------------------------------------------------
+        
         # CASO 1 y 3: Crear caso nuevo
-        # ----------------------------------------------------------------
         if existing is None or (existing is not None and existing[1] is None):
             parent_case_id: int | None = None
             if conversation_id:
@@ -758,10 +767,8 @@ async def _process_single_message(
     }
 
 
-# ---------------------------------------------------------------------------
-# Notificación al agente
-# ---------------------------------------------------------------------------
 
+# Notificación al agente
 async def _notify_agent_new_case(
     *, case_id: int, agent_id: int, case_subject: str
 ) -> None:
@@ -903,10 +910,7 @@ async def _notify_agent_new_case(
         )
 
 
-# ---------------------------------------------------------------------------
 # Procesamiento de adjuntos
-# ---------------------------------------------------------------------------
-
 async def _process_attachments(
     *,
     mailbox_email: str,
