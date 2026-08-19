@@ -164,6 +164,13 @@ class Settings(BaseSettings):
 
     RECONCILE_FORCE_REPROCESS: bool = False
 
+    # Recuperación de adjuntos pendientes (sin límite de intentos propio,
+    # ver sync_service.recover_missing_attachments)
+    ATTACHMENT_RECOVERY_ENABLED: int = 1
+    ATTACHMENT_RECOVERY_INTERVAL_SECONDS: int = 600
+    ATTACHMENT_RECOVERY_JITTER_SECONDS: int = 30
+    ATTACHMENT_RECOVERY_BATCH_SIZE: int = 50
+
     # Helpers
     def allowed_ext_set(self) -> Set[str]:
         return {

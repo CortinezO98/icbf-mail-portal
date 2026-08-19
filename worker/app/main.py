@@ -12,11 +12,8 @@ import logging
 from fastapi import FastAPI
 
 from app.settings import settings
-from app.webhook import (
-    router as webhook_router,
-    start_webhook_workers,
-    stop_webhook_workers,
-)
+from app.webhook import router as webhook_router
+from app.graph_client import graph_client
 from app.inbound_queue_worker import (
     start_inbound_queue_worker,
     stop_inbound_queue_worker,
@@ -44,13 +41,12 @@ def create_app() -> FastAPI:
             "worker/.env",
         )
 
-        # 1) Cola rápida en memoria para webhook
-        await start_webhook_workers()
-
-        # 2) Cola persistente en base de datos
+        # 1) Cola persistente en base de datos — única puerta de
+        #    materialización (webhook, delta, reconcile y los endpoints
+        #    /admin/reprocess* solo encolan aquí, nunca procesan directo)
         await start_inbound_queue_worker()
 
-        # 3) Jobs de respaldo: subscription / delta / reconcile
+        # 2) Jobs de respaldo: subscription / delta / reconcile
         await start_background_jobs()
 
     @app.on_event("shutdown")
@@ -58,7 +54,9 @@ def create_app() -> FastAPI:
         # Orden inverso al startup
         await stop_background_jobs()
         await stop_inbound_queue_worker()
-        await stop_webhook_workers()
+        # Cierra el cliente httpx persistente (ver graph_client.py) para
+        # no dejar conexiones abiertas colgadas al apagar el proceso.
+        await graph_client.aclose()
 
     @app.get("/health")
     @app.head("/health")

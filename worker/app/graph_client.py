@@ -23,6 +23,33 @@ FOLDER_CODE_TO_GRAPH = {
 class GraphClient:
     def __init__(self) -> None:
         self._timeout = 60
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """
+        Cliente httpx persistente y reutilizado entre llamadas, en vez de
+        crear un httpx.AsyncClient() nuevo por cada request (comportamiento
+        anterior). Esto evita pagar handshake TLS completo en cada llamada
+        a Graph, relevante bajo el volumen actual (3000+ correos/día, cada
+        uno con varias llamadas: get_message + list_attachments + N
+        get_attachment).
+        """
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                limits=httpx.Limits(
+                    max_connections=20,
+                    max_keepalive_connections=10,
+                ),
+                timeout=self._timeout,
+            )
+        return self._client
+
+    async def aclose(self) -> None:
+        """Cierra el cliente persistente. Debe llamarse en el shutdown de
+        la app (ver app/main.py) para no dejar conexiones colgadas."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
 
     async def _headers(self) -> dict[str, str]:
         token = await graph_auth.get_token()
@@ -36,22 +63,22 @@ class GraphClient:
         kwargs.setdefault("headers", headers)
         kwargs.setdefault("timeout", self._timeout)
 
-        async with httpx.AsyncClient() as client:
-            resp: httpx.Response | None = None
-            for attempt in range(1, 4):
-                resp = await client.request(method, url, **kwargs)
+        client = await self._get_client()
+        resp: httpx.Response | None = None
+        for attempt in range(1, 4):
+            resp = await client.request(method, url, **kwargs)
 
-                if resp.status_code in (429, 500, 502, 503, 504):
-                    retry_after = resp.headers.get("Retry-After")
-                    sleep_s = int(retry_after) if (retry_after and retry_after.isdigit()) else attempt * 2
-                    logger.warning(
-                        "Graph retry %s %s status=%s sleep=%ss",
-                        method, url, resp.status_code, sleep_s
-                    )
-                    await asyncio.sleep(sleep_s)
-                    continue
+            if resp.status_code in (429, 500, 502, 503, 504):
+                retry_after = resp.headers.get("Retry-After")
+                sleep_s = int(retry_after) if (retry_after and retry_after.isdigit()) else attempt * 2
+                logger.warning(
+                    "Graph retry %s %s status=%s sleep=%ss",
+                    method, url, resp.status_code, sleep_s
+                )
+                await asyncio.sleep(sleep_s)
+                continue
 
-                return resp
+            return resp
 
         return resp  # type: ignore[return-value]
 
@@ -98,40 +125,74 @@ class GraphClient:
         return resp.json()
 
     async def list_attachments(self, mailbox_email: str, message_id: str) -> list[dict[str, Any]]:
+        """
+        Devuelve el manifiesto COMPLETO de adjuntos de un mensaje, siguiendo
+        @odata.nextLink hasta agotar la colección.
+
+        Antes de este cambio solo se leía la primera página: un correo con
+        más adjuntos de los que caben en una página (Graph pagina la
+        colección de attachments igual que cualquier otra) quedaba con un
+        manifiesto incompleto sin que nada lo reportara — la completitud
+        de adjuntos comparaba contra ese manifiesto parcial como si fuera
+        el total real.
+        """
         url = f"{GRAPH_BASE}/users/{mailbox_email}/messages/{message_id}/attachments"
+        all_items: list[dict[str, Any]] = []
+        page_no = 0
 
-        last_err: Exception | None = None
+        while url:
+            page_no += 1
+            last_err: Exception | None = None
+            page_data: dict[str, Any] | None = None
 
-        for attempt in range(1, 4):
-            resp = await self._request("GET", url)
+            for attempt in range(1, 4):
+                resp = await self._request("GET", url)
 
-            if resp.status_code != 200:
-                logger.error("list_attachments failed: %s %s", resp.status_code, resp.text)
-                raise RuntimeError("Graph list_attachments failed")
-            ctype = (resp.headers.get("content-type") or "").lower()
-            if "application/json" not in ctype:
-                preview = (resp.text or "")[:800]
-                logger.warning(
-                    "list_attachments unexpected content-type=%s attempt=%s len=%s preview=%r",
-                    ctype, attempt, len(resp.content or b""), preview
+                if resp.status_code != 200:
+                    logger.error("list_attachments failed: %s %s", resp.status_code, resp.text)
+                    raise RuntimeError("Graph list_attachments failed")
+
+                ctype = (resp.headers.get("content-type") or "").lower()
+                if "application/json" not in ctype:
+                    preview = (resp.text or "")[:800]
+                    logger.warning(
+                        "list_attachments unexpected content-type=%s attempt=%s len=%s preview=%r",
+                        ctype, attempt, len(resp.content or b""), preview
+                    )
+                    last_err = RuntimeError(f"Unexpected content-type: {ctype}")
+                    await asyncio.sleep(attempt * 2)
+                    continue
+
+                try:
+                    page_data = resp.json()
+                    break
+                except json.JSONDecodeError as e:
+                    preview = (resp.text or "")[:800]
+                    logger.warning(
+                        "list_attachments JSON decode failed attempt=%s len=%s preview=%r err=%s",
+                        attempt, len(resp.content or b""), preview, e
+                    )
+                    last_err = e
+                    await asyncio.sleep(attempt * 2)
+                    continue
+
+            if page_data is None:
+                raise RuntimeError(
+                    f"Graph list_attachments JSON decode failed after retries: {last_err}"
                 )
-                last_err = RuntimeError(f"Unexpected content-type: {ctype}")
-                await asyncio.sleep(attempt * 2)
-                continue
 
-            try:
-                data = resp.json()
-                return data.get("value", [])
-            except json.JSONDecodeError as e:
-                preview = (resp.text or "")[:800]
-                logger.warning(
-                    "list_attachments JSON decode failed attempt=%s len=%s preview=%r err=%s",
-                    attempt, len(resp.content or b""), preview, e
+            page_items = page_data.get("value", [])
+            all_items.extend(page_items)
+
+            next_link = page_data.get("@odata.nextLink")
+            if next_link:
+                logger.info(
+                    "list_attachments paginating message_id=%s page=%s items_so_far=%s",
+                    message_id, page_no, len(all_items),
                 )
-                last_err = e
-                await asyncio.sleep(attempt * 2)
-                continue
-        raise RuntimeError(f"Graph list_attachments JSON decode failed after retries: {last_err}")
+            url = next_link
+
+        return all_items
 
     async def get_attachment(self, mailbox_email: str, message_id: str, attachment_id: str) -> dict[str, Any]:
         url = f"{GRAPH_BASE}/users/{mailbox_email}/messages/{message_id}/attachments/{attachment_id}"

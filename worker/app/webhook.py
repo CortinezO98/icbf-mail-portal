@@ -2,16 +2,27 @@ from __future__ import annotations
 
 # =============================================================================
 # webhook.py — Portal ICBF
+# CAMBIOS v3 (2026-08-18):
+#   - Se elimina la cola en memoria (_webhook_queue) y su consumidor
+#     (_webhook_consumer), que llamaban directamente a
+#     sync_service.process_message_id_async(). Esa llamada directa era una
+#     puerta de materialización paralela a inbound_queue_worker: bajo
+#     concurrencia, ambas podían procesar el mismo message_id casi a la
+#     vez. La constraint UNIQUE(mailbox_id, provider_message_id) de
+#     `messages` ya evitaba que esto duplicara datos (la transacción
+#     perdedora hace rollback completo), pero igual desperdiciaba llamadas
+#     a Graph y generaba ruido en los logs de fallo.
+#   - El webhook ahora SOLO valida la notificación, la persiste en
+#     inbound_event_queue y responde 202. inbound_queue_worker (poll cada
+#     INBOUND_QUEUE_POLL_SECONDS, default 2s) es la única puerta de
+#     materialización. La latencia adicional (hasta ~2s) es despreciable
+#     frente al SLA de 4 horas.
 # CAMBIOS v2 (2026-03-12):
 #   - El enqueue_event del webhook ya NO bloquea mensajes conocidos gracias
 #     al nuevo inbound_queue_repo. El log QUEUE_EVENT_SKIPPED_ALREADY_MATERIALIZED
 #     se renombra a QUEUE_EVENT_SKIPPED_ALREADY_IN_QUEUE para mayor claridad.
-#   - El webhook siempre encola en la cola en memoria (_webhook_queue)
-#     independientemente de si el evento fue persistido o reciclado.
-#     Esto garantiza que ningún correo nuevo se pierda por timing.
 # =============================================================================
 
-import asyncio
 import json
 import logging
 from typing import Any
@@ -25,82 +36,6 @@ from app import inbound_queue_repo
 
 logger = logging.getLogger("app.webhook")
 router = APIRouter()
-
-_webhook_queue: asyncio.Queue[str] | None = None
-_worker_tasks: list[asyncio.Task] = []
-
-
-async def start_webhook_workers() -> None:
-    global _webhook_queue, _worker_tasks
-
-    if _webhook_queue is not None:
-        logger.warning("Webhook queue already started")
-        return
-
-    maxsize = int(getattr(settings, "WEBHOOK_QUEUE_MAXSIZE", 1000))
-    consumers = int(getattr(settings, "WEBHOOK_CONSUMERS", 2))
-
-    _webhook_queue = asyncio.Queue(maxsize=max(1, maxsize))
-    _worker_tasks = [
-        asyncio.create_task(_webhook_consumer(i + 1), name=f"webhook_consumer_{i + 1}")
-        for i in range(max(1, consumers))
-    ]
-
-    logger.warning(
-        "Webhook queue started | consumers=%s | maxsize=%s",
-        consumers,
-        maxsize,
-    )
-
-
-async def stop_webhook_workers() -> None:
-    global _webhook_queue, _worker_tasks
-
-    for t in _worker_tasks:
-        t.cancel()
-
-    if _worker_tasks:
-        await asyncio.gather(*_worker_tasks, return_exceptions=True)
-
-    _worker_tasks = []
-    _webhook_queue = None
-    logger.warning("Webhook queue stopped")
-
-
-async def _webhook_consumer(worker_no: int) -> None:
-    assert _webhook_queue is not None
-
-    while True:
-        message_id = await _webhook_queue.get()
-        try:
-            logger.info(
-                "WEBHOOK_PROCESS_START | worker=%s | message_id=%s",
-                worker_no,
-                message_id,
-            )
-
-            result = await sync_service.process_message_id_async(
-                message_id,
-                source="webhook",
-            )
-
-            logger.info(
-                "WEBHOOK_PROCESS_DONE | worker=%s | message_id=%s | result_status=%s | materialized=%s",
-                worker_no,
-                message_id,
-                result.get("status"),
-                result.get("materialized"),
-            )
-
-        except Exception as e:
-            logger.exception(
-                "WEBHOOK_PROCESS_FAILED | worker=%s | message_id=%s | err=%s",
-                worker_no,
-                message_id,
-                e,
-            )
-        finally:
-            _webhook_queue.task_done()
 
 
 @router.get("/graph/webhook")
@@ -167,7 +102,6 @@ async def graph_webhook_post(request: Request) -> Response:
         return Response(content="OK", media_type="text/plain", status_code=202)
 
     persisted = 0
-    enqueued = 0
     skipped = 0
 
     for n in valid:
@@ -177,7 +111,9 @@ async def graph_webhook_post(request: Request) -> Response:
             continue
 
         try:
-            # Persistir en la cola durable (inbound_event_queue)
+            # Persistir en la cola durable (inbound_event_queue).
+            # inbound_queue_worker es quien recoge y materializa: única
+            # puerta de procesamiento, sin atajo en memoria.
             with get_db_session() as db:
                 event_id = inbound_queue_repo.enqueue_event(
                     db,
@@ -205,28 +141,6 @@ async def graph_webhook_post(request: Request) -> Response:
                     msg_id,
                 )
 
-            # Siempre encolar en la cola en memoria para procesamiento inmediato
-            # independientemente del resultado de persistencia.
-            # Esto garantiza latencia mínima para correos nuevos.
-            if _webhook_queue is not None:
-                try:
-                    _webhook_queue.put_nowait(msg_id)
-                    enqueued += 1
-                    logger.info("WEBHOOK_ENQUEUED | message_id=%s", msg_id)
-                except asyncio.QueueFull:
-                    logger.error(
-                        "WEBHOOK_QUEUE_FULL | message_id=%s | "
-                        "message will be processed by inbound_queue_worker",
-                        msg_id,
-                    )
-            else:
-                logger.warning(
-                    "WEBHOOK_QUEUE_NOT_AVAILABLE | message_id=%s | "
-                    "persisted_only=%s | inbound_queue_worker will pick it up",
-                    msg_id,
-                    "true" if event_id is not None else "false",
-                )
-
         except Exception as e:
             logger.exception(
                 "WEBHOOK_PERSIST_FAILED | message_id=%s | err=%s",
@@ -235,9 +149,8 @@ async def graph_webhook_post(request: Request) -> Response:
             )
 
     logger.info(
-        "Webhook processed notifications | persisted=%s | enqueued=%s | skipped=%s",
+        "Webhook processed notifications | persisted=%s | skipped=%s",
         persisted,
-        enqueued,
         skipped,
     )
     return Response(content="OK", media_type="text/plain", status_code=202)

@@ -1,6 +1,8 @@
 from __future__ import annotations
+import asyncio
 import base64
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -128,6 +130,145 @@ def _normalize_notifications(
 def _should_accept(notification: dict[str, Any]) -> bool:
     cs = notification.get("clientState")
     return bool(cs) and cs == settings.GRAPH_CLIENT_STATE
+
+
+
+# ---------------------------------------------------------------------------
+# Completeness Gate
+#
+# Microsoft Graph puede responder HTTP 200 con un snapshot del mensaje que
+# todavia no esta completo (consistencia eventual): el body puede venir sin
+# el objeto `body`, o `hasAttachments=true` sin que /attachments devuelva
+# nada todavia. Antes de este cambio, cualquier snapshot con HTTP 200 se
+# insertaba tal cual, aunque estuviera incompleto, y quedaba asi para
+# siempre.
+#
+# El gate corre DESPUES de obtener el mensaje de Graph y ANTES de cualquier
+# INSERT. Si el snapshot no esta listo, _process_single_message retorna sin
+# tocar la base de datos y el evento vuelve a la cola (mecanismo de retry ya
+# existente en inbound_queue_worker/inbound_queue_repo, sin cambios) - salvo
+# que se haya agotado el presupuesto de reintentos, caso en que se
+# materializa en modo degradado (ver _process_single_message).
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CompletenessResult:
+    complete: bool
+    reasons: list[str] = field(default_factory=list)
+    # Manifiesto de adjuntos ya obtenido de Graph durante la evaluacion
+    # (si hasAttachments=True) - se reutiliza en _process_attachments para
+    # no volver a pedirlo.
+    attachments_manifest: list[dict[str, Any]] | None = None
+    # True si específicamente el motivo de incompletitud incluye adjuntos.
+    # Se usa para decidir, al degradar, si los adjuntos quedan pendientes
+    # de recuperación aparte.
+    attachments_pending: bool = False
+
+    @property
+    def reason_code(self) -> str:
+        return "+".join(self.reasons) if self.reasons else "unknown"
+
+
+async def _evaluate_completeness(
+    msg: dict[str, Any],
+    *,
+    mailbox_email: str,
+    graph_message_id: str,
+) -> CompletenessResult:
+    """
+    Evalua completitud de body y adjuntos. NO evalua receivedDateTime -
+    eso se resuelve antes de llamar esta función, porque los filtros
+    GO_LIVE_AT/STOP_NEW_INBOUND_AT (ya existentes) necesitan esa fecha
+    para decidir si el mensaje aplica al portal en absoluto, y esa
+    decisión debe tomarse antes de gastar una llamada a Graph pidiendo el
+    manifiesto de adjuntos de un mensaje que quizás ni corresponda
+    procesar.
+    """
+    reasons: list[str] = []
+    attachments_manifest: list[dict[str, Any]] | None = None
+    attachments_pending = False
+
+    # Body: conservar la distinción entre "Graph no mandó el objeto body"
+    # (BODY_NOT_READY) y "body.content vino explícitamente vacío" (válido -
+    # un correo puede legítimamente no tener texto y solo traer un adjunto).
+    body_obj = msg.get("body")
+    body_present = isinstance(body_obj, dict)
+    if not body_present:
+        reasons.append("BODY_NOT_READY")
+    else:
+        content_present_key = "content" in body_obj
+        content_value = body_obj.get("content")
+        if not content_present_key or content_value is None:
+            # Graph mandó el objeto body pero sin la clave 'content', o con
+            # content=null explícito - no es lo mismo que content="".
+            reasons.append("BODY_NOT_READY")
+
+    # Adjuntos: si Graph anuncia hasAttachments=true, el manifiesto real
+    # (via list_attachments, ya paginado) debe tener al menos un ítem. Si
+    # vuelve vacío, Graph todavía no terminó de indexarlos.
+    if msg.get("hasAttachments"):
+        attachments_manifest = await graph_client.list_attachments(
+            mailbox_email, graph_message_id
+        )
+        if not attachments_manifest:
+            reasons.append("ATTACHMENT_MANIFEST_NOT_READY")
+            attachments_pending = True
+
+    return CompletenessResult(
+        complete=(len(reasons) == 0),
+        reasons=reasons,
+        attachments_manifest=attachments_manifest,
+        attachments_pending=attachments_pending,
+    )
+
+
+
+def _incomplete_or_degrade(
+    *,
+    provider_message_id: str,
+    reasons: list[str],
+    attempts: int,
+    max_attempts: int,
+) -> tuple[bool, dict[str, Any] | None]:
+    """
+    Decide si un snapshot incompleto debe reintentarse o degradarse.
+
+    Retorna (should_degrade, early_return_or_None):
+      - Si quedan reintentos: (False, dict) - el llamador debe retornar
+        `dict` de inmediato, sin tocar la base de datos.
+      - Si se agotó el presupuesto: (True, None) - el llamador debe
+        continuar el flujo de materialización, pero marcando el caso
+        como degradado (ver _process_single_message).
+    """
+    reason_code = "+".join(reasons) if reasons else "unknown"
+    retries_remaining = (attempts + 1) < max_attempts
+
+    if retries_remaining:
+        logger.info(
+            "INCOMPLETE_SNAPSHOT | msg=%s | reasons=%s | attempts=%s/%s -> retry",
+            provider_message_id,
+            reason_code,
+            attempts,
+            max_attempts,
+        )
+        return False, {
+            "ok": True,
+            "status": f"incomplete:{reason_code}",
+            "materialized": False,
+            "provider_message_id": provider_message_id,
+            "case_id": None,
+            "message_pk": None,
+        }
+
+    logger.warning(
+        "COMPLETENESS_BUDGET_EXHAUSTED | msg=%s | reasons=%s | attempts=%s/%s"
+        " -> materializando degradado",
+        provider_message_id,
+        reason_code,
+        attempts,
+        max_attempts,
+    )
+    return True, None
 
 
 
@@ -268,7 +409,11 @@ async def process_notifications_async(
 
 
 async def process_message_id_async(
-    message_id: str, source: str = "unknown"
+    message_id: str,
+    source: str = "unknown",
+    *,
+    attempts: int = 0,
+    max_attempts: int = 8,
 ) -> dict[str, Any]:
     if not settings.MAILBOX_EMAIL:
         logger.error(
@@ -284,9 +429,11 @@ async def process_message_id_async(
         }
 
     logger.info(
-        "MESSAGE_PROCESS_START | source=%s | message_id=%s",
+        "MESSAGE_PROCESS_START | source=%s | message_id=%s | attempts=%s | max_attempts=%s",
         source,
         message_id,
+        attempts,
+        max_attempts,
     )
 
     with get_db_session() as db:
@@ -295,13 +442,19 @@ async def process_message_id_async(
     return await _process_single_message(
         mailbox_id=mailbox_id,
         message_id=message_id,
+        attempts=attempts,
+        max_attempts=max_attempts,
     )
 
 
 
 # Núcleo: procesamiento de un mensaje
 async def _process_single_message(
-    *, mailbox_id: int, message_id: str
+    *,
+    mailbox_id: int,
+    message_id: str,
+    attempts: int = 0,
+    max_attempts: int = 8,
 ) -> dict[str, Any]:
     mb = settings.MAILBOX_EMAIL
     msg = await graph_client.get_message(mb, message_id)
@@ -319,16 +472,41 @@ async def _process_single_message(
     cc_emails = _emails(msg.get("ccRecipients"))
     bcc_emails = _emails(msg.get("bccRecipients"))
 
-    received_at = (
-        _iso_to_dt(msg.get("receivedDateTime"))
-        or _iso_to_dt(msg.get("createdDateTime"))
-        or datetime.now(timezone.utc).replace(tzinfo=None)
+    # received_at: YA NO se sustituye por NOW() cuando Graph todavía no lo
+    # trae. El SLA se cuenta desde receivedDateTime (regla de negocio) -
+    # inventar la hora de procesamiento falsearía ese dato en silencio.
+    # Si falta, es motivo de espera (reintento), no de invención de dato.
+    received_at = _iso_to_dt(msg.get("receivedDateTime")) or _iso_to_dt(
+        msg.get("createdDateTime")
     )
     sent_at = _iso_to_dt(msg.get("sentDateTime"))
 
+    received_at_missing = received_at is None
+    is_degraded = False
+    incomplete_reasons: list[str] = []
+
+    if received_at_missing:
+        incomplete_reasons.append("MISSING_RECEIVED_DATETIME")
+        should_degrade, early_return = _incomplete_or_degrade(
+            provider_message_id=provider_message_id,
+            reasons=incomplete_reasons,
+            attempts=attempts,
+            max_attempts=max_attempts,
+        )
+        if not should_degrade:
+            return early_return
+
+        # Presupuesto agotado y seguimos sin receivedDateTime: se usa la
+        # hora de procesamiento como último recurso DOCUMENTADO (no
+        # silencioso - el caso queda marcado CASE_CREATED_DEGRADED con
+        # este motivo explícito en case_events, a diferencia del
+        # comportamiento anterior que lo hacía sin dejar rastro).
+        is_degraded = True
+        received_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
     # Filtro GO_LIVE_AT: descartar mensajes anteriores al arranque del portal
     go_live = settings.go_live_dt() if hasattr(settings, "go_live_dt") else None
-    if go_live and received_at and received_at < go_live:
+    if go_live and received_at < go_live:
         logger.warning(
             "Skipping message before GO_LIVE_AT | msg=%s received_at=%s go_live=%s",
             provider_message_id,
@@ -350,7 +528,7 @@ async def _process_single_message(
         if hasattr(settings, "stop_new_inbound_dt")
         else None
     )
-    if stop_inbound and received_at and received_at > stop_inbound:
+    if stop_inbound and received_at > stop_inbound:
         logger.warning(
             "SKIPPED_AFTER_OPERATIONAL_CUTOFF | msg=%s | received_at=%s | cutoff=%s",
             provider_message_id,
@@ -372,50 +550,32 @@ async def _process_single_message(
     internet_headers = msg.get("internetMessageHeaders") or []
     in_reply_to = _header_value(internet_headers, "In-Reply-To")
 
-    body = msg.get("body") or {}
-    body_type = (body.get("contentType") or "").lower()
-    body_content = body.get("content") or ""
-    body_html = body_content if body_type == "html" else None
-    body_text = body_content if body_type != "html" else None
-
     has_attachments = 1 if msg.get("hasAttachments") else 0
-
-    message_kind, classification_reason = _classify_message_kind(
-        subject=subject,
-        from_email=str(from_email),
-        body_html=body_html,
-        body_text=body_text,
-    )
-
-    if message_kind == "ndr":
-        logger.warning(
-            "NDR_DETECTED_BUT_ACCEPTED | message_id=%s | subject=%s | from=%s | reason=%s",
-            provider_message_id,
-            subject,
-            from_email,
-            classification_reason,
-        )
-
     case_id: int | None = None
     message_pk: int | None = None
     assigned_agent_id: int | None = None
     existing: tuple[int, int | None, int] | None = None
     should_resync_attachments = False
     should_return_already_materialized = False
+    attachments_manifest: list[dict[str, Any]] | None = None
+    attachments_pending = False
 
+    # Paso 1: consultar estado en DB - transacción corta, sin llamadas
+    # externas dentro (ver nota más abajo sobre por qué el Completeness
+    # Gate se evalúa DESPUÉS de cerrar esta sesión).
     with get_db_session() as db:
-        
+
         # VERIFICAR ESTADO DEL MENSAJE EN DB
         # CASO 1: No existe → insertar + crear caso (flujo normal)
         # CASO 2: Existe CON case_id → ya materializado, skip
         # CASO 3: Existe SIN case_id → hueco operativo, crear caso
-        
+
         existing = _get_existing_message_row(
             db,
             mailbox_id=mailbox_id,
             provider_message_id=provider_message_id,
         )
-     
+
         # CASO 2: Mensaje ya materializado con caso
         if existing is not None:
             message_pk_existing, case_id_existing, _has_att_db = existing
@@ -454,7 +614,7 @@ async def _process_single_message(
                 should_return_already_materialized = True
 
             else:
-                
+
                 # CASO 3: Existe en messages SIN case_id → hueco, recuperar
                 message_pk = message_pk_existing
                 logger.info(
@@ -464,10 +624,71 @@ async def _process_single_message(
                     message_pk,
                 )
 
-        
-        # CASO 1 y 3: Crear caso nuevo
-        if existing is None or (existing is not None and existing[1] is None):
-            parent_case_id: int | None = None
+    # --- Completeness Gate (body + adjuntos) ---
+    # Corre FUERA de cualquier transacción: list_attachments() es una
+    # llamada HTTP a Graph, y las llamadas externas no deben ocurrir con
+    # una transacción de base de datos abierta (la sesión del paso 1 ya
+    # se cerró arriba). Solo se evalúa cuando vamos a crear un caso nuevo
+    # (CASO 1/3) - si el mensaje ya está materializado (CASO 2), la
+    # decisión de completitud ya se tomó cuando se creó el caso original.
+    need_new_case = existing is None or (existing is not None and existing[1] is None)
+    message_kind = "normal"
+    classification_reason: str | None = None
+    body_text: str | None = None
+    body_html: str | None = None
+    parent_case_id: int | None = None
+    is_orphan_recovery = existing is not None
+    internet_message_id_str = str(internet_message_id) if internet_message_id else None
+    in_reply_to_str = str(in_reply_to) if in_reply_to else None
+    conversation_id_str = str(conversation_id) if conversation_id else None
+
+    if need_new_case:
+        completeness = await _evaluate_completeness(
+            msg,
+            mailbox_email=mb,
+            graph_message_id=message_id,
+        )
+        incomplete_reasons.extend(completeness.reasons)
+
+        if not completeness.complete and not is_degraded:
+            should_degrade, early_return = _incomplete_or_degrade(
+                provider_message_id=provider_message_id,
+                reasons=incomplete_reasons,
+                attempts=attempts,
+                max_attempts=max_attempts,
+            )
+            if not should_degrade:
+                return early_return
+            is_degraded = True
+
+        attachments_manifest = completeness.attachments_manifest
+        attachments_pending = completeness.attachments_pending
+
+        body_obj = msg.get("body") if isinstance(msg.get("body"), dict) else None
+        body_type = (body_obj.get("contentType") or "").lower() if body_obj else ""
+        body_content = body_obj.get("content") if body_obj else None
+        body_html = body_content if body_type == "html" else None
+        body_text = body_content if body_type != "html" else None
+
+        message_kind, classification_reason = _classify_message_kind(
+            subject=subject,
+            from_email=str(from_email),
+            body_html=body_html,
+            body_text=body_text,
+        )
+
+        if message_kind == "ndr":
+            logger.warning(
+                "NDR_DETECTED_BUT_ACCEPTED | message_id=%s | subject=%s | from=%s | reason=%s",
+                provider_message_id,
+                subject,
+                from_email,
+                classification_reason,
+            )
+
+        # Paso 2: materializar - transacción nueva y corta, ya con todo lo
+        # que necesitábamos de Graph resuelto de antemano.
+        with get_db_session() as db:
             if conversation_id:
                 parent_case_id = _find_last_case_by_conversation(
                     db,
@@ -482,32 +703,26 @@ async def _process_single_message(
                 requester_email=str(from_email),
                 requester_name=(str(from_name) if from_name else None),
                 received_at=received_at,
-                thread_conversation_id=(
-                    str(conversation_id) if conversation_id else None
-                ),
+                thread_conversation_id=conversation_id_str,
                 parent_case_id=parent_case_id,
-                root_internet_message_id=(
-                    str(internet_message_id) if internet_message_id else None
-                ),
-                reply_to_internet_message_id=(
-                    str(in_reply_to) if in_reply_to else None
-                ),
+                root_internet_message_id=internet_message_id_str,
+                reply_to_internet_message_id=in_reply_to_str,
             )
-
-            is_orphan_recovery = existing is not None
 
             logger.info(
                 "CASE_CREATED_FROM_INBOUND | case_id=%s | message_id=%s"
                 " | from_email=%s | subject=%s | conversation_id=%s"
-                " | in_reply_to=%s | message_kind=%s | is_orphan_recovery=%s",
+                " | in_reply_to=%s | message_kind=%s | is_orphan_recovery=%s"
+                " | degraded=%s",
                 case_id,
                 provider_message_id,
                 from_email,
                 subject,
-                str(conversation_id) if conversation_id else None,
-                str(in_reply_to) if in_reply_to else None,
+                conversation_id_str,
+                in_reply_to_str,
                 message_kind,
                 is_orphan_recovery,
+                is_degraded,
             )
 
             if is_orphan_recovery:
@@ -532,13 +747,9 @@ async def _process_single_message(
                     mailbox_id=mailbox_id,
                     folder_id=None,
                     provider_message_id=provider_message_id,
-                    conversation_id=(
-                        str(conversation_id) if conversation_id else None
-                    ),
-                    internet_message_id=(
-                        str(internet_message_id) if internet_message_id else None
-                    ),
-                    in_reply_to=(str(in_reply_to) if in_reply_to else None),
+                    conversation_id=conversation_id_str,
+                    internet_message_id=internet_message_id_str,
+                    in_reply_to=in_reply_to_str,
                     from_email=str(from_email),
                     to_emails=to_emails,
                     cc_emails=cc_emails,
@@ -588,13 +799,9 @@ async def _process_single_message(
                 to_status_id=None,
                 details={
                     "provider_message_id": provider_message_id,
-                    "conversation_id": (
-                        str(conversation_id) if conversation_id else None
-                    ),
-                    "internet_message_id": (
-                        str(internet_message_id) if internet_message_id else None
-                    ),
-                    "in_reply_to": (str(in_reply_to) if in_reply_to else None),
+                    "conversation_id": conversation_id_str,
+                    "internet_message_id": internet_message_id_str,
+                    "in_reply_to": in_reply_to_str,
                     "from_email": from_email,
                     "subject": subject,
                     "message_kind": message_kind,
@@ -602,6 +809,37 @@ async def _process_single_message(
                     "is_orphan_recovery": is_orphan_recovery,
                 },
             )
+
+            if is_degraded:
+                # Registro explícito del correo/caso degradado - a
+                # diferencia del comportamiento anterior (donde un
+                # snapshot incompleto se insertaba en silencio como si
+                # fuera el correo real), este evento queda disponible
+                # para cualquier vista de "revisión manual" del portal.
+                repos.insert_case_event(
+                    db,
+                    case_id=case_id,
+                    actor_user_id=None,
+                    source="WORKER",
+                    event_type="CASE_CREATED_DEGRADED",
+                    from_status_id=None,
+                    to_status_id=None,
+                    details={
+                        "provider_message_id": provider_message_id,
+                        "reasons": incomplete_reasons,
+                        "attachments_pending": attachments_pending,
+                        "attempts": attempts,
+                        "max_attempts": max_attempts,
+                    },
+                )
+                logger.warning(
+                    "CASE_CREATED_DEGRADED | case_id=%s | message_id=%s | reasons=%s"
+                    " | attachments_pending=%s",
+                    case_id,
+                    provider_message_id,
+                    incomplete_reasons,
+                    attachments_pending,
+                )
 
             if conversation_id:
                 repos.insert_case_event(
@@ -614,12 +852,9 @@ async def _process_single_message(
                     to_status_id=None,
                     details={
                         "provider_message_id": provider_message_id,
-                        "conversation_id": str(conversation_id),
-                        "internet_message_id": (
-                            str(internet_message_id)
-                            if internet_message_id else None
-                        ),
-                        "in_reply_to": (str(in_reply_to) if in_reply_to else None),
+                        "conversation_id": conversation_id_str,
+                        "internet_message_id": internet_message_id_str,
+                        "in_reply_to": in_reply_to_str,
                         "parent_case_id": parent_case_id,
                         "message_kind": message_kind,
                     },
@@ -636,7 +871,7 @@ async def _process_single_message(
                         to_status_id=None,
                         details={
                             "provider_message_id": provider_message_id,
-                            "conversation_id": str(conversation_id),
+                            "conversation_id": conversation_id_str,
                             "parent_case_id": parent_case_id,
                             "message_kind": message_kind,
                         },
@@ -653,9 +888,7 @@ async def _process_single_message(
                     to_status_id=None,
                     details={
                         "provider_message_id": provider_message_id,
-                        "conversation_id": (
-                            str(conversation_id) if conversation_id else None
-                        ),
+                        "conversation_id": conversation_id_str,
                         "from_email": from_email,
                         "subject": subject,
                         "message_kind": message_kind,
@@ -704,15 +937,28 @@ async def _process_single_message(
                     },
                 )
 
-    # Adjuntos (fuera del with para no bloquear la sesión DB)
-    if has_attachments and message_pk is not None:
+    # Adjuntos (fuera de cualquier transacción de DB, sigue el mismo
+    # principio que ya existía: no bloquear la sesión mientras se llama
+    # a Graph / se escribe a disco). Si el manifiesto no estaba listo
+    # (attachments_pending), NO se intenta procesar aquí: queda para
+    # recover_missing_attachments(), que reintenta sin límite de intentos
+    # de forma independiente al presupuesto de materialización.
+    if has_attachments and message_pk is not None and not attachments_pending:
         await _process_attachments(
             mailbox_email=mb,
             graph_message_id=message_id,
             message_pk=message_pk,
             provider_message_id=provider_message_id,
             case_id=case_id,
-            conversation_id=(str(conversation_id) if conversation_id else None),
+            conversation_id=conversation_id_str,
+            attachments_manifest=attachments_manifest,
+        )
+    elif has_attachments and attachments_pending:
+        logger.info(
+            "ATTACHMENTS_LEFT_PENDING_FOR_RECOVERY | msg=%s | case_id=%s"
+            " | recover_missing_attachments() los recogerá",
+            provider_message_id,
+            case_id,
         )
 
     if should_return_already_materialized:
@@ -759,7 +1005,7 @@ async def _process_single_message(
 
     return {
         "ok": True,
-        "status": "created",
+        "status": ("created_degraded" if is_degraded else "created"),
         "materialized": True,
         "provider_message_id": provider_message_id,
         "case_id": case_id,
@@ -919,16 +1165,28 @@ async def _process_attachments(
     provider_message_id: str,
     case_id: int | None = None,
     conversation_id: str | None = None,
+    attachments_manifest: list[dict[str, Any]] | None = None,
 ) -> None:
-    atts = await graph_client.list_attachments(mailbox_email, graph_message_id)
+    # Si el Completeness Gate ya obtuvo el manifiesto (caso normal: mensaje
+    # nuevo, completo desde el primer intento), se reutiliza tal cual en
+    # vez de volver a pedirlo a Graph. Si no vino (ej. resync de un mensaje
+    # ya materializado, camino que no pasa por el gate), se pide aquí como
+    # antes.
+    if attachments_manifest is not None:
+        atts = attachments_manifest
+    else:
+        atts = await graph_client.list_attachments(mailbox_email, graph_message_id)
+
     if not atts:
         return
 
     prepared: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
 
     for a in atts:
         odata_type = str(a.get("@odata.type") or "")
         att_id = str(a.get("id") or "")
+        filename = str(a.get("name") or "attachment.bin")
 
         if "fileAttachment" not in odata_type:
             logger.warning(
@@ -936,9 +1194,10 @@ async def _process_attachments(
                 odata_type,
                 att_id,
             )
+            # No es una falla real (item/reference attachments no aplican
+            # a este flujo) - no se cuenta como failure, es intencional.
             continue
 
-        filename = str(a.get("name") or "attachment.bin")
         content_type = str(a.get("contentType") or "application/octet-stream")
         size = int(a.get("size") or 0)
         is_inline = 1 if a.get("isInline") else 0
@@ -959,6 +1218,10 @@ async def _process_attachments(
                 filename,
                 att_id,
             )
+            failures.append({
+                "filename": filename, "graph_attachment_id": att_id,
+                "reason": "NO_CONTENT_BYTES",
+            })
             continue
 
         try:
@@ -969,23 +1232,36 @@ async def _process_attachments(
                 filename,
                 att_id,
             )
+            failures.append({
+                "filename": filename, "graph_attachment_id": att_id,
+                "reason": "INVALID_BASE64",
+            })
             continue
 
         if size and len(raw) != size:
             size = len(raw)
 
         try:
-            stored = save_attachment_bytes(
+            stored = await asyncio.to_thread(
+                save_attachment_bytes,
                 filename=filename,
                 content_bytes=raw,
                 content_type=content_type,
             )
         except Exception as e:
             logger.warning("Attachment rejected filename=%s reason=%s", filename, e)
+            failures.append({
+                "filename": filename, "graph_attachment_id": att_id,
+                "reason": "REJECTED_BY_POLICY", "detail": str(e)[:200],
+            })
             continue
 
         if not stored.sha256:
             logger.warning("Attachment without sha256 filename=%s -> skip", filename)
+            failures.append({
+                "filename": filename, "graph_attachment_id": att_id,
+                "reason": "MISSING_SHA256",
+            })
             continue
 
         prepared.append(
@@ -1010,7 +1286,7 @@ async def _process_attachments(
             stored.sha256[:12],
         )
 
-    if not prepared:
+    if not prepared and not failures:
         return
 
     with get_db_session() as db:
@@ -1039,7 +1315,7 @@ async def _process_attachments(
             )
             inserted += 1
 
-        if case_id:
+        if case_id and inserted:
             repos.insert_case_event(
                 db,
                 case_id=case_id,
@@ -1056,8 +1332,149 @@ async def _process_attachments(
                 },
             )
 
+        if case_id and failures:
+            # A5: los fallos por adjunto (sin contentBytes, base64
+            # inválido, rechazado por política de extensión/tamaño, sin
+            # sha256) ya no desaparecen en un `continue` silencioso -
+            # quedan aquí, consultables desde el portal. No se reintentan
+            # automáticamente: son errores de contenido/política, no de
+            # disponibilidad temporal, así que reintentar no los resuelve.
+            repos.insert_case_event(
+                db,
+                case_id=case_id,
+                actor_user_id=None,
+                source="WORKER",
+                event_type="ATTACHMENTS_PARTIAL_FAILURE",
+                from_status_id=None,
+                to_status_id=None,
+                details={
+                    "provider_message_id": provider_message_id,
+                    "message_pk": message_pk,
+                    "expected": len(atts),
+                    "downloaded": inserted,
+                    "failed": len(failures),
+                    "failures": failures,
+                },
+            )
+            logger.warning(
+                "ATTACHMENTS_PARTIAL_FAILURE | message_pk=%s | expected=%s | downloaded=%s | failed=%s",
+                message_pk,
+                len(atts),
+                inserted,
+                len(failures),
+            )
+
     logger.info(
-        "Inserted attachments=%s for provider_message_id=%s",
+        "Inserted attachments=%s failed=%s for provider_message_id=%s",
         len(prepared),
+        len(failures),
         provider_message_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Recuperación de adjuntos pendientes (sin límite de intentos)
+#
+# Cubre dos caminos que dejan un mensaje materializado con has_attachments=1
+# pero sin filas en `attachments`:
+#   1. El caso se creó en modo degradado porque el manifiesto de adjuntos
+#      no estaba listo tras agotar el presupuesto de la cola principal
+#      (ver CASE_CREATED_DEGRADED / attachments_pending en
+#      _process_single_message).
+#   2. Cualquier otro hueco histórico con la misma forma (ej. datos
+#      previos a este cambio).
+#
+# A diferencia de inbound_event_queue (presupuesto fijo de
+# INBOUND_QUEUE_MAX_ATTEMPTS intentos), esta función no tiene límite
+# propio: se invoca periódicamente desde background_jobs y cada corrida
+# reintenta lo que siga pendiente. El caso ya es visible para el agente
+# desde que se creó - esto solo completa los archivos.
+#
+# Limitación conocida: si TODOS los adjuntos de un mensaje fallan de forma
+# permanente (ej. contenido corrupto en origen), este mecanismo los
+# reintentará indefinidamente en cada corrida sin converger. No se
+# implementó todavía la distinción TRANSIENT vs PERMANENT para esos casos
+# (ver diagnóstico) - queda como mejora de una fase posterior. El impacto
+# práctico es bajo: son llamadas de bajo costo (una por mensaje pendiente,
+# acotadas por ATTACHMENT_RECOVERY_BATCH_SIZE) y no afectan el SLA del
+# caso, que ya está visible.
+# ---------------------------------------------------------------------------
+
+async def recover_missing_attachments(*, limit: int = 50) -> dict[str, Any]:
+    mb = settings.MAILBOX_EMAIL
+    if not mb:
+        return {"ok": False, "error": "MAILBOX_EMAIL is required"}
+
+    with get_db_session() as db:
+        rows = db.execute(
+            text("""
+                SELECT m.id, m.provider_message_id, m.case_id, m.conversation_id
+                FROM messages m
+                LEFT JOIN attachments a ON a.message_id = m.id
+                WHERE m.has_attachments = 1
+                  AND a.id IS NULL
+                  AND m.case_id IS NOT NULL
+                ORDER BY m.id ASC
+                LIMIT :limit
+            """),
+            {"limit": limit},
+        ).fetchall()
+
+    if not rows:
+        return {"ok": True, "checked": 0, "recovered": 0, "still_pending": 0}
+
+    recovered = 0
+    still_pending = 0
+
+    for message_pk, provider_message_id, case_id, conversation_id in rows:
+        try:
+            manifest = await graph_client.list_attachments(mb, provider_message_id)
+        except Exception as e:
+            logger.warning(
+                "ATTACHMENT_RECOVERY_FETCH_FAILED | message_pk=%s | err=%s",
+                message_pk,
+                e,
+            )
+            still_pending += 1
+            continue
+
+        if not manifest:
+            logger.info(
+                "ATTACHMENT_RECOVERY_STILL_NOT_READY | message_pk=%s"
+                " | provider_message_id=%s",
+                message_pk,
+                provider_message_id,
+            )
+            still_pending += 1
+            continue
+
+        await _process_attachments(
+            mailbox_email=mb,
+            graph_message_id=provider_message_id,
+            message_pk=int(message_pk),
+            provider_message_id=provider_message_id,
+            case_id=int(case_id) if case_id else None,
+            conversation_id=conversation_id,
+            attachments_manifest=manifest,
+        )
+
+        with get_db_session() as db:
+            still_missing = _attachments_count(db, message_pk=int(message_pk)) == 0
+
+        if still_missing:
+            still_pending += 1
+        else:
+            recovered += 1
+
+    logger.info(
+        "ATTACHMENT_RECOVERY_DONE | checked=%s | recovered=%s | still_pending=%s",
+        len(rows),
+        recovered,
+        still_pending,
+    )
+    return {
+        "ok": True,
+        "checked": len(rows),
+        "recovered": recovered,
+        "still_pending": still_pending,
+    }

@@ -18,6 +18,7 @@ from app.settings import settings
 from app.delta_service import run_delta_backstop
 from app.subscriptions_service import ensure_subscription
 from app.reconcile_service import reconcile_recent_inbox
+from app import sync_service
 
 logger = logging.getLogger("app.background")
 
@@ -67,6 +68,13 @@ async def start_background_jobs() -> None:
             _reconcile_loop(_stop_event), name="reconcile_loop"
         )
         _tasks.append(_reconcile_task)
+
+    if _cfg_bool("ATTACHMENT_RECOVERY_ENABLED", True):
+        _tasks.append(
+            asyncio.create_task(
+                _attachment_recovery_loop(_stop_event), name="attachment_recovery_loop"
+            )
+        )
 
     logger.warning(
         "Background jobs started | tasks=%s", [t.get_name() for t in _tasks]
@@ -183,5 +191,40 @@ async def _reconcile_loop(stop_event: asyncio.Event) -> None:
 
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=max(30, interval))
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _attachment_recovery_loop(stop_event: asyncio.Event) -> None:
+    """
+    Reintenta, sin límite propio de intentos, los mensajes ya
+    materializados que se quedaron con has_attachments=1 y sin adjuntos
+    descargados (ver sync_service.recover_missing_attachments). Distinto
+    del presupuesto de INBOUND_QUEUE_MAX_ATTEMPTS de la cola principal -
+    ese presupuesto es para decidir si crear el caso; este loop solo
+    completa archivos de casos que ya existen y son visibles al agente.
+    """
+    interval = _cfg_int("ATTACHMENT_RECOVERY_INTERVAL_SECONDS", 600)
+    jitter = _cfg_int("ATTACHMENT_RECOVERY_JITTER_SECONDS", 30)
+    batch_size = _cfg_int("ATTACHMENT_RECOVERY_BATCH_SIZE", 50)
+
+    await asyncio.sleep(5)
+
+    while not stop_event.is_set():
+        try:
+            res = await sync_service.recover_missing_attachments(limit=batch_size)
+            logger.info(
+                "Attachment recovery loop | ok=%s | checked=%s | recovered=%s | still_pending=%s",
+                res.get("ok"),
+                res.get("checked"),
+                res.get("recovered"),
+                res.get("still_pending"),
+            )
+        except Exception as e:
+            logger.exception("Attachment recovery loop failed: %s", e)
+
+        sleep_s = max(60, interval + random.randint(0, jitter))
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=sleep_s)
         except asyncio.TimeoutError:
             pass

@@ -26,7 +26,6 @@ from app.db import get_db_session
 from app.delta_service import run_delta_backstop, run_delta_force_reprocess
 from app.reconcile_service import reconcile_recent_inbox, reconcile_force_reprocess_all
 from app.settings import settings
-from app.sync_service import process_message_id_async
 
 logger = logging.getLogger("app.delta_routes")
 router = APIRouter()
@@ -123,8 +122,15 @@ async def reprocess_message(
     message_id: str = Query(..., description="Provider message ID to reprocess"),
 ) -> dict:
     """
-    Reprocesa un mensaje específico por su provider_message_id.
-    Crea un caso nuevo si no existe (comportamiento v2).
+    Encola un mensaje específico por su provider_message_id para
+    reprocesamiento (v3: pasa por inbound_event_queue, única puerta de
+    materialización, en vez de invocar sync_service directamente).
+
+    OJO — cambio de contrato respecto a la versión anterior: esta llamada
+    ya NO es síncrona. Retorna el event_id encolado, no el case_id final.
+    inbound_queue_worker lo recoge y procesa en segundos (poll cada
+    INBOUND_QUEUE_POLL_SECONDS). Para ver el resultado, consultar
+    /admin/inbound-queue/stats o el caso una vez creado.
     """
     _require_admin_key(request)
 
@@ -134,16 +140,33 @@ async def reprocess_message(
             message_id,
             _client_ip(request),
         )
-        result = await process_message_id_async(message_id, source="manual")
+
+        with get_db_session() as db:
+            event_id = inbound_queue_repo.enqueue_event(
+                db,
+                source="manual",
+                provider_message_id=message_id,
+                mailbox_email=settings.MAILBOX_EMAIL,
+                payload=None,
+                force=True,
+            )
+
+        if event_id is None:
+            return {
+                "success": True,
+                "message_id": message_id,
+                "queued": False,
+                "note": "Ya había un evento pending/processing reciente para este mensaje",
+            }
+
         return {
             "success": True,
             "message_id": message_id,
-            "status": result.get("status"),
-            "case_id": result.get("case_id"),
-            "materialized": result.get("materialized"),
+            "queued": True,
+            "event_id": event_id,
         }
     except Exception as e:
-        logger.exception("Reprocess failed for %s", message_id)
+        logger.exception("Reprocess enqueue failed for %s", message_id)
         return {"success": False, "message_id": message_id, "error": str(e)}
 
 
@@ -153,7 +176,10 @@ async def reprocess_batch(
     limit: int = Query(50, description="Max messages to reprocess"),
 ) -> dict:
     """
-    Reprocesa mensajes con adjuntos faltantes en lote.
+    Encola en lote mensajes con adjuntos faltantes (v3: cada mensaje pasa
+    por inbound_event_queue, única puerta de materialización, en vez de
+    invocar sync_service directamente). inbound_queue_worker los procesa
+    de forma asíncrona en segundos.
     """
     _require_admin_key(request)
 
@@ -175,35 +201,55 @@ async def reprocess_batch(
         if not rows:
             return {
                 "total": 0,
-                "success": 0,
-                "failed": 0,
+                "queued": 0,
+                "skipped": 0,
                 "message": "No pending messages to reprocess",
                 "results": [],
             }
 
         results: list[dict[str, Any]] = []
+        queued = 0
+        skipped = 0
+
         for row in rows:
             msg_id = row[0]
             try:
-                result = await process_message_id_async(msg_id, source="manual")
-                results.append({
-                    "message_id": msg_id,
-                    "status": "success",
-                    "case_id": result.get("case_id"),
-                })
-                logger.info("Batch reprocess success: %s", msg_id)
+                with get_db_session() as db:
+                    event_id = inbound_queue_repo.enqueue_event(
+                        db,
+                        source="manual",
+                        provider_message_id=msg_id,
+                        mailbox_email=settings.MAILBOX_EMAIL,
+                        payload=None,
+                        force=True,
+                    )
+
+                if event_id is not None:
+                    queued += 1
+                    results.append({
+                        "message_id": msg_id,
+                        "status": "queued",
+                        "event_id": event_id,
+                    })
+                    logger.info("Batch enqueue success: %s -> event_id=%s", msg_id, event_id)
+                else:
+                    skipped += 1
+                    results.append({
+                        "message_id": msg_id,
+                        "status": "skipped_recent_pending",
+                    })
             except Exception as e:
                 results.append({
                     "message_id": msg_id,
                     "status": "failed",
                     "error": str(e)[:200],
                 })
-                logger.error("Batch reprocess failed: %s - %s", msg_id, e)
+                logger.error("Batch enqueue failed: %s - %s", msg_id, e)
 
         return {
             "total": len(results),
-            "success": sum(1 for r in results if r["status"] == "success"),
-            "failed": sum(1 for r in results if r["status"] == "failed"),
+            "queued": queued,
+            "skipped": skipped,
             "results": results,
         }
     except Exception as e:

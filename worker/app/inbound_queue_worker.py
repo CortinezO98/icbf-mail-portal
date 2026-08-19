@@ -13,6 +13,21 @@ logger = logging.getLogger("app.inbound_queue_worker")
 _stop_event: asyncio.Event | None = None
 _task: asyncio.Task | None = None
 
+# Statuses que representan un descarte intencional y permanente por parte
+# de _process_single_message (ok=True, materialized=False). La decisión no
+# depende de que Graph "termine de servir" el mensaje, así que reintentar
+# no cambia el resultado -> se marcan done, no retry.
+#
+# Si en el futuro se agrega un nuevo filtro determinístico en sync_service
+# (otro corte operativo, otra ventana de fechas, etc.), su status debe
+# sumarse aquí explícitamente. Deliberado: preferimos que un filtro nuevo
+# se reintente "de más" hasta que alguien lo agregue a la lista, antes que
+# el worker adivine por texto qué statuses son terminales.
+_TERMINAL_BY_DESIGN_STATUSES = {
+    "after_operational_cutoff",
+    "before_go_live",
+}
+
 
 async def start_inbound_queue_worker() -> None:
     global _stop_event, _task
@@ -54,6 +69,111 @@ async def stop_inbound_queue_worker() -> None:
     logger.warning("Inbound queue worker stopped")
 
 
+async def _process_one(
+    item: dict,
+    *,
+    semaphore: asyncio.Semaphore,
+    max_attempts: int,
+) -> None:
+    """Procesa un evento reclamado de la cola: llama a sync_service y decide
+    el siguiente estado (done / descartado por diseño / retry).
+
+    Extraída a nivel de módulo (en vez de closure dentro de _run_loop) para
+    ser testeable de forma aislada: todas sus dependencias externas
+    (sync_service.process_message_id_async, get_db_session,
+    inbound_queue_repo) se referencian vía el módulo, por lo que los tests
+    pueden sustituirlas con mocks sin necesitar un event loop de fondo ni
+    una base de datos real.
+    """
+    event_id = int(item["id"])
+    source = str(item["source"])
+    message_id = str(item["provider_message_id"])
+    attempts = int(item["attempts"])
+
+    async with semaphore:
+        try:
+            logger.info(
+                "QUEUE_EVENT_PICKED | event_id=%s | source=%s | message_id=%s | attempts=%s",
+                event_id,
+                source,
+                message_id,
+                attempts,
+            )
+
+            result = await sync_service.process_message_id_async(
+                message_id,
+                source=source,
+                attempts=attempts,
+                max_attempts=max_attempts,
+            )
+
+            ok = bool(result.get("ok"))
+            materialized = bool(result.get("materialized"))
+            status = str(result.get("status") or "unknown")
+
+            if materialized:
+                with get_db_session() as db:
+                    inbound_queue_repo.mark_done(db, event_id=event_id)
+
+                logger.info(
+                    "QUEUE_EVENT_DONE | event_id=%s | source=%s | message_id=%s | result_status=%s",
+                    event_id,
+                    source,
+                    message_id,
+                    status,
+                )
+                return
+
+            if ok and status in _TERMINAL_BY_DESIGN_STATUSES:
+                with get_db_session() as db:
+                    inbound_queue_repo.mark_done(db, event_id=event_id)
+
+                logger.info(
+                    "QUEUE_EVENT_DISCARDED_BY_DESIGN | event_id=%s | source=%s"
+                    " | message_id=%s | reason=%s",
+                    event_id,
+                    source,
+                    message_id,
+                    status,
+                )
+                return
+
+            logger.warning(
+                "QUEUE_EVENT_NOT_MATERIALIZED | event_id=%s | source=%s | message_id=%s | result_status=%s",
+                event_id,
+                source,
+                message_id,
+                status,
+            )
+
+            with get_db_session() as db:
+                inbound_queue_repo.mark_retry(
+                    db,
+                    event_id=event_id,
+                    attempts=attempts,
+                    error=f"not_materialized:{status}",
+                    max_attempts=max_attempts,
+                )
+
+        except Exception as e:
+            logger.exception(
+                "QUEUE_EVENT_FAILED | event_id=%s | source=%s | message_id=%s | err=%s",
+                event_id,
+                source,
+                message_id,
+                e,
+            )
+
+            with get_db_session() as db:
+                inbound_queue_repo.mark_retry(
+                    db,
+                    event_id=event_id,
+                    attempts=attempts,
+                    error=str(e),
+                    max_attempts=max_attempts,
+                )
+
+
 async def _run_loop() -> None:
     assert _stop_event is not None
 
@@ -76,79 +196,10 @@ async def _run_loop() -> None:
 
             sem = asyncio.Semaphore(max(1, concurrency))
 
-            async def _process_one(item: dict) -> None:
-                event_id = int(item["id"])
-                source = str(item["source"])
-                message_id = str(item["provider_message_id"])
-                attempts = int(item["attempts"])
-
-                async with sem:
-                    try:
-                        logger.info(
-                            "QUEUE_EVENT_PICKED | event_id=%s | source=%s | message_id=%s | attempts=%s",
-                            event_id,
-                            source,
-                            message_id,
-                            attempts,
-                        )
-
-                        result = await sync_service.process_message_id_async(
-                            message_id,
-                            source=source,
-                        )
-
-                        materialized = bool(result.get("materialized"))
-                        status = str(result.get("status") or "unknown")
-
-                        if materialized:
-                            with get_db_session() as db:
-                                inbound_queue_repo.mark_done(db, event_id=event_id)
-
-                            logger.info(
-                                "QUEUE_EVENT_DONE | event_id=%s | source=%s | message_id=%s | result_status=%s",
-                                event_id,
-                                source,
-                                message_id,
-                                status,
-                            )
-                            return
-
-                        logger.warning(
-                            "QUEUE_EVENT_NOT_MATERIALIZED | event_id=%s | source=%s | message_id=%s | result_status=%s",
-                            event_id,
-                            source,
-                            message_id,
-                            status,
-                        )
-
-                        with get_db_session() as db:
-                            inbound_queue_repo.mark_retry(
-                                db,
-                                event_id=event_id,
-                                attempts=attempts,
-                                error=f"not_materialized:{status}",
-                                max_attempts=max_attempts,
-                            )
-
-                    except Exception as e:
-                        logger.exception(
-                            "QUEUE_EVENT_FAILED | event_id=%s | source=%s | message_id=%s | err=%s",
-                            event_id,
-                            source,
-                            message_id,
-                            e,
-                        )
-
-                        with get_db_session() as db:
-                            inbound_queue_repo.mark_retry(
-                                db,
-                                event_id=event_id,
-                                attempts=attempts,
-                                error=str(e),
-                                max_attempts=max_attempts,
-                            )
-
-            await asyncio.gather(*[_process_one(item) for item in claimed])
+            await asyncio.gather(*[
+                _process_one(item, semaphore=sem, max_attempts=max_attempts)
+                for item in claimed
+            ])
 
         except Exception as e:
             logger.exception("Inbound queue loop failed: %s", e)
@@ -161,3 +212,4 @@ async def _sleep_or_stop(seconds: int) -> None:
         await asyncio.wait_for(_stop_event.wait(), timeout=max(1, seconds))
     except asyncio.TimeoutError:
         pass
+
