@@ -59,9 +59,9 @@ def env(monkeypatch):
     monkeypatch.setattr(sync_service, "get_db_session", _get_db_session)
     monkeypatch.setattr(sync_service, "_attachments_count", Mock(return_value=0))
 
-    insert_attachment_mock = Mock()
+    upsert_attachment_mock = Mock()
     insert_event_mock = Mock()
-    monkeypatch.setattr(sync_service.repos, "insert_attachment", insert_attachment_mock)
+    monkeypatch.setattr(sync_service.repos, "upsert_attachment", upsert_attachment_mock)
     monkeypatch.setattr(sync_service.repos, "insert_case_event", insert_event_mock)
 
     monkeypatch.setattr(
@@ -76,7 +76,7 @@ def env(monkeypatch):
 
     return SimpleNamespace(
         fake_db=fake_db,
-        insert_attachment_mock=insert_attachment_mock,
+        upsert_attachment_mock=upsert_attachment_mock,
         insert_event_mock=insert_event_mock,
     )
 
@@ -112,7 +112,7 @@ class TestReusesGateManifest:
         )
 
         sync_service.graph_client.list_attachments.assert_not_called()
-        env.insert_attachment_mock.assert_called_once()
+        env.upsert_attachment_mock.assert_called_once()
 
     async def test_fetches_manifest_when_not_provided(self, env, monkeypatch):
         sync_service.graph_client.list_attachments.return_value = [_file_attachment()]
@@ -169,7 +169,7 @@ class TestPartialFailuresAreStructured:
             attachments_manifest=[att],
         )
 
-        env.insert_attachment_mock.assert_not_called()
+        env.upsert_attachment_mock.assert_not_called()
         failure_calls = [
             c for c in env.insert_event_mock.call_args_list
             if c.kwargs["event_type"] == "ATTACHMENTS_PARTIAL_FAILURE"
@@ -258,7 +258,7 @@ class TestPartialFailuresAreStructured:
             attachments_manifest=manifest,
         )
 
-        assert env.insert_attachment_mock.call_count == 1
+        assert env.upsert_attachment_mock.call_count == 1
         failure_calls = [
             c for c in env.insert_event_mock.call_args_list
             if c.kwargs["event_type"] == "ATTACHMENTS_PARTIAL_FAILURE"
@@ -278,7 +278,7 @@ class TestPartialFailuresAreStructured:
             attachments_manifest=[],
         )
         env.insert_event_mock.assert_not_called()
-        env.insert_attachment_mock.assert_not_called()
+        env.upsert_attachment_mock.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +308,7 @@ class TestMissingGraphAttachmentId:
             attachments_manifest=[att],
         )
 
-        env.insert_attachment_mock.assert_not_called()
+        env.upsert_attachment_mock.assert_not_called()
         failure_calls = [
             c for c in env.insert_event_mock.call_args_list
             if c.kwargs["event_type"] == "ATTACHMENTS_PARTIAL_FAILURE"
@@ -330,7 +330,7 @@ class TestMissingGraphAttachmentId:
             attachments_manifest=[att],
         )
 
-        env.insert_attachment_mock.assert_not_called()
+        env.upsert_attachment_mock.assert_not_called()
         failure_calls = [
             c for c in env.insert_event_mock.call_args_list
             if c.kwargs["event_type"] == "ATTACHMENTS_PARTIAL_FAILURE"
@@ -354,7 +354,7 @@ class TestMissingGraphAttachmentId:
             attachments_manifest=[att],
         )
 
-        env.insert_attachment_mock.assert_not_called()
+        env.upsert_attachment_mock.assert_not_called()
 
     async def test_whitespace_only_id_is_not_inserted(self, env):
         att = _file_attachment(id="   ")
@@ -368,7 +368,7 @@ class TestMissingGraphAttachmentId:
             attachments_manifest=[att],
         )
 
-        env.insert_attachment_mock.assert_not_called()
+        env.upsert_attachment_mock.assert_not_called()
 
     async def test_valid_id_is_stripped_and_used_normally(self, env, monkeypatch):
         """Un id con espacios alrededor (poco probable pero defensivo)
@@ -387,9 +387,9 @@ class TestMissingGraphAttachmentId:
             attachments_manifest=[att],
         )
 
-        env.insert_attachment_mock.assert_called_once()
+        env.upsert_attachment_mock.assert_called_once()
         assert (
-            env.insert_attachment_mock.call_args.kwargs["graph_attachment_id"]
+            env.upsert_attachment_mock.call_args.kwargs["graph_attachment_id"]
             == "att-123"
         )
 
@@ -411,7 +411,7 @@ class TestMissingGraphAttachmentId:
             attachments_manifest=[missing_id_att, valid_att],
         )
 
-        env.insert_attachment_mock.assert_called_once()
+        env.upsert_attachment_mock.assert_called_once()
         details = [
             c for c in env.insert_event_mock.call_args_list
             if c.kwargs["event_type"] == "ATTACHMENTS_PARTIAL_FAILURE"
@@ -439,7 +439,7 @@ class TestMissingGraphAttachmentId:
             attachments_manifest=[att],
         )
 
-        for call in env.insert_attachment_mock.call_args_list:
+        for call in env.upsert_attachment_mock.call_args_list:
             gid = call.kwargs.get("graph_attachment_id")
             assert gid is not None
             assert str(gid).strip() != ""

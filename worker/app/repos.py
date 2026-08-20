@@ -456,7 +456,7 @@ def insert_message_inbound(
     )
 
 
-def insert_attachment(
+def upsert_attachment(
     db: Session,
     *,
     message_id_pk: int,
@@ -469,9 +469,38 @@ def insert_attachment(
     content_id: str | None,
     storage_path: str,
 ) -> None:
+    """
+    Identidad exclusiva: (message_id, graph_attachment_id) - ver
+    uq_attachments_message_graph (D1-C, ya aplicado en producción).
+
+    D1-D: reemplaza el INSERT IGNORE anterior (identidad por sha256,
+    retirada en D1-C) por INSERT ... ON DUPLICATE KEY UPDATE. Un mismo
+    adjunto Graph reintentado con contenido corregido (sha256/
+    storage_path distintos) ahora actualiza la fila existente en vez de
+    quedar ignorado con el contenido viejo.
+
+    NO se actualizan en colisión: id, message_id, graph_attachment_id
+    (son la identidad), created_at (conserva la fecha del primer
+    insert). Si storage_path cambia, el archivo físico anterior en
+    disco NO se borra automáticamente aquí - queda huérfano,
+    documentado como limpieza pendiente fuera del alcance de D1.
+
+    Defensa en profundidad (segunda barrera, independiente de D1-A en
+    sync_service.py): graph_attachment_id nunca puede persistirse como
+    NULL/""/solo-espacios. D1-A ya filtra esto antes de llegar aquí,
+    pero esta función no debe depender únicamente de que el caller lo
+    haga bien - un ValueError aquí es la red de seguridad si algún
+    futuro caller (hoy no existe otro) se salta esa validación.
+    """
+    graph_id = str(graph_attachment_id or "").strip()
+    if not graph_id:
+        raise ValueError(
+            "graph_attachment_id is required for attachment persistence"
+        )
+
     db.execute(
         text("""
-            INSERT IGNORE INTO attachments (
+            INSERT INTO attachments (
               message_id,
               graph_attachment_id,
               filename,
@@ -495,10 +524,18 @@ def insert_attachment(
               :storage_path,
               NOW(6)
             )
+            ON DUPLICATE KEY UPDATE
+              filename     = VALUES(filename),
+              content_type = VALUES(content_type),
+              size_bytes   = VALUES(size_bytes),
+              sha256       = VALUES(sha256),
+              is_inline    = VALUES(is_inline),
+              content_id   = VALUES(content_id),
+              storage_path = VALUES(storage_path)
         """),
         {
             "message_id": message_id_pk,
-            "graph_attachment_id": graph_attachment_id,
+            "graph_attachment_id": graph_id,
             "filename": filename[:255],
             "content_type": content_type[:120],
             "size_bytes": int(size_bytes),

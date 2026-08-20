@@ -1496,7 +1496,7 @@ async def _process_attachments(
 
         inserted = 0
         for p in prepared:
-            repos.insert_attachment(
+            repos.upsert_attachment(
                 db,
                 message_id_pk=message_pk,
                 graph_attachment_id=p.get("graph_attachment_id"),
