@@ -4,9 +4,11 @@ declare(strict_types=1);
 use App\Auth\Auth;
 use App\Auth\Csrf;
 use function App\Config\url;
+use function App\Config\load_config;
 
 require_once __DIR__ . '/_helpers.php';
 
+$layoutConfig = load_config();
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 $authPaths = [
     '/login',
@@ -58,7 +60,7 @@ $userRolesLabel = $userRoles ? implode(', ', $userRoles) : '';
 $hasRole = static fn(string $code): bool => in_array($normRole($code), $userRoles, true);
 
 $roleIsSupervisor = $hasRole('SUPERVISOR') || $hasRole('ADMIN');
-$roleIsAgent      = $hasRole('AGENTE');
+$roleIsAgent      = $hasRole('AGENTE') || $hasRole('AGENT');
 
 $enableSemaforoRoutes = false;
 
@@ -129,6 +131,25 @@ $enableSemaforoRoutes = false;
             border-radius: .35rem;
             background: rgba(0,0,0,.06);
         }
+
+        .agent-presence-toggle {
+            min-width: 170px;
+            justify-content: flex-start;
+            border-color: rgba(255,255,255,.45);
+        }
+        .agent-presence-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            flex: 0 0 auto;
+        }
+        .agent-presence-menu .dropdown-item {
+            display: flex;
+            align-items: center;
+            gap: .65rem;
+            min-width: 210px;
+        }
     </style>
 </head>
 
@@ -158,19 +179,37 @@ $enableSemaforoRoutes = false;
             <div class="collapse navbar-collapse" id="mainNavbar">
                 <ul class="navbar-nav me-auto mb-2 mb-lg-0">
                     <li class="nav-item">
-                        <a class="nav-link <?= is_active_prefix($path, '/cases') ? 'active' : '' ?>"
-                           href="<?= esc(url('/cases')) ?>"
+                        <a class="nav-link <?= is_active_prefix($path, '/cases') && $path !== '/cases/by-agent' ? 'active' : '' ?>"
+                           href="<?= esc($roleIsSupervisor ? url('/cases?status=NUEVO') : url('/cases')) ?>"
                            aria-current="<?= is_active_prefix($path, '/cases') ? 'page' : 'false' ?>">
                             <i class="bi bi-inbox me-1" aria-hidden="true"></i>
-                            Bandeja
+                            <?= $roleIsSupervisor ? 'Bandeja principal' : 'Mi bandeja' ?>
                         </a>
                     </li>
+                    <?php if ($roleIsSupervisor): ?>
+                        <li class="nav-item">
+                            <a class="nav-link" href="<?= esc(url('/cases?status=ALL')) ?>">
+                                <i class="bi bi-collection me-1" aria-hidden="true"></i>
+                                Todos los casos
+                            </a>
+                        </li>
+                    <?php endif; ?>
                     <?php if (Auth::hasRole('ADMIN') || Auth::hasRole('SUPERVISOR')): ?>
                         <li class="nav-item">
                             <a class="nav-link <?= is_active_prefix($path, '/cases/by-agent') ? 'active' : '' ?>"
                             href="<?= esc(url('/cases/by-agent')) ?>">
                                 <i class="bi bi-people me-2"></i>
                                 Casos por agente
+                            </a>
+                        </li>
+                    <?php endif; ?>
+
+                    <?php if ($roleIsSupervisor): ?>
+                        <li class="nav-item">
+                            <a class="nav-link <?= is_active_prefix($path, '/agents/status') ? 'active' : '' ?>"
+                               href="<?= esc(url('/agents/status')) ?>">
+                                <i class="bi bi-person-workspace me-1" aria-hidden="true"></i>
+                                Estado asesores
                             </a>
                         </li>
                     <?php endif; ?>
@@ -256,6 +295,27 @@ $enableSemaforoRoutes = false;
 
                 <div class="d-flex align-items-center gap-3">
                     <?php if (Auth::check()): ?>
+                        <?php if ($roleIsAgent): ?>
+                            <div class="dropdown" id="agentPresenceWidget">
+                                <button class="btn btn-outline-light btn-sm dropdown-toggle d-flex align-items-center gap-2 agent-presence-toggle"
+                                        type="button"
+                                        id="agentPresenceButton"
+                                        data-bs-toggle="dropdown"
+                                        aria-expanded="false">
+                                    <span class="agent-presence-dot" id="agentPresenceDot" style="background:#93c5fd"></span>
+                                    <span id="agentPresenceLabel">En línea No ACD</span>
+                                </button>
+                                <ul class="dropdown-menu dropdown-menu-end agent-presence-menu" aria-labelledby="agentPresenceButton">
+                                    <li><button class="dropdown-item" type="button" data-presence-code="DISPONIBLE" data-presence-name="Disponible" data-presence-color="#22c55e"><span class="agent-presence-dot" style="background:#22c55e"></span>Disponible</button></li>
+                                    <li><button class="dropdown-item" type="button" data-presence-code="EN_LINEA_NO_ACD" data-presence-name="En línea No ACD" data-presence-color="#93c5fd"><span class="agent-presence-dot" style="background:#93c5fd"></span>En línea No ACD</button></li>
+                                    <li><button class="dropdown-item" type="button" data-presence-code="ALMORZANDO" data-presence-name="Almorzando" data-presence-color="#fbbf24"><span class="agent-presence-dot" style="background:#fbbf24"></span>Almorzando</button></li>
+                                    <li><button class="dropdown-item" type="button" data-presence-code="AUSENTE" data-presence-name="Ausente" data-presence-color="#fbbf24"><span class="agent-presence-dot" style="background:#fbbf24"></span>Ausente</button></li>
+                                    <li><button class="dropdown-item" type="button" data-presence-code="BANO" data-presence-name="Baño" data-presence-color="#fbbf24"><span class="agent-presence-dot" style="background:#fbbf24"></span>Baño</button></li>
+                                    <li><button class="dropdown-item" type="button" data-presence-code="CAPACITACION" data-presence-name="Capacitación" data-presence-color="#fbbf24"><span class="agent-presence-dot" style="background:#fbbf24"></span>Capacitación</button></li>
+                                </ul>
+                            </div>
+                        <?php endif; ?>
+
                         <div class="text-white small text-end">
                             <div class="fw-semibold" id="userFullName"><?= esc($fullName) ?></div>
                             <div class="opacity-75">
@@ -400,6 +460,80 @@ window.addEventListener('DOMContentLoaded', function () {
   fireFlash().then(() => fireImportErrors());
 });
 
+
+<?php if ($roleIsAgent && Auth::check()): ?>
+// R1 - Presencia de agente: selector + heartbeat.
+window.addEventListener('DOMContentLoaded', function () {
+  const presenceUrl = <?= json_encode(url('/agent/presence')) ?>;
+  const heartbeatUrl = <?= json_encode(url('/agent/heartbeat')) ?>;
+  const csrf = <?= json_encode(Csrf::token()) ?>;
+  const heartbeatSeconds = <?= (int)($layoutConfig['agent_presence']['heartbeat_seconds'] ?? 30) ?>;
+  const button = document.getElementById('agentPresenceButton');
+  const dot = document.getElementById('agentPresenceDot');
+  const label = document.getElementById('agentPresenceLabel');
+
+  const applyPresence = (presence) => {
+    if (!presence) return;
+    if (label) label.textContent = String(presence.name || 'En línea No ACD');
+    if (dot) dot.style.background = String(presence.color_hex || '#93c5fd');
+    document.querySelectorAll('[data-presence-code]').forEach(el => {
+      el.classList.toggle('active', String(el.dataset.presenceCode) === String(presence.code));
+    });
+  };
+
+  const postForm = async (url, values = {}) => {
+    const body = new URLSearchParams({_csrf: csrf, ...values});
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8', 'Accept': 'application/json'},
+      body: body.toString(),
+      cache: 'no-store',
+      credentials: 'same-origin'
+    });
+    const data = await response.json().catch(() => ({ok:false, message:'Respuesta inválida'}));
+    if (!response.ok || !data.ok) throw new Error(data.message || 'No se pudo actualizar el estado');
+    return data;
+  };
+
+  const heartbeat = async () => {
+    if (document.visibilityState === 'hidden') return;
+    try {
+      const data = await postForm(heartbeatUrl);
+      // Si hubo una reconexión después del stale timeout, el backend fuerza
+      // EN_LINEA_NO_ACD. Reflejamos inmediatamente ese cambio en pantalla.
+      if (data && data.presence) applyPresence(data.presence);
+    } catch (_) {}
+  };
+
+  fetch(presenceUrl, {headers:{'Accept':'application/json'}, cache:'no-store', credentials:'same-origin'})
+    .then(r => r.ok ? r.json() : Promise.reject())
+    .then(data => { if (data && data.ok) applyPresence(data.presence); })
+    .catch(() => {});
+
+  document.querySelectorAll('[data-presence-code]').forEach(item => {
+    item.addEventListener('click', async () => {
+      if (button) button.disabled = true;
+      try {
+        const data = await postForm(presenceUrl, {status_code: item.dataset.presenceCode});
+        applyPresence(data.presence);
+      } catch (error) {
+        if (window.Swal) {
+          Swal.fire({icon:'error', title:'No se pudo cambiar el estado', text:String(error.message || error)});
+        }
+      } finally {
+        if (button) button.disabled = false;
+      }
+    });
+  });
+
+  heartbeat();
+  const timer = window.setInterval(heartbeat, Math.max(10, heartbeatSeconds) * 1000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') heartbeat();
+  });
+  window.addEventListener('pagehide', () => window.clearInterval(timer));
+});
+<?php endif; ?>
 
 document.addEventListener('click', function (e) {
   const el = e.target.closest('[data-confirm="true"]');

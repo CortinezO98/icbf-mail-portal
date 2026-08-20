@@ -66,6 +66,13 @@ function load_config(): array
         'csrf_key' => getenv('PORTAL_CSRF_KEY') ?: 'CHANGE_ME_CSRF_KEY',
 
         'attachments_dir' => rtrim((string)(getenv('PORTAL_ATTACHMENTS_DIR') ?: '/var/lib/icbf-mail-portal/attachments'), "\\/"),
+
+        // Presencia y asignación de agentes (R1/R2)
+        'agent_presence' => [
+            'heartbeat_seconds' => max(10, (int)(getenv('PORTAL_AGENT_HEARTBEAT_SECONDS') ?: 30)),
+            'stale_seconds' => max(30, (int)(getenv('PORTAL_AGENT_STALE_SECONDS') ?: 90)),
+            'max_active_cases' => max(1, (int)(getenv('PORTAL_AGENT_MAX_ACTIVE_CASES') ?: 2)),
+        ],
     ];
 }
 

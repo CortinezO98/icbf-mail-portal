@@ -690,7 +690,6 @@ async def _process_single_message(
     has_attachments = 1 if msg.get("hasAttachments") else 0
     case_id: int | None = None
     message_pk: int | None = None
-    assigned_agent_id: int | None = None
     existing: tuple[int, int | None, int] | None = None
     should_resync_attachments = False
     should_return_already_materialized = False
@@ -1068,46 +1067,25 @@ async def _process_single_message(
                     },
                 )
 
-            assigned_agent_id = repos.auto_assign_case(db, case_id=case_id)
-            if assigned_agent_id:
-                logger.info(
-                    "AUTO_ASSIGNED | case_id=%s | agent_id=%s",
-                    case_id,
-                    assigned_agent_id,
-                )
-                repos.insert_case_event(
-                    db,
-                    case_id=case_id,
-                    actor_user_id=None,
-                    source="WORKER",
-                    event_type="AUTO_ASSIGNED",
-                    from_status_id=None,
-                    to_status_id=None,
-                    details={
-                        "agent_id": assigned_agent_id,
-                        "provider_message_id": provider_message_id,
-                        "message_kind": message_kind,
-                    },
-                )
-            else:
-                logger.warning(
-                    "No eligible agents found for auto-assign case_id=%s",
-                    case_id,
-                )
-                repos.insert_case_event(
-                    db,
-                    case_id=case_id,
-                    actor_user_id=None,
-                    source="WORKER",
-                    event_type="AUTO_ASSIGN_SKIPPED",
-                    from_status_id=None,
-                    to_status_id=None,
-                    details={
-                        "reason": "no_eligible_agents",
-                        "provider_message_id": provider_message_id,
-                        "message_kind": message_kind,
-                    },
-                )
+            # R2: la ingesta termina su responsabilidad dejando el caso
+            # NUEVO + sin agente en la bandeja principal. La asignación se
+            # realiza exclusivamente en app.assignment_worker, que aplica
+            # presencia DISPONIBLE, heartbeat vigente, capacidad máxima y
+            # concurrencia transaccional.
+            repos.insert_case_event(
+                db,
+                case_id=case_id,
+                actor_user_id=None,
+                source="WORKER",
+                event_type="QUEUED_FOR_ASSIGNMENT",
+                from_status_id=None,
+                to_status_id=None,
+                details={
+                    "provider_message_id": provider_message_id,
+                    "message_kind": message_kind,
+                    "mode": "main_queue",
+                },
+            )
 
     # Adjuntos (fuera de cualquier transacción de DB, sigue el mismo
     # principio que ya existía: no bloquear la sesión mientras se llama
@@ -1283,13 +1261,6 @@ async def _process_single_message(
             "message_pk": message_pk,
         }
 
-    if settings.NOTIFICATIONS_ENABLED and assigned_agent_id and case_id is not None:
-        await _notify_agent_new_case(
-            case_id=case_id,
-            agent_id=assigned_agent_id,
-            case_subject=subject,
-        )
-
     return {
         "ok": True,
         "status": ("created_degraded" if is_degraded else "created"),
@@ -1300,147 +1271,6 @@ async def _process_single_message(
     }
 
 
-
-# Notificación al agente
-async def _notify_agent_new_case(
-    *, case_id: int, agent_id: int, case_subject: str
-) -> None:
-    mb = settings.MAILBOX_EMAIL
-    if not mb:
-        return
-
-    ua = f"worker/{settings.WORKER_INSTANCE_ID}"
-
-    with get_db_session() as db:
-        to_email = repos.get_user_email(db, user_id=agent_id)
-
-        if not to_email:
-            repos.insert_case_event(
-                db,
-                case_id=case_id,
-                actor_user_id=None,
-                source="WORKER",
-                event_type="NOTIFY_SKIPPED_NO_EMAIL",
-                from_status_id=None,
-                to_status_id=None,
-                details={
-                    "agent_id": agent_id,
-                    "reason": "agent_has_no_email",
-                    "mode": "cooldown_mvp",
-                },
-                ip_address=None,
-                user_agent=ua,
-            )
-            logger.info("Agent has no email user_id=%s -> skip notify", agent_id)
-            return
-
-        allowed = repos.try_mark_agent_notified(
-            db,
-            user_id=agent_id,
-            cooldown_minutes=5,
-        )
-        if not allowed:
-            repos.insert_case_event(
-                db,
-                case_id=case_id,
-                actor_user_id=None,
-                source="WORKER",
-                event_type="NOTIFY_SKIPPED_COOLDOWN",
-                from_status_id=None,
-                to_status_id=None,
-                details={
-                    "agent_id": agent_id,
-                    "to_email": to_email,
-                    "cooldown_minutes": 5,
-                    "reason": "cooldown_active",
-                    "mode": "cooldown_mvp",
-                },
-                ip_address=None,
-                user_agent=ua,
-            )
-            logger.info(
-                "Notify cooldown active agent_id=%s -> skip notify",
-                agent_id,
-            )
-            return
-
-    portal = (getattr(settings, "PORTAL_BASE_URL", "") or "").rstrip("/")
-    link = f"{portal}/cases/{case_id}" if portal else ""
-    subject = "Nuevo caso asignado en Portal ICBF"
-    body_html = f"""
-      <div style="font-family:Segoe UI, Arial, sans-serif; font-size:14px; color:#111">
-        <p>Hola,</p>
-        <p>Se te ha asignado un <strong>nuevo caso</strong> en el Portal de Gestión de Correo.</p>
-        <p style="margin:12px 0">
-          <strong>ID del caso:</strong> {case_id}<br>
-          <strong>Asunto:</strong> {case_subject}
-        </p>
-        {"<p>Puedes revisarlo aquí: <a href='" + link + "'>" + link + "</a></p>" if link else "<p>Ingresa al portal para revisarlo.</p>"}
-        <p style="color:#666; font-size:12px; margin-top:18px">
-          Este mensaje es automático. Para evitar spam, el sistema limita notificaciones por ventana de tiempo.
-        </p>
-      </div>
-    """
-
-    try:
-        await graph_client.send_mail(
-            mb,
-            to_email=to_email,
-            subject=subject,
-            body_html=body_html,
-        )
-        with get_db_session() as db:
-            repos.insert_case_event(
-                db,
-                case_id=case_id,
-                actor_user_id=None,
-                source="WORKER",
-                event_type="NOTIFY_SENT",
-                from_status_id=None,
-                to_status_id=None,
-                details={
-                    "agent_id": agent_id,
-                    "to_email": to_email,
-                    "subject": subject,
-                    "portal_link": link,
-                    "mode": "cooldown_mvp",
-                },
-                ip_address=None,
-                user_agent=ua,
-            )
-        logger.info(
-            "Notification sent case_id=%s agent_id=%s to=%s",
-            case_id,
-            agent_id,
-            to_email,
-        )
-    except Exception as e:
-        with get_db_session() as db:
-            repos.insert_case_event(
-                db,
-                case_id=case_id,
-                actor_user_id=None,
-                source="WORKER",
-                event_type="NOTIFY_FAILED",
-                from_status_id=None,
-                to_status_id=None,
-                details={
-                    "agent_id": agent_id,
-                    "to_email": to_email,
-                    "subject": subject,
-                    "portal_link": link,
-                    "error": str(e)[:500],
-                    "mode": "cooldown_mvp",
-                },
-                ip_address=None,
-                user_agent=ua,
-            )
-        logger.warning(
-            "Notification failed case_id=%s agent_id=%s err=%s",
-            case_id,
-            agent_id,
-            e,
-        )
 
 
 # Procesamiento de adjuntos

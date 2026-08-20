@@ -8,6 +8,7 @@ use Throwable;
 use App\Repos\UsersRepo;
 use App\Repos\EmailQueueRepo;
 use App\Repos\SecurityLogRepo; 
+use App\Repos\AgentPresenceRepo;
 use App\Auth\Auth;
 use App\Auth\Csrf;
 
@@ -19,6 +20,7 @@ final class AuthController
     private UsersRepo $usersRepo;
     private EmailQueueRepo $emailQueueRepo;
     private SecurityLogRepo $securityLogRepo; 
+    private AgentPresenceRepo $agentPresenceRepo;
 
     public function __construct(private PDO $pdo, private array $config)
     {
@@ -27,6 +29,7 @@ final class AuthController
         $this->usersRepo = new UsersRepo($pdo);
         $this->emailQueueRepo = new EmailQueueRepo($pdo);
         $this->securityLogRepo = new SecurityLogRepo($pdo); 
+        $this->agentPresenceRepo = new AgentPresenceRepo($pdo);
     }
 
     public function showLogin(): void
@@ -72,6 +75,23 @@ final class AuthController
 
         Auth::login($user, $roles);
 
+        // R1: un login de agente nunca lo deja disponible automáticamente.
+        // Entra como EN_LINEA_NO_ACD y debe seleccionar "Disponible" explícitamente.
+        $normalizedRoles = array_map(static fn($r) => strtoupper(trim((string)$r)), $roles);
+        if (in_array('AGENTE', $normalizedRoles, true) || in_array('AGENT', $normalizedRoles, true)) {
+            try {
+                $this->agentPresenceRepo->setStatus(
+                    (int)$user['id'],
+                    'EN_LINEA_NO_ACD',
+                    (int)$user['id'],
+                    'LOGIN'
+                );
+            } catch (\Throwable $e) {
+                // La presencia no debe impedir un login; el error queda visible en logs.
+                error_log('[AgentPresence][LOGIN] ' . $e->getMessage());
+            }
+        }
+
         header('Location: ' . url('/cases'));
         exit;
     }
@@ -81,6 +101,16 @@ final class AuthController
         Auth::initSession($this->config);
 
         Csrf::validate($_POST['_csrf'] ?? null);
+
+        $uid = (int)(Auth::id() ?? 0);
+        if ($uid > 0 && Auth::hasAnyRole(['AGENTE', 'AGENT'])) {
+            try {
+                $this->agentPresenceRepo->markDisconnected($uid, $uid);
+            } catch (\Throwable $e) {
+                error_log('[AgentPresence][LOGOUT] ' . $e->getMessage());
+            }
+        }
+
         Auth::logout();
 
         header('Location: ' . url('/login'));

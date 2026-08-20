@@ -177,29 +177,7 @@ final class UsersRepo
         return $st ? ($st->fetchAll(PDO::FETCH_ASSOC) ?: []) : [];
     }
 
-    public function pickLeastLoadedAgentId(): ?int
-    {
-        $sql = "
-            SELECT u.id
-            FROM users u
-            JOIN user_roles ur ON ur.user_id = u.id
-            JOIN roles r ON r.id = ur.role_id AND UPPER(TRIM(r.code)) = 'AGENTE'
-            LEFT JOIN cases c ON c.assigned_user_id = u.id
-            LEFT JOIN case_statuses cs
-              ON cs.id = c.status_id
-             AND cs.code IN ('ASIGNADO','EN_PROCESO')
-            WHERE u.is_active = 1
-              AND u.assign_enabled = 1
-            GROUP BY u.id
-            ORDER BY COUNT(c.id) ASC,
-                     COALESCE(u.last_assigned_at, '1970-01-01') ASC,
-                     u.id ASC
-            LIMIT 1
-        ";
-        $st = $this->pdo->query($sql);
-        $id = $st ? $st->fetchColumn() : false;
-        return $id ? (int)$id : null;
-    }
+    // R2: selección automática movida al assignment worker.
 
     public function touchLastAssignedAt(int $userId): void
     {
@@ -213,6 +191,60 @@ final class UsersRepo
         $st->execute([':id' => $userId]);
     }
 
+
+
+    public function listAvailableAgentsForAssignment(int $staleSeconds = 90, int $maxActiveCases = 2): array
+    {
+        $staleSeconds = max(30, $staleSeconds);
+        $maxActiveCases = max(1, $maxActiveCases);
+
+        $sql = "
+            SELECT
+                u.id,
+                u.full_name,
+                u.username,
+                u.email,
+                COALESCE(loads.active_cases, 0) AS active_cases,
+                GREATEST(:max_cases - COALESCE(loads.active_cases, 0), 0) AS free_slots
+            FROM users u
+            JOIN agent_presence ap ON ap.user_id = u.id
+            JOIN agent_presence_statuses aps ON aps.id = ap.status_id
+            LEFT JOIN (
+                SELECT c.assigned_user_id, COUNT(*) AS active_cases
+                FROM cases c
+                JOIN case_statuses cs ON cs.id = c.status_id
+                WHERE c.assigned_user_id IS NOT NULL
+                  AND cs.code IN ('ASIGNADO', 'EN_PROCESO')
+                GROUP BY c.assigned_user_id
+            ) loads ON loads.assigned_user_id = u.id
+            WHERE u.is_active = 1
+              AND u.assign_enabled = 1
+              AND aps.code = 'DISPONIBLE'
+              AND aps.is_assignable = 1
+              AND TIMESTAMPDIFF(SECOND, ap.last_seen_at, NOW(6)) <= :stale_seconds
+              AND COALESCE(loads.active_cases, 0) < :max_cases2
+              AND EXISTS (
+                  SELECT 1
+                  FROM user_roles ur
+                  JOIN roles r ON r.id = ur.role_id
+                  WHERE ur.user_id = u.id
+                    AND UPPER(TRIM(r.code)) IN ('AGENTE', 'AGENT')
+              )
+            ORDER BY
+                COALESCE(loads.active_cases, 0) ASC,
+                COALESCE(u.last_assigned_at, '1970-01-01') ASC,
+                u.full_name ASC,
+                u.id ASC
+        ";
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute([
+            ':max_cases' => $maxActiveCases,
+            ':max_cases2' => $maxActiveCases,
+            ':stale_seconds' => $staleSeconds,
+        ]);
+        return $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    }
 
     public function listAssignableAgents(): array
     {

@@ -23,6 +23,7 @@ require_once __DIR__ . '/../app/repos/UsersAdminRepo.php';
 require_once __DIR__ . '/../app/repos/CaseEventsRepo.php';
 require_once __DIR__ . '/../app/repos/EmailQueueRepo.php';
 require_once __DIR__ . '/../app/repos/SecurityLogRepo.php';
+require_once __DIR__ . '/../app/repos/AgentPresenceRepo.php';
 
 
 require_once __DIR__ . '/../app/controllers/AuthController.php';
@@ -35,6 +36,7 @@ require_once __DIR__ . '/../app/services/ReportExportService.php';
 require_once __DIR__ . '/../app/controllers/ReportsController.php';
 require_once __DIR__ . '/../app/controllers/UsersAdminController.php';
 require_once __DIR__ . '/../app/controllers/AgentAssignmentsController.php';
+require_once __DIR__ . '/../app/controllers/AgentPresenceController.php';
 
 require_once __DIR__ . '/../app/middleware/require_login.php';
 require_once __DIR__ . '/../app/middleware/require_role.php';
@@ -101,6 +103,44 @@ try {
         exit;
     }
 
+
+    // ============================================================
+    // Presencia operacional de agentes (R1)
+    // ============================================================
+    if ($path === '/agent/presence' && $method === 'GET') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['AGENTE', 'AGENT']);
+        (new \App\Controllers\AgentPresenceController($pdo, $config))->current();
+        exit;
+    }
+
+    if ($path === '/agent/presence' && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['AGENTE', 'AGENT']);
+        (new \App\Controllers\AgentPresenceController($pdo, $config))->update();
+        exit;
+    }
+
+    if ($path === '/agent/heartbeat' && $method === 'POST') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['AGENTE', 'AGENT']);
+        (new \App\Controllers\AgentPresenceController($pdo, $config))->heartbeat();
+        exit;
+    }
+
+    if ($path === '/agents/status' && $method === 'GET') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
+        (new \App\Controllers\AgentPresenceController($pdo, $config))->supervisor();
+        exit;
+    }
+
+    if ($path === '/agents/status/data' && $method === 'GET') {
+        \App\Middleware\require_login();
+        \App\Middleware\require_role(['ADMIN', 'SUPERVISOR']);
+        (new \App\Controllers\AgentPresenceController($pdo, $config))->supervisorData();
+        exit;
+    }
 
     // Cases
     if ($path === '/cases' && $method === 'GET') {

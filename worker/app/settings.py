@@ -214,6 +214,16 @@ class Settings(BaseSettings):
     # sync_service._evaluate_attachments_flag_stability.
     ATTACHMENTS_STABILIZATION_WINDOW_MINUTES: int = 15
 
+    # Asignación automática por presencia/capacidad (R2).
+    # Se ejecuta en un proceso independiente: python -m app.assignment_worker.
+    # Mantener deshabilitado hasta aplicar portal/sql/20260820_agent_presence_and_assignment.sql.
+    ASSIGNMENT_WORKER_ENABLED: int = 0
+    ASSIGNMENT_POLL_SECONDS: int = 2
+    ASSIGNMENT_BATCH_SIZE: int = 50
+    ASSIGNMENT_MAX_ACTIVE_CASES: int = 2
+    AGENT_PRESENCE_STALE_SECONDS: int = 90
+    ASSIGNMENT_ACTIVE_STATUS_CODES: str = "ASIGNADO,EN_PROCESO"
+
     # Helpers
     def allowed_ext_set(self) -> Set[str]:
         return {

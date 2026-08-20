@@ -10,6 +10,7 @@ use App\Auth\Csrf;
 use App\Repos\CasesRepo;
 use App\Repos\UsersRepo;
 use App\Repos\EventsRepo;
+use App\Repos\AgentPresenceRepo;
 
 use function App\Config\url;
 
@@ -18,12 +19,14 @@ final class AgentAssignmentsController
     private CasesRepo $casesRepo;
     private UsersRepo $usersRepo;
     private EventsRepo $eventsRepo;
+    private AgentPresenceRepo $presenceRepo;
 
     public function __construct(private PDO $pdo, private array $config)
     {
         $this->casesRepo = new CasesRepo($pdo);
         $this->usersRepo = new UsersRepo($pdo);
         $this->eventsRepo = new EventsRepo($pdo);
+        $this->presenceRepo = new AgentPresenceRepo($pdo);
     }
 
     public function index(): void
@@ -38,6 +41,10 @@ final class AgentAssignmentsController
             $perPage = max(10, min(100, (int)($_GET['per_page'] ?? 20)));
 
             $agents = $this->usersRepo->listAssignableAgents();
+            $targetAgents = $this->usersRepo->listAvailableAgentsForAssignment(
+                (int)($this->config['agent_presence']['stale_seconds'] ?? 90),
+                (int)($this->config['agent_presence']['max_active_cases'] ?? 2)
+            );
 
             $result = [
                 'data' => [],
@@ -64,6 +71,7 @@ final class AgentAssignmentsController
 
             $this->render('cases/by_agent.php', [
                 'agents' => $agents,
+                'targetAgents' => $targetAgents,
                 'cases' => $result['data'] ?? [],
                 'pagination' => $result['pagination'] ?? [],
                 'summary' => $result['summary'] ?? ['total_assigned' => 0],
@@ -140,6 +148,19 @@ final class AgentAssignmentsController
                 $this->pdo->rollBack();
                 $this->flash('warning', 'No se encontraron casos elegibles para reasignación.');
                 $this->redirect('/cases/by-agent?agent_id=' . $sourceAgentId);
+            }
+
+            // Mismo orden de locks que el worker: primero casos, luego presencia.
+            $capacity = $this->presenceRepo->lockAssignableAgent(
+                $targetAgentId,
+                (int)($this->config['agent_presence']['stale_seconds'] ?? 90),
+                (int)($this->config['agent_presence']['max_active_cases'] ?? 2)
+            );
+            $freeSlots = (int)($capacity['free_slots'] ?? 0);
+            if ($capacity === null || count($eligibleCases) > $freeSlots) {
+                throw new \RuntimeException(
+                    'El asesor destino no está Disponible o no tiene cupo suficiente para los casos seleccionados.'
+                );
             }
 
             $reassigned = 0;

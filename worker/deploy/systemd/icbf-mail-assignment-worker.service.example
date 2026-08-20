@@ -1,0 +1,16 @@
+[Unit]
+Description=ICBF Mail Assignment Worker
+After=network.target mariadb.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/icbf-mail-portal/worker
+EnvironmentFile=/etc/icbf-mail-worker/worker.env
+ExecStart=/var/www/icbf-mail-portal/worker/venv/bin/python -m app.assignment_worker
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -100,7 +100,6 @@ def env(monkeypatch):
     monkeypatch.setattr(sync_service.repos, "create_case", create_case_mock)
     monkeypatch.setattr(sync_service.repos, "insert_message_inbound", insert_message_mock)
     monkeypatch.setattr(sync_service.repos, "insert_case_event", insert_event_mock)
-    monkeypatch.setattr(sync_service.repos, "auto_assign_case", Mock(return_value=None))
 
     get_message_mock = AsyncMock(return_value=_base_msg())
     list_attachments_mock = AsyncMock(return_value=[])
@@ -177,6 +176,13 @@ class TestCompleteMessage:
         env.create_case_mock.assert_called_once()
         env.process_attachments_mock.assert_not_called()
         assert _degraded_event_details(env) is None
+
+        queued = [
+            c for c in env.insert_event_mock.call_args_list
+            if c.kwargs.get("event_type") == "QUEUED_FOR_ASSIGNMENT"
+        ]
+        assert len(queued) == 1
+        assert queued[0].kwargs["details"]["mode"] == "main_queue"
 
     async def test_complete_message_with_attachments_reuses_gate_manifest(self, env):
         manifest = [{"id": "att-1", "@odata.type": "#microsoft.graph.fileAttachment"}]

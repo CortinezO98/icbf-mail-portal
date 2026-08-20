@@ -60,7 +60,9 @@ final class CasesController
             !$statusWasProvided &&
             (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN'))
         ) {
-            $status = null;
+            // R1: la vista principal de operación es la bandeja de entrada
+            // pendiente de asignación. ?status=ALL conserva la vista global.
+            $status = 'NUEVO';
         }
 
         try {
@@ -144,7 +146,10 @@ final class CasesController
 
         $agents = [];
         if (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN')) {
-            $agents = $this->usersRepo->listAgents();
+            $agents = $this->usersRepo->listAvailableAgentsForAssignment(
+                (int)($this->config['agent_presence']['stale_seconds'] ?? 90),
+                (int)($this->config['agent_presence']['max_active_cases'] ?? 2)
+            );
         }
 
         $flash = $_SESSION['_flash'] ?? null;

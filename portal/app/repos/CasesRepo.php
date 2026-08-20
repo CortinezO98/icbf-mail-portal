@@ -492,21 +492,7 @@ final class CasesRepo
         return array_map('intval', $st->fetchAll(PDO::FETCH_COLUMN));
     }
 
-    public function assignToUserIfUnassigned(int $caseId, int $agentId, int $statusAsignadoId): bool
-    {
-        $sql = "UPDATE cases
-                SET assigned_user_id = :aid,
-                    status_id = :sid,
-                    assigned_at = NOW(6),
-                    last_activity_at = NOW(6),
-                    updated_at = NOW(6)
-                WHERE id = :cid
-                AND assigned_user_id IS NULL
-                LIMIT 1";
-        $st = $this->pdo->prepare($sql);
-        $st->execute([':aid' => $agentId, ':sid' => $statusAsignadoId, ':cid' => $caseId]);
-        return $st->rowCount() > 0;
-    }
+    // R2: autoasignación automática movida al assignment worker.
 
     public function countUnassignedByStatus(int $statusId): int
     {

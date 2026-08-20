@@ -2,7 +2,6 @@
 declare(strict_types=1);
 
 use App\Auth\Auth;
-use App\Auth\Csrf;
 use function App\Config\url;
 
 $roleIsSupervisor = Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN');
@@ -92,9 +91,6 @@ if (!function_exists('buildStatusUrl')) {
         ]);
     }
 }
-
-$csrfToken = Csrf::token();
-$autoAssignUrl = url('/cases/auto-assign');
 
 $totalCases = (int)($pagination['total_rows'] ?? 0);
 $currentPage = max(1, (int)($pagination['page'] ?? 1));
@@ -258,27 +254,23 @@ $casesCount = count($cases ?? []);
                                 </div>
                             </div>
                             <div>
-                                <h6 class="mb-1 fw-bold">Casos pendientes de asignación</h6>
+                                <h6 class="mb-1 fw-bold">Bandeja principal · pendientes de asignación</h6>
                                 <p class="text-muted mb-0 small">
                                     <span class="badge bg-warning-subtle text-warning-emphasis rounded-pill me-2">
                                         <i class="bi bi-person-x me-1"></i>Sin asignar:
                                         <strong id="unassignedCount"><?= number_format((int)($unassignedCount ?? 0), 0, ',', '.') ?></strong>
                                     </span>
-                                    Casos con estado <strong>NUEVO</strong> que requieren asignación a agentes
+                                    Los correos permanecen aquí hasta que exista un asesor <strong>Disponible</strong> con capacidad
                                 </p>
                             </div>
                         </div>
                     </div>
                     <div class="col-md-4 text-end">
-                        <button type="button"
-                                class="btn btn-warning btn-lg px-4"
-                                id="btnAutoAssign"
-                                data-url="<?= esc($autoAssignUrl) ?>"
-                                data-csrf="<?= esc($csrfToken) ?>">
-                            <i class="bi bi-lightning-charge me-2"></i>Auto-asignar
-                        </button>
+                        <a class="btn btn-outline-warning btn-lg px-4" href="<?= esc(url('/agents/status')) ?>">
+                            <i class="bi bi-people me-2"></i>Ver capacidad
+                        </a>
                         <div class="form-text mt-1">
-                            Distribuye automáticamente entre agentes disponibles
+                            La asignación es automática: solo agentes Disponibles con cupo
                         </div>
                     </div>
                 </div>
@@ -651,140 +643,6 @@ $casesCount = count($cases ?? []);
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    const btnAutoAssign = document.getElementById('btnAutoAssign');
-    if (btnAutoAssign) {
-        btnAutoAssign.addEventListener('click', async function () {
-            const url = btnAutoAssign.dataset.url;
-            const csrf = btnAutoAssign.dataset.csrf;
-
-            const { value: confirm } = await Swal.fire({
-                title: '¿Auto-asignar casos pendientes?',
-                html: `
-                    <div class="text-start">
-                        <p>Esta acción distribuirá los casos <strong>NUEVOS</strong> entre los agentes disponibles según:</p>
-                        <ul class="text-start mb-0">
-                            <li>Menor carga actual de casos</li>
-                            <li>Fecha de última asignación</li>
-                            <li>Disponibilidad del agente</li>
-                        </ul>
-                        <div class="alert alert-warning mt-3 mb-0 p-2">
-                            <i class="bi bi-info-circle me-1"></i>
-                            Solo se asignarán casos sin agente asignado previamente.
-                        </div>
-                    </div>
-                `,
-                icon: 'question',
-                showCancelButton: true,
-                confirmButtonText: 'Sí, auto-asignar',
-                cancelButtonText: 'Cancelar',
-                confirmButtonColor: '#f59e0b',
-                showLoaderOnConfirm: true,
-                preConfirm: async () => {
-                    const form = new FormData();
-                    form.append('_csrf', csrf);
-
-                    try {
-                        const resp = await fetch(url, {
-                            method: 'POST',
-                            body: form,
-                            headers: { 'X-Requested-With': 'fetch' }
-                        });
-
-                        if (!resp.ok) throw new Error('Error en la solicitud');
-                        return await resp.json();
-                    } catch (error) {
-                        Swal.showValidationMessage('Error de conexión');
-                        return null;
-                    }
-                }
-            });
-
-            if (!confirm) return;
-
-            const data = confirm;
-
-            if (data.ok) {
-                let html = '';
-                let icon = 'info';
-                let title = 'Proceso completado';
-
-                switch (data.code) {
-                    case 'ASSIGNED':
-                        icon = 'success';
-                        title = '✅ Auto-asignación exitosa';
-                        html = `
-                            <div class="text-start">
-                                <div class="alert alert-success p-2 mb-3">
-                                    <i class="bi bi-check-circle me-1"></i>
-                                    <strong>${data.assigned} caso(s)</strong> asignados correctamente
-                                </div>
-                                <div class="row">
-                                    <div class="col-6">
-                                        <div class="card border-success border">
-                                            <div class="card-body text-center p-2">
-                                                <div class="h4 mb-0 text-success">${data.assigned}</div>
-                                                <small class="text-muted">Asignados</small>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="col-6">
-                                        <div class="card border-warning border">
-                                            <div class="card-body text-center p-2">
-                                                <div class="h4 mb-0 text-warning">${data.skipped}</div>
-                                                <small class="text-muted">Omitidos</small>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        `;
-                        setTimeout(() => window.location.reload(), 2000);
-                        break;
-
-                    case 'NO_PENDING':
-                        icon = 'info';
-                        title = 'Sin pendientes';
-                        html = `<p>No hay casos NUEVOS para asignar en este momento.</p>`;
-                        break;
-
-                    case 'NO_AGENTS':
-                        icon = 'warning';
-                        title = 'Sin agentes disponibles';
-                        html = `
-                            <div class="alert alert-warning">
-                                <i class="bi bi-exclamation-triangle me-1"></i>
-                                No hay agentes elegibles para asignación.
-                                <div class="mt-2 small">
-                                    Verifica que existan usuarios con rol <strong>AGENTE</strong> y estén habilitados.
-                                </div>
-                            </div>
-                        `;
-                        break;
-
-                    default:
-                        html = `<p>${data.message || 'Operación completada'}</p>`;
-                }
-
-                await Swal.fire({
-                    title: title,
-                    html: html,
-                    icon: icon,
-                    confirmButtonText: 'Aceptar'
-                });
-
-            } else {
-                await Swal.fire({
-                    title: 'Error',
-                    text: data.message || 'No se pudo completar la operación',
-                    icon: 'error',
-                    confirmButtonText: 'Aceptar'
-                });
-            }
-
-            btnAutoAssign.disabled = false;
-        });
-    }
-
     const refreshBtn = document.getElementById('refreshBtn');
     if (refreshBtn) {
         refreshBtn.addEventListener('click', function() {

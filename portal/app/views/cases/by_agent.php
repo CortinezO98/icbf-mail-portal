@@ -9,6 +9,7 @@ $title = 'Casos asignados por agente';
 $roleIsSupervisor = Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN');
 
 $agents = $agents ?? [];
+$targetAgents = $targetAgents ?? [];
 $cases = $cases ?? [];
 $selectedAgentId = (int)($selectedAgentId ?? 0);
 $q = trim((string)($q ?? ''));
@@ -375,7 +376,7 @@ $casesCount = count($cases ?? []);
                                 <label class="form-label fw-semibold">Reasignar casos seleccionados a</label>
                                 <select name="target_agent_id" class="form-select">
                                     <option value="">Selecciona agente destino</option>
-                                    <?php foreach ($agents as $agent): ?>
+                                    <?php foreach ($targetAgents as $agent): ?>
                                         <?php if ((int)$agent['id'] === $selectedAgentId) continue; ?>
                                         <option value="<?= (int)$agent['id'] ?>">
                                             <?= esc((string)($agent['full_name'] ?? $agent['username'] ?? 'Agente')) ?>
