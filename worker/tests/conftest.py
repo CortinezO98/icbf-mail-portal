@@ -55,7 +55,7 @@ def fake_db_session():
 def make_queue_item():
     """Fabrica de items con la forma que devuelve
     inbound_queue_repo.claim_pending_events() (dict con id, source,
-    provider_message_id, attempts, mailbox_email).
+    provider_message_id, attempts, mailbox_email, created_at).
     """
 
     def _make(
@@ -65,6 +65,7 @@ def make_queue_item():
         provider_message_id: str = "AAMkAG-test-message-id",
         mailbox_email: str = "buzon@icbf.gov.co",
         attempts: int = 0,
+        created_at=None,
     ) -> dict[str, Any]:
         return {
             "id": event_id,
@@ -72,6 +73,7 @@ def make_queue_item():
             "provider_message_id": provider_message_id,
             "mailbox_email": mailbox_email,
             "attempts": attempts,
+            "created_at": created_at,
         }
 
     return _make

@@ -123,7 +123,9 @@ def env(monkeypatch):
     )
 
 
-async def _run(env, *, msg=None, attempts=0, max_attempts=8):
+async def _run(
+    env, *, msg=None, attempts=0, max_attempts=8, attachments_stability_snapshot=None
+):
     if msg is not None:
         env.get_message_mock.return_value = msg
     return await sync_service._process_single_message(
@@ -131,6 +133,7 @@ async def _run(env, *, msg=None, attempts=0, max_attempts=8):
         message_id="graph-msg-1",
         attempts=attempts,
         max_attempts=max_attempts,
+        attachments_stability_snapshot=attachments_stability_snapshot,
     )
 
 
@@ -182,30 +185,41 @@ class TestMissingReceivedDateTime:
 
         result = await _run(env, msg=msg, attempts=0, max_attempts=8)
 
-        assert result["status"] == "incomplete:MISSING_RECEIVED_DATETIME"
+        assert result["status"] == sync_service.STATUS_MISSING_RECEIVED_DATETIME
         assert result["materialized"] is False
         env.get_existing_mock.assert_not_called()
         env.create_case_mock.assert_not_called()
         env.list_attachments_mock.assert_not_called()
 
-    async def test_budget_exhausted_degrades_with_now_as_received_at(self, env):
+    @pytest.mark.parametrize("attempts,max_attempts", [(0, 8), (7, 8), (49, 50), (999, 1000)])
+    async def test_never_degrades_regardless_of_attempts(self, env, attempts, max_attempts):
+        """MISSING_RECEIVED_DATETIME es distinto en naturaleza a
+        BODY_NOT_READY/ATTACHMENT_MANIFEST_NOT_READY: nunca debe
+        materializar ni inventar un received_at, sin importar cuántos
+        intentos lleve (el límite de reintentos para este motivo lo
+        maneja inbound_queue_worker/mark_retry_unbounded, no
+        sync_service). No se verifica datetime.now() con un spy global
+        (no hace falta): la prueba concluyente es que nada se persiste."""
         msg = _base_msg()
         del msg["receivedDateTime"]
         msg.pop("createdDateTime", None)
 
-        result = await _run(env, msg=msg, attempts=7, max_attempts=8)
+        result = await _run(env, msg=msg, attempts=attempts, max_attempts=max_attempts)
 
-        assert result["status"] == "created_degraded"
-        assert result["materialized"] is True
-        details = _degraded_event_details(env)
-        assert details is not None
-        assert "MISSING_RECEIVED_DATETIME" in details["reasons"]
+        assert result["status"] == sync_service.STATUS_MISSING_RECEIVED_DATETIME
+        assert result["materialized"] is False
+        assert result["case_id"] is None
+        assert result["message_pk"] is None
+        env.create_case_mock.assert_not_called()
+        env.insert_message_mock.assert_not_called()
+        # Ningún evento CASE_CREATED_DEGRADED - no hubo degradación.
+        assert _degraded_event_details(env) is None
 
     async def test_date_filters_are_not_applied_when_date_missing(self, env, monkeypatch):
         """El orden importa: si falta receivedDateTime, los filtros
         GO_LIVE_AT/STOP_NEW_INBOUND_AT (que necesitan esa fecha) no deben
-        ni evaluarse - el mensaje se resuelve como incomplete/degradado
-        antes de llegar a esa comparación."""
+        ni evaluarse - el mensaje se resuelve como incomplete antes de
+        llegar a esa comparación."""
         far_future = Mock(return_value=__import__("datetime").datetime(2099, 1, 1))
         monkeypatch.setattr(type(sync_service.settings), "go_live_dt", lambda self: far_future.return_value)
 
@@ -352,3 +366,210 @@ class TestExistingDateFiltersUnaffected:
         assert result["status"] == "after_operational_cutoff"
         assert result["materialized"] is False
         env.get_existing_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Fase C: hasAttachments=false transitorio - flujo end-to-end
+# ---------------------------------------------------------------------------
+
+class TestAttachmentsFlagStabilization:
+    # receivedDateTime va en UTC (como lo entrega Graph); _iso_to_dt lo
+    # convierte a hora de Bogotá naive (UTC-5) antes de compararlo con
+    # "ahora" - por eso 16:50Z equivale a 11:50 Bogotá, y el "ahora"
+    # congelado (NOW_FOR_TEST) se define directamente en esa misma
+    # familia naive para que la resta de 10 minutos sea consistente con
+    # _evaluate_attachments_flag_stability (que también compara en hora
+    # de Bogotá naive - ver sync_service.py).
+    RECENT_RECEIVED_AT_ISO = "2026-08-19T16:50:00Z"  # = 11:50 Bogotá
+    RECENT_LAST_MODIFIED = "2026-08-19T16:50:00Z"
+    # Instante ABSOLUTO real (no un naive "pegado" a cualquier tz que se
+    # pida): 17:00 UTC == 12:00 Bogotá (UTC-5). Esto es necesario para
+    # que el mock detecte de verdad un bug de zona horaria - un mock que
+    # ignora el argumento `tz` y devuelve el mismo naive sin importar
+    # qué zona se pidió no puede distinguir "código usa UTC" de "código
+    # usa Bogotá" (confirmado con una prueba de mutación real: la
+    # primera versión de este mock no detectaba el bug).
+    _ABSOLUTE_INSTANT = __import__("datetime").datetime(
+        2026, 8, 19, 17, 0, tzinfo=__import__("datetime").timezone.utc
+    )
+
+    def _freeze_now(self, monkeypatch):
+        import datetime as dt_module
+
+        absolute_instant = self._ABSOLUTE_INSTANT
+
+        class _FrozenDatetime(dt_module.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return absolute_instant.replace(tzinfo=None)
+                return absolute_instant.astimezone(tz)
+
+        monkeypatch.setattr(sync_service, "datetime", _FrozenDatetime)
+        monkeypatch.setattr(
+            sync_service.settings, "ATTACHMENTS_STABILIZATION_WINDOW_MINUTES", 15
+        )
+
+    def _recent_msg(self, **overrides):
+        overrides.setdefault("lastModifiedDateTime", self.RECENT_LAST_MODIFIED)
+        return _base_msg(
+            receivedDateTime=self.RECENT_RECEIVED_AT_ISO,
+            hasAttachments=False,
+            **overrides,
+        )
+
+    async def test_recent_first_read_returns_incomplete_with_snapshot(
+        self, env, monkeypatch
+    ):
+        self._freeze_now(monkeypatch)
+
+        result = await _run(env, msg=self._recent_msg(), attempts=0, max_attempts=8)
+
+        assert (
+            result["status"]
+            == f"incomplete:{sync_service.REASON_ATTACHMENTS_FLAG_UNSTABLE}"
+        )
+        assert result["materialized"] is False
+        assert result["attachments_stability_snapshot"] == {
+            "last_modified": self.RECENT_LAST_MODIFIED,
+            "has_attachments": False,
+        }
+        env.create_case_mock.assert_not_called()
+        env.list_attachments_mock.assert_not_called()
+
+    async def test_recent_second_read_lmd_changed_returns_incomplete_again(
+        self, env, monkeypatch
+    ):
+        self._freeze_now(monkeypatch)
+        previous = {"last_modified": "2026-08-19T11:40:00Z", "has_attachments": False}
+
+        result = await _run(
+            env,
+            msg=self._recent_msg(),  # lastModifiedDateTime distinto al previo
+            attempts=1,
+            max_attempts=8,
+            attachments_stability_snapshot=previous,
+        )
+
+        assert (
+            result["status"]
+            == f"incomplete:{sync_service.REASON_ATTACHMENTS_FLAG_UNSTABLE}"
+        )
+        assert result["attachments_stability_snapshot"]["last_modified"] == (
+            self.RECENT_LAST_MODIFIED
+        )
+        env.create_case_mock.assert_not_called()
+
+    async def test_recent_lmd_stable_empty_manifest_creates_case_without_attachments(
+        self, env, monkeypatch
+    ):
+        self._freeze_now(monkeypatch)
+        previous = {
+            "last_modified": self.RECENT_LAST_MODIFIED,
+            "has_attachments": False,
+        }
+        env.list_attachments_mock.return_value = []
+
+        result = await _run(
+            env,
+            msg=self._recent_msg(),
+            attempts=2,
+            max_attempts=8,
+            attachments_stability_snapshot=previous,
+        )
+
+        assert result["status"] == "created"
+        assert result["materialized"] is True
+        env.process_attachments_mock.assert_not_called()
+        kwargs = env.insert_message_mock.call_args.kwargs
+        assert kwargs["has_attachments"] == 0
+
+    async def test_recent_lmd_stable_manifest_has_attachment_uses_real_manifest(
+        self, env, monkeypatch
+    ):
+        self._freeze_now(monkeypatch)
+        previous = {
+            "last_modified": self.RECENT_LAST_MODIFIED,
+            "has_attachments": False,
+        }
+        manifest = [{"id": "att-1", "@odata.type": "#microsoft.graph.fileAttachment"}]
+        env.list_attachments_mock.return_value = manifest
+
+        result = await _run(
+            env,
+            msg=self._recent_msg(),
+            attempts=2,
+            max_attempts=8,
+            attachments_stability_snapshot=previous,
+        )
+
+        assert result["status"] == "created"
+        env.process_attachments_mock.assert_called_once()
+        assert (
+            env.process_attachments_mock.call_args.kwargs["attachments_manifest"]
+            is manifest
+        )
+        # has_attachments persistido refleja la realidad (manifest real),
+        # no el flag potencialmente desactualizado de Graph.
+        kwargs = env.insert_message_mock.call_args.kwargs
+        assert kwargs["has_attachments"] == 1
+
+    async def test_budget_exhausted_empty_final_check_degrades_without_attachments(
+        self, env, monkeypatch
+    ):
+        self._freeze_now(monkeypatch)
+        env.list_attachments_mock.return_value = []  # última verificación: vacío
+
+        result = await _run(
+            env,
+            msg=self._recent_msg(),
+            attempts=7,
+            max_attempts=8,
+            attachments_stability_snapshot=None,  # sigue siendo la 1ra lectura util
+        )
+
+        assert result["status"] == "created_degraded"
+        assert result["materialized"] is True
+        env.process_attachments_mock.assert_not_called()
+        env.list_attachments_mock.assert_called_once()  # la verificación final sí ocurrió
+
+    async def test_budget_exhausted_manifest_found_does_not_degrade_as_empty(
+        self, env, monkeypatch
+    ):
+        """El ajuste central pedido: al agotar presupuesto, NO se degrada
+        confiando ciegamente en hasAttachments=false - se verifica una
+        última vez, y si hay adjuntos reales, se usan."""
+        self._freeze_now(monkeypatch)
+        manifest = [{"id": "att-1", "@odata.type": "#microsoft.graph.fileAttachment"}]
+        env.list_attachments_mock.return_value = manifest
+
+        result = await _run(
+            env,
+            msg=self._recent_msg(),
+            attempts=7,
+            max_attempts=8,
+            attachments_stability_snapshot=None,
+        )
+
+        assert result["status"] == "created_degraded"
+        assert result["materialized"] is True
+        env.process_attachments_mock.assert_called_once()
+        assert (
+            env.process_attachments_mock.call_args.kwargs["attachments_manifest"]
+            is manifest
+        )
+
+    async def test_outside_stabilization_window_trusts_false_immediately(
+        self, env, monkeypatch
+    ):
+        self._freeze_now(monkeypatch)
+        old_msg = _base_msg(
+            receivedDateTime="2026-08-19T10:00:00Z",  # 2h atrás, fuera de ventana
+            hasAttachments=False,
+        )
+
+        result = await _run(env, msg=old_msg, attempts=0, max_attempts=8)
+
+        assert result["status"] == "created"
+        assert result["materialized"] is True
+        env.list_attachments_mock.assert_not_called()

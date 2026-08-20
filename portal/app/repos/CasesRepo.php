@@ -81,13 +81,16 @@ final class CasesRepo
                     c.id, c.case_number, c.subject,
                     c.requester_email, c.requester_name,
 
-                    -- UTC (tal como está en BD)
+                    -- Bogota (asi se guarda en BD - alias '_utc' es
+                    -- historicamente inexacto, se conserva por
+                    -- compatibilidad; ver auditoria timezone pre-Fase D)
                     c.received_at       AS received_at_utc,
                     c.last_activity_at  AS last_activity_at_utc,
 
-                    -- Hora Bogotá para UI
-                    DATE_SUB(c.received_at, INTERVAL 5 HOUR)      AS received_at_bogota,
-                    DATE_SUB(c.last_activity_at, INTERVAL 5 HOUR) AS last_activity_at_bogota,
+                    -- Ya esta en Bogota, no se resta nada (antes restaba
+                    -- 5h de mas por error - doble conversion corregida)
+                    c.received_at       AS received_at_bogota,
+                    c.last_activity_at  AS last_activity_at_bogota,
 
                     c.due_at, c.sla_state,
                     c.assigned_user_id,
@@ -134,13 +137,16 @@ final class CasesRepo
                     c.id, c.case_number, c.subject,
                     c.requester_email, c.requester_name,
 
-                    -- UTC (tal como está en BD)
+                    -- Bogota (asi se guarda en BD - alias '_utc' es
+                    -- historicamente inexacto, se conserva por
+                    -- compatibilidad; ver auditoria timezone pre-Fase D)
                     c.received_at       AS received_at_utc,
                     c.last_activity_at  AS last_activity_at_utc,
 
-                    -- Hora Bogotá para UI
-                    DATE_SUB(c.received_at, INTERVAL 5 HOUR)      AS received_at_bogota,
-                    DATE_SUB(c.last_activity_at, INTERVAL 5 HOUR) AS last_activity_at_bogota,
+                    -- Ya esta en Bogota, no se resta nada (antes restaba
+                    -- 5h de mas por error - doble conversion corregida)
+                    c.received_at       AS received_at_bogota,
+                    c.last_activity_at  AS last_activity_at_bogota,
 
                     c.due_at, c.sla_state,
                     c.assigned_user_id,

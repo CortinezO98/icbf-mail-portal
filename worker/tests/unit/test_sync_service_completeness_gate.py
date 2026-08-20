@@ -19,6 +19,14 @@ import app.sync_service as sync_service
 
 pytestmark = pytest.mark.unit
 
+# Fecha de referencia "vieja" (fuera de cualquier ventana de
+# estabilizacion razonable) para los tests de body/adjuntos que no
+# ejercitan especificamente la logica de estabilizacion de
+# hasAttachments=false - asi el comportamiento de esos tests no depende
+# de que tan rapido corra la suite.
+from datetime import datetime as _datetime
+_OLD_RECEIVED_AT = _datetime(2020, 1, 1)
+
 
 # ---------------------------------------------------------------------------
 # _evaluate_completeness — tabla de decisión sobre body
@@ -28,7 +36,10 @@ class TestEvaluateCompletenessBody:
     async def test_body_key_absent_is_not_ready(self, monkeypatch):
         msg = {"hasAttachments": False}
         result = await sync_service._evaluate_completeness(
-            msg, mailbox_email="buzon@icbf.gov.co", graph_message_id="m1"
+            msg,
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=_OLD_RECEIVED_AT,
         )
         assert result.complete is False
         assert "BODY_NOT_READY" in result.reasons
@@ -36,7 +47,10 @@ class TestEvaluateCompletenessBody:
     async def test_body_not_a_dict_is_not_ready(self, monkeypatch):
         msg = {"body": "esto no debería ser un string", "hasAttachments": False}
         result = await sync_service._evaluate_completeness(
-            msg, mailbox_email="buzon@icbf.gov.co", graph_message_id="m1"
+            msg,
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=_OLD_RECEIVED_AT,
         )
         assert result.complete is False
         assert "BODY_NOT_READY" in result.reasons
@@ -44,7 +58,10 @@ class TestEvaluateCompletenessBody:
     async def test_body_present_without_content_key_is_not_ready(self, monkeypatch):
         msg = {"body": {"contentType": "html"}, "hasAttachments": False}
         result = await sync_service._evaluate_completeness(
-            msg, mailbox_email="buzon@icbf.gov.co", graph_message_id="m1"
+            msg,
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=_OLD_RECEIVED_AT,
         )
         assert result.complete is False
         assert "BODY_NOT_READY" in result.reasons
@@ -55,7 +72,10 @@ class TestEvaluateCompletenessBody:
             "hasAttachments": False,
         }
         result = await sync_service._evaluate_completeness(
-            msg, mailbox_email="buzon@icbf.gov.co", graph_message_id="m1"
+            msg,
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=_OLD_RECEIVED_AT,
         )
         assert result.complete is False
         assert "BODY_NOT_READY" in result.reasons
@@ -69,7 +89,10 @@ class TestEvaluateCompletenessBody:
             "hasAttachments": False,
         }
         result = await sync_service._evaluate_completeness(
-            msg, mailbox_email="buzon@icbf.gov.co", graph_message_id="m1"
+            msg,
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=_OLD_RECEIVED_AT,
         )
         assert result.complete is True
         assert result.reasons == []
@@ -80,7 +103,10 @@ class TestEvaluateCompletenessBody:
             "hasAttachments": False,
         }
         result = await sync_service._evaluate_completeness(
-            msg, mailbox_email="buzon@icbf.gov.co", graph_message_id="m1"
+            msg,
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=_OLD_RECEIVED_AT,
         )
         assert result.complete is True
 
@@ -95,7 +121,14 @@ class TestEvaluateCompletenessAttachments:
         msg.update(extra)
         return msg
 
-    async def test_has_attachments_false_skips_manifest_lookup(self, monkeypatch):
+    async def test_has_attachments_false_outside_stabilization_window_skips_manifest_lookup(
+        self, monkeypatch
+    ):
+        """Fase C: hasAttachments=false para un mensaje FUERA de la
+        ventana de estabilización (received_at viejo) se acepta directo,
+        sin ninguna llamada a Graph adicional - ver
+        TestAttachmentsFlagStability para el comportamiento dentro de la
+        ventana."""
         list_attachments_mock = AsyncMock()
         monkeypatch.setattr(
             sync_service.graph_client, "list_attachments", list_attachments_mock
@@ -103,7 +136,10 @@ class TestEvaluateCompletenessAttachments:
         msg = self._valid_body_msg(hasAttachments=False)
 
         result = await sync_service._evaluate_completeness(
-            msg, mailbox_email="buzon@icbf.gov.co", graph_message_id="m1"
+            msg,
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=_OLD_RECEIVED_AT,
         )
 
         assert result.complete is True
@@ -118,7 +154,10 @@ class TestEvaluateCompletenessAttachments:
         msg = self._valid_body_msg(hasAttachments=True)
 
         result = await sync_service._evaluate_completeness(
-            msg, mailbox_email="buzon@icbf.gov.co", graph_message_id="m1"
+            msg,
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=_OLD_RECEIVED_AT,
         )
 
         assert result.complete is False
@@ -138,7 +177,10 @@ class TestEvaluateCompletenessAttachments:
         msg = self._valid_body_msg(hasAttachments=True)
 
         result = await sync_service._evaluate_completeness(
-            msg, mailbox_email="buzon@icbf.gov.co", graph_message_id="m1"
+            msg,
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=_OLD_RECEIVED_AT,
         )
 
         assert result.complete is True
@@ -154,7 +196,10 @@ class TestEvaluateCompletenessAttachments:
         msg = {"hasAttachments": True}  # sin body en absoluto
 
         result = await sync_service._evaluate_completeness(
-            msg, mailbox_email="buzon@icbf.gov.co", graph_message_id="m1"
+            msg,
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=_OLD_RECEIVED_AT,
         )
 
         assert result.complete is False
@@ -230,3 +275,166 @@ class TestIncompleteOrDegrade:
         )
         assert should_degrade is True
         assert payload is None
+
+
+# ---------------------------------------------------------------------------
+# _evaluate_attachments_flag_stability (Fase C)
+#
+# lastModifiedDateTime es solo una SEÑAL de estabilización, no una prueba
+# de completitud - por eso incluso con dos lecturas estables, la función
+# hace una verificación real con list_attachments() antes de aceptar
+# "sin adjuntos".
+# ---------------------------------------------------------------------------
+
+class TestAttachmentsFlagStability:
+    RECENT = _datetime(2026, 8, 19, 11, 50)  # "ahora" simulado: 10 min atrás
+    NOW_FOR_TEST = _datetime(2026, 8, 19, 12, 0)
+
+    def _freeze_now(self, monkeypatch):
+        class _FrozenDatetime(_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return self.NOW_FOR_TEST.replace(tzinfo=tz)
+
+        monkeypatch.setattr(sync_service, "datetime", _FrozenDatetime)
+
+    async def test_recent_first_read_returns_unstable_and_saves_snapshot(
+        self, monkeypatch
+    ):
+        self._freeze_now(monkeypatch)
+        list_attachments_mock = AsyncMock()
+        monkeypatch.setattr(
+            sync_service.graph_client, "list_attachments", list_attachments_mock
+        )
+
+        result = await sync_service._evaluate_attachments_flag_stability(
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=self.RECENT,
+            current_last_modified="2026-08-19T11:50:00Z",
+            attachments_stability_snapshot=None,
+            stabilization_window_minutes=15,
+        )
+
+        assert result.reasons == [sync_service.REASON_ATTACHMENTS_FLAG_UNSTABLE]
+        assert result.new_snapshot == {
+            "last_modified": "2026-08-19T11:50:00Z",
+            "has_attachments": False,
+        }
+        assert result.attachments_manifest is None
+        list_attachments_mock.assert_not_called()
+
+    async def test_recent_second_read_lmd_changed_still_unstable(self, monkeypatch):
+        self._freeze_now(monkeypatch)
+        list_attachments_mock = AsyncMock()
+        monkeypatch.setattr(
+            sync_service.graph_client, "list_attachments", list_attachments_mock
+        )
+        previous = {"last_modified": "2026-08-19T11:50:00Z", "has_attachments": False}
+
+        result = await sync_service._evaluate_attachments_flag_stability(
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=self.RECENT,
+            current_last_modified="2026-08-19T11:55:00Z",  # cambió
+            attachments_stability_snapshot=previous,
+            stabilization_window_minutes=15,
+        )
+
+        assert result.reasons == [sync_service.REASON_ATTACHMENTS_FLAG_UNSTABLE]
+        assert result.new_snapshot["last_modified"] == "2026-08-19T11:55:00Z"
+        list_attachments_mock.assert_not_called()
+
+    async def test_recent_second_read_lmd_stable_empty_manifest_is_complete(
+        self, monkeypatch
+    ):
+        self._freeze_now(monkeypatch)
+        monkeypatch.setattr(
+            sync_service.graph_client, "list_attachments", AsyncMock(return_value=[])
+        )
+        previous = {"last_modified": "2026-08-19T11:50:00Z", "has_attachments": False}
+
+        result = await sync_service._evaluate_attachments_flag_stability(
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=self.RECENT,
+            current_last_modified="2026-08-19T11:50:00Z",  # igual
+            attachments_stability_snapshot=previous,
+            stabilization_window_minutes=15,
+        )
+
+        assert result.reasons == []
+        assert result.new_snapshot is None
+        assert result.attachments_manifest is None
+
+    async def test_recent_second_read_lmd_stable_but_manifest_has_attachment(
+        self, monkeypatch
+    ):
+        """El punto central de la política ajustada: lastModifiedDateTime
+        estable NO es prueba suficiente - si list_attachments() SÍ trae
+        algo, no se confía en hasAttachments=false."""
+        self._freeze_now(monkeypatch)
+        manifest = [{"id": "att-1", "@odata.type": "#microsoft.graph.fileAttachment"}]
+        monkeypatch.setattr(
+            sync_service.graph_client,
+            "list_attachments",
+            AsyncMock(return_value=manifest),
+        )
+        previous = {"last_modified": "2026-08-19T11:50:00Z", "has_attachments": False}
+
+        result = await sync_service._evaluate_attachments_flag_stability(
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=self.RECENT,
+            current_last_modified="2026-08-19T11:50:00Z",
+            attachments_stability_snapshot=previous,
+            stabilization_window_minutes=15,
+        )
+
+        assert result.reasons == []
+        assert result.new_snapshot is None
+        assert result.attachments_manifest == manifest
+
+    async def test_outside_window_trusts_false_without_extra_reads(self, monkeypatch):
+        self._freeze_now(monkeypatch)
+        list_attachments_mock = AsyncMock()
+        monkeypatch.setattr(
+            sync_service.graph_client, "list_attachments", list_attachments_mock
+        )
+        old_received_at = _datetime(2026, 8, 19, 11, 0)  # 60 min atrás
+
+        result = await sync_service._evaluate_attachments_flag_stability(
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=old_received_at,
+            current_last_modified="2026-08-19T11:00:00Z",
+            attachments_stability_snapshot=None,
+            stabilization_window_minutes=15,
+        )
+
+        assert result.reasons == []
+        assert result.new_snapshot is None
+        list_attachments_mock.assert_not_called()
+
+    async def test_age_exactly_at_window_boundary_still_treated_as_recent(
+        self, monkeypatch
+    ):
+        """Límite: edad == ventana (no mayor) todavía se trata como
+        'dentro de la ventana' - la condición es estrictamente '>'."""
+        self._freeze_now(monkeypatch)
+        list_attachments_mock = AsyncMock()
+        monkeypatch.setattr(
+            sync_service.graph_client, "list_attachments", list_attachments_mock
+        )
+        boundary_received_at = _datetime(2026, 8, 19, 11, 45)  # exactamente 15 min
+
+        result = await sync_service._evaluate_attachments_flag_stability(
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            received_at=boundary_received_at,
+            current_last_modified="lmd",
+            attachments_stability_snapshot=None,
+            stabilization_window_minutes=15,
+        )
+
+        assert result.reasons == [sync_service.REASON_ATTACHMENTS_FLAG_UNSTABLE]

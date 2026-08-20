@@ -104,6 +104,7 @@ class GraphClient:
                     "subject",
                     "receivedDateTime",
                     "sentDateTime",
+                    "lastModifiedDateTime",
                     "from",
                     "toRecipients",
                     "ccRecipients",

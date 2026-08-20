@@ -26,11 +26,14 @@ _run_loop no tiene manejo de excepcion por tarea).
 """
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 import app.inbound_queue_worker as worker
+import app.sync_service as sync_service
 
 
 pytestmark = pytest.mark.unit
@@ -215,9 +218,147 @@ class TestNormalRetry:
 
 
 # ---------------------------------------------------------------------------
-# Excepcion no controlada en sync_service -> capturada, mark_retry,
-# NUNCA se propaga (asyncio.gather en _run_loop no aisla fallos por tarea)
+# MISSING_RECEIVED_DATETIME: SIEMPRE usa mark_retry_unbounded, nunca
+# mark_retry - la fila no debe poder marcarse 'failed' por este motivo,
+# sin importar cuántos intentos lleve (Fase B).
 # ---------------------------------------------------------------------------
+
+class TestMissingReceivedDateTimeUnboundedRetry:
+    def _patch(self, monkeypatch, fake_db_session, *, result):
+        _, get_db_session_cm = fake_db_session
+        process_mock = AsyncMock(return_value=result)
+        mark_done_mock = Mock()
+        mark_retry_mock = Mock()
+        mark_retry_unbounded_mock = Mock()
+
+        monkeypatch.setattr(worker.sync_service, "process_message_id_async", process_mock)
+        monkeypatch.setattr(worker.inbound_queue_repo, "mark_done", mark_done_mock)
+        monkeypatch.setattr(worker.inbound_queue_repo, "mark_retry", mark_retry_mock)
+        monkeypatch.setattr(
+            worker.inbound_queue_repo, "mark_retry_unbounded", mark_retry_unbounded_mock
+        )
+        monkeypatch.setattr(worker, "get_db_session", get_db_session_cm)
+
+        return mark_done_mock, mark_retry_mock, mark_retry_unbounded_mock
+
+    def _missing_received_datetime_result(self):
+        return {
+            "ok": True,
+            "materialized": False,
+            "status": sync_service.STATUS_MISSING_RECEIVED_DATETIME,
+        }
+
+    async def test_uses_mark_retry_unbounded_not_mark_retry(
+        self, monkeypatch, fake_db_session, make_queue_item
+    ):
+        mark_done_mock, mark_retry_mock, mark_retry_unbounded_mock = self._patch(
+            monkeypatch, fake_db_session, result=self._missing_received_datetime_result()
+        )
+        item = make_queue_item(event_id=1, attempts=0)
+
+        await _run(item, max_attempts=8)
+
+        mark_retry_unbounded_mock.assert_called_once()
+        mark_retry_mock.assert_not_called()
+        mark_done_mock.assert_not_called()
+
+    @pytest.mark.parametrize("attempts", [7, 50, 1000])
+    async def test_never_uses_bounded_retry_even_past_max_attempts(
+        self, monkeypatch, fake_db_session, make_queue_item, attempts
+    ):
+        """Con mark_retry normal, attempts=7 y max_attempts=8 marcaría la
+        fila 'failed'. Para este motivo NUNCA debe llamarse mark_retry en
+        absoluto, sin importar que attempts supere max_attempts - la fila
+        siempre permanece recuperable."""
+        _, mark_retry_mock, mark_retry_unbounded_mock = self._patch(
+            monkeypatch, fake_db_session, result=self._missing_received_datetime_result()
+        )
+        item = make_queue_item(attempts=attempts)
+
+        await _run(item, max_attempts=8)
+
+        mark_retry_mock.assert_not_called()
+        mark_retry_unbounded_mock.assert_called_once()
+        assert mark_retry_unbounded_mock.call_args.kwargs["attempts"] == attempts
+
+    async def test_recent_event_does_not_log_alert(
+        self, monkeypatch, fake_db_session, make_queue_item, caplog
+    ):
+        monkeypatch.setattr(worker.settings, "MISSING_RECEIVED_DATETIME_ALERT_AGE_MINUTES", 60)
+        self._patch(
+            monkeypatch, fake_db_session, result=self._missing_received_datetime_result()
+        )
+        recent = datetime.now(ZoneInfo("America/Bogota")).replace(tzinfo=None) - timedelta(minutes=5)
+        item = make_queue_item(created_at=recent)
+
+        with caplog.at_level("ERROR"):
+            await _run(item, max_attempts=8)
+
+        assert "ALERT_STALLED_MISSING_RECEIVED_DATETIME" not in caplog.text
+
+    async def test_old_event_logs_alert(
+        self, monkeypatch, fake_db_session, make_queue_item, caplog
+    ):
+        monkeypatch.setattr(worker.settings, "MISSING_RECEIVED_DATETIME_ALERT_AGE_MINUTES", 60)
+        self._patch(
+            monkeypatch, fake_db_session, result=self._missing_received_datetime_result()
+        )
+        old = datetime.now(ZoneInfo("America/Bogota")).replace(tzinfo=None) - timedelta(minutes=120)
+        item = make_queue_item(created_at=old)
+
+        with caplog.at_level("ERROR"):
+            await _run(item, max_attempts=8)
+
+        assert "ALERT_STALLED_MISSING_RECEIVED_DATETIME" in caplog.text
+
+    async def test_long_tail_delay_used_once_age_exceeds_threshold(
+        self, monkeypatch, fake_db_session, make_queue_item
+    ):
+        monkeypatch.setattr(worker.settings, "MISSING_RECEIVED_DATETIME_ALERT_AGE_MINUTES", 60)
+        monkeypatch.setattr(worker.settings, "MISSING_RECEIVED_DATETIME_LONG_RETRY_SECONDS", 21600)
+        _, _, mark_retry_unbounded_mock = self._patch(
+            monkeypatch, fake_db_session, result=self._missing_received_datetime_result()
+        )
+        old = datetime.now(ZoneInfo("America/Bogota")).replace(tzinfo=None) - timedelta(minutes=120)
+        item = make_queue_item(created_at=old)
+
+        await _run(item, max_attempts=8)
+
+        kwargs = mark_retry_unbounded_mock.call_args.kwargs
+        assert kwargs["queue_event_age_seconds"] > kwargs["alert_age_seconds"]
+        assert kwargs["long_retry_seconds"] == 21600
+
+    async def test_normal_ladder_used_before_threshold(
+        self, monkeypatch, fake_db_session, make_queue_item
+    ):
+        monkeypatch.setattr(worker.settings, "MISSING_RECEIVED_DATETIME_ALERT_AGE_MINUTES", 60)
+        _, _, mark_retry_unbounded_mock = self._patch(
+            monkeypatch, fake_db_session, result=self._missing_received_datetime_result()
+        )
+        recent = datetime.now(ZoneInfo("America/Bogota")).replace(tzinfo=None) - timedelta(minutes=5)
+        item = make_queue_item(created_at=recent)
+
+        await _run(item, max_attempts=8)
+
+        kwargs = mark_retry_unbounded_mock.call_args.kwargs
+        assert kwargs["queue_event_age_seconds"] <= kwargs["alert_age_seconds"]
+
+    async def test_missing_created_at_treated_as_age_zero(
+        self, monkeypatch, fake_db_session, make_queue_item
+    ):
+        """Robustez: si por algún motivo la fila no trae created_at (no
+        debería pasar, la columna es NOT NULL), no debe reventar - se
+        trata como edad 0 (sin alerta, ladder normal)."""
+        _, _, mark_retry_unbounded_mock = self._patch(
+            monkeypatch, fake_db_session, result=self._missing_received_datetime_result()
+        )
+        item = make_queue_item(created_at=None)
+
+        await _run(item, max_attempts=8)
+
+        kwargs = mark_retry_unbounded_mock.call_args.kwargs
+        assert kwargs["queue_event_age_seconds"] == 0
+
 
 class TestExceptionHandling:
     async def test_exception_is_caught_and_marks_retry(

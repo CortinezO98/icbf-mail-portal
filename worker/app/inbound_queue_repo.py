@@ -275,7 +275,8 @@ def claim_pending_events(db, *, batch_size: int) -> list[dict[str, Any]]:
 
     rows = db.execute(
         text("""
-            SELECT id, source, provider_message_id, mailbox_email, attempts
+            SELECT id, source, provider_message_id, mailbox_email, attempts,
+                   created_at, payload_json
             FROM inbound_event_queue
             WHERE status       = 'pending'
               AND available_at <= NOW(6)
@@ -329,7 +330,15 @@ def mark_retry(
     attempts: int,
     error: str,
     max_attempts: int,
+    payload_json: str | None = None,
 ) -> None:
+    """
+    payload_json (opcional, Fase C): si viene, actualiza la columna con
+    el string ya combinado (ver merge_stability_snapshot) - se aplica
+    solo en la rama 'pending' vía COALESCE, para no pisar nada cuando no
+    se pasa, y para no tener sentido escribirlo si la fila pasa a
+    'failed' (ese intento ya terminó).
+    """
     next_attempt = attempts + 1
 
     if next_attempt >= max_attempts:
@@ -352,6 +361,143 @@ def mark_retry(
         return
 
     delay_seconds = _retry_delay_seconds(next_attempt)
+
+    db.execute(
+        text("""
+            UPDATE inbound_event_queue
+            SET status       = 'pending',
+                attempts     = :attempts,
+                last_error   = :err,
+                available_at = DATE_ADD(NOW(6), INTERVAL :delay SECOND),
+                locked_at    = NULL,
+                updated_at   = NOW(6),
+                payload_json = COALESCE(:payload_json, payload_json)
+            WHERE id = :id
+        """),
+        {
+            "id": event_id,
+            "attempts": next_attempt,
+            "err": error[:1000],
+            "delay": delay_seconds,
+            "payload_json": payload_json,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Namespace reservado dentro de payload_json para el snapshot de
+# estabilización de hasAttachments=false (Fase C). payload_json se
+# escribía pero nunca se leía en el código (confirmado antes de
+# reutilizarlo) - aun así, estos helpers NUNCA descartan el contenido
+# original: lo preservan bajo la misma clave, o bajo una clave de
+# respaldo si no tiene la forma esperada.
+# ---------------------------------------------------------------------------
+
+_STABILITY_NAMESPACE_KEY = "_internal"
+_STABILITY_SNAPSHOT_KEY = "attachments_stability"
+
+
+def extract_stability_snapshot(payload_json: str | None) -> dict[str, Any] | None:
+    """
+    Lee el snapshot de estabilización de adjuntos guardado en
+    payload_json._internal.attachments_stability. Defensivo: cualquier
+    forma inesperada (JSON inválido, no es un objeto, falta la clave) se
+    trata como "sin snapshot" - nunca lanza.
+    """
+    if not payload_json:
+        return None
+    try:
+        parsed = json.loads(payload_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    internal = parsed.get(_STABILITY_NAMESPACE_KEY)
+    if not isinstance(internal, dict):
+        return None
+    snapshot = internal.get(_STABILITY_SNAPSHOT_KEY)
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def merge_stability_snapshot(payload_json: str | None, snapshot: dict[str, Any]) -> str:
+    """
+    Combina `snapshot` dentro del namespace reservado
+    _internal.attachments_stability, preservando cualquier contenido
+    previo de payload_json (ej. la notificación cruda del webhook, o
+    cualquier otra clave ya presente en _internal).
+
+    Defensivo ante payload_json existente con forma inesperada:
+      - JSON inválido -> se conserva el string original bajo
+        "_original_unparseable_payload", no se pierde.
+      - JSON válido pero no es un objeto (ej. una lista) -> se conserva
+        bajo "_original_non_object_payload".
+    """
+    parsed: dict[str, Any]
+
+    if not payload_json:
+        parsed = {}
+    else:
+        try:
+            candidate = json.loads(payload_json)
+        except (json.JSONDecodeError, TypeError):
+            parsed = {"_original_unparseable_payload": payload_json}
+        else:
+            parsed = candidate if isinstance(candidate, dict) else {
+                "_original_non_object_payload": candidate
+            }
+
+    internal = parsed.get(_STABILITY_NAMESPACE_KEY)
+    if not isinstance(internal, dict):
+        internal = {}
+    internal[_STABILITY_SNAPSHOT_KEY] = snapshot
+    parsed[_STABILITY_NAMESPACE_KEY] = internal
+
+    return json.dumps(parsed, ensure_ascii=False)
+
+
+def mark_retry_unbounded(
+    db,
+    *,
+    event_id: int,
+    attempts: int,
+    error: str,
+    queue_event_age_seconds: int,
+    alert_age_seconds: int,
+    long_retry_seconds: int,
+) -> None:
+    """
+    Variante de mark_retry() para motivos que NUNCA deben agotar el
+    presupuesto ni marcarse 'failed' (hoy: solo MISSING_RECEIVED_DATETIME
+    - ver sync_service.STATUS_MISSING_RECEIVED_DATETIME). La fila siempre
+    vuelve a 'pending', nunca a 'failed', sin importar cuántos intentos
+    lleve.
+
+    Backoff en dos tramos, para no golpear Graph cada ~30 min de forma
+    indefinida en un mensaje que quizás nunca resuelva su fecha:
+      - Mientras queue_event_age_seconds <= alert_age_seconds: mismo
+        ladder que mark_retry() (30/120/300/900/1800s vía
+        _retry_delay_seconds), sin cambios de comportamiento percibido
+        para el caso común (se resuelve en los primeros minutos).
+      - Al superar alert_age_seconds: intervalo fijo largo
+        (long_retry_seconds) - long-tail retry. La responsabilidad de
+        loguear la alerta operacional (ALERT_STALLED_MISSING_RECEIVED_
+        DATETIME) es de quien llama a esta función (inbound_queue_worker),
+        no de este módulo de acceso a datos.
+
+    queue_event_age_seconds es la edad de ESTA fila de
+    inbound_event_queue (columna created_at), no necesariamente el
+    momento en que Graph notificó el mensaje por primera vez:
+    enqueue_event(force=True) puede crear una fila nueva con
+    created_at=NOW() para un mensaje ya visto antes (ej. reprocesamiento
+    administrativo). En el reciclaje normal (force=False) sí se conserva
+    el created_at original.
+    """
+    next_attempt = attempts + 1
+
+    if queue_event_age_seconds > alert_age_seconds:
+        delay_seconds = long_retry_seconds
+    else:
+        delay_seconds = _retry_delay_seconds(next_attempt)
 
     db.execute(
         text("""

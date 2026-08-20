@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from app.settings import settings
 from app.db import get_db_session
@@ -76,7 +78,8 @@ async def _process_one(
     max_attempts: int,
 ) -> None:
     """Procesa un evento reclamado de la cola: llama a sync_service y decide
-    el siguiente estado (done / descartado por diseño / retry).
+    el siguiente estado (done / descartado por diseño / retry / retry sin
+    límite para MISSING_RECEIVED_DATETIME).
 
     Extraída a nivel de módulo (en vez de closure dentro de _run_loop) para
     ser testeable de forma aislada: todas sus dependencias externas
@@ -89,6 +92,8 @@ async def _process_one(
     source = str(item["source"])
     message_id = str(item["provider_message_id"])
     attempts = int(item["attempts"])
+    created_at = item.get("created_at")
+    payload_json_raw = item.get("payload_json")
 
     async with semaphore:
         try:
@@ -100,11 +105,16 @@ async def _process_one(
                 attempts,
             )
 
+            attachments_stability_snapshot = inbound_queue_repo.extract_stability_snapshot(
+                payload_json_raw
+            )
+
             result = await sync_service.process_message_id_async(
                 message_id,
                 source=source,
                 attempts=attempts,
                 max_attempts=max_attempts,
+                attachments_stability_snapshot=attachments_stability_snapshot,
             )
 
             ok = bool(result.get("ok"))
@@ -138,6 +148,59 @@ async def _process_one(
                 )
                 return
 
+            if status == sync_service.STATUS_MISSING_RECEIVED_DATETIME:
+                queue_event_age_seconds = _queue_event_age_seconds(created_at)
+                alert_age_seconds = (
+                    int(
+                        getattr(
+                            settings,
+                            "MISSING_RECEIVED_DATETIME_ALERT_AGE_MINUTES",
+                            60,
+                        )
+                    )
+                    * 60
+                )
+                long_retry_seconds = int(
+                    getattr(
+                        settings,
+                        "MISSING_RECEIVED_DATETIME_LONG_RETRY_SECONDS",
+                        21600,
+                    )
+                )
+
+                if queue_event_age_seconds > alert_age_seconds:
+                    logger.error(
+                        "ALERT_STALLED_MISSING_RECEIVED_DATETIME | event_id=%s"
+                        " | source=%s | message_id=%s | queue_event_age_seconds=%s"
+                        " | alert_age_seconds=%s",
+                        event_id,
+                        source,
+                        message_id,
+                        queue_event_age_seconds,
+                        alert_age_seconds,
+                    )
+                else:
+                    logger.warning(
+                        "QUEUE_EVENT_MISSING_RECEIVED_DATETIME | event_id=%s"
+                        " | source=%s | message_id=%s | queue_event_age_seconds=%s",
+                        event_id,
+                        source,
+                        message_id,
+                        queue_event_age_seconds,
+                    )
+
+                with get_db_session() as db:
+                    inbound_queue_repo.mark_retry_unbounded(
+                        db,
+                        event_id=event_id,
+                        attempts=attempts,
+                        error=f"not_materialized:{status}",
+                        queue_event_age_seconds=queue_event_age_seconds,
+                        alert_age_seconds=alert_age_seconds,
+                        long_retry_seconds=long_retry_seconds,
+                    )
+                return
+
             logger.warning(
                 "QUEUE_EVENT_NOT_MATERIALIZED | event_id=%s | source=%s | message_id=%s | result_status=%s",
                 event_id,
@@ -146,6 +209,18 @@ async def _process_one(
                 status,
             )
 
+            # Fase C: si sync_service devolvió un nuevo snapshot de
+            # estabilización de adjuntos (ATTACHMENTS_FLAG_UNSTABLE), se
+            # combina con el payload_json existente (sin perderlo) antes
+            # de reintentar, para poder comparar lastModifiedDateTime en
+            # el próximo intento.
+            new_stability_snapshot = result.get("attachments_stability_snapshot")
+            payload_to_persist = None
+            if new_stability_snapshot is not None:
+                payload_to_persist = inbound_queue_repo.merge_stability_snapshot(
+                    payload_json_raw, new_stability_snapshot
+                )
+
             with get_db_session() as db:
                 inbound_queue_repo.mark_retry(
                     db,
@@ -153,6 +228,7 @@ async def _process_one(
                     attempts=attempts,
                     error=f"not_materialized:{status}",
                     max_attempts=max_attempts,
+                    payload_json=payload_to_persist,
                 )
 
         except Exception as e:
@@ -172,6 +248,30 @@ async def _process_one(
                     error=str(e),
                     max_attempts=max_attempts,
                 )
+
+
+def _queue_event_age_seconds(created_at) -> int:
+    """
+    Antigüedad de ESTA fila de inbound_event_queue (queue_event_age), NO
+    necesariamente el momento en que Graph notificó por primera vez de
+    este mensaje: enqueue_event(force=True) puede crear una fila nueva
+    con created_at=NOW() para un mensaje ya visto antes (ej.
+    /admin/reprocess). En el reciclaje normal (force=False), created_at
+    de la fila original SÍ se conserva - ver inbound_queue_repo.py.
+
+    FIX de auditoría de zona horaria (pre-Fase D): created_at viene de
+    NOW(6) de MySQL, y la sesión del worker fuerza
+    SET time_zone='America/Bogota' en cada conexión (ver db.py) - como
+    las columnas son DATETIME (no TIMESTAMP), ese valor se lee de vuelta
+    tal cual, en hora de Bogotá, sin conversión. Comparar contra
+    datetime.now(UTC) introducía un desfase de 5 horas en el cálculo de
+    edad, adelantando la alerta operacional y el long-tail retry ~5h
+    antes de lo configurado.
+    """
+    if created_at is None:
+        return 0
+    now = datetime.now(ZoneInfo("America/Bogota")).replace(tzinfo=None)
+    return max(0, int((now - created_at).total_seconds()))
 
 
 async def _run_loop() -> None:

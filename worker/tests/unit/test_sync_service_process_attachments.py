@@ -279,3 +279,167 @@ class TestPartialFailuresAreStructured:
         )
         env.insert_event_mock.assert_not_called()
         env.insert_attachment_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# D1-A: attachment sin graph_attachment_id -> nunca se inserta como NULL,
+# se trata como fallo estructurado reintentable (MISSING_GRAPH_ATTACHMENT_ID).
+#
+# Motivo: los 7146 registros legacy con graph_attachment_id=NULL en
+# producción (auditoría D1) confirmaron con evidencia de datos que ese
+# patrón viene de una versión anterior del código - insertar más filas
+# así perpetuaría el problema, porque MariaDB no protege NULL contra sí
+# mismo bajo UNIQUE(message_id, graph_attachment_id) (D1-C).
+# ---------------------------------------------------------------------------
+
+class TestMissingGraphAttachmentId:
+    async def test_missing_id_is_not_inserted_and_reported_as_failure(
+        self, env
+    ):
+        att = _file_attachment()
+        del att["id"]
+
+        await sync_service._process_attachments(
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            message_pk=1,
+            provider_message_id="m1",
+            case_id=10,
+            attachments_manifest=[att],
+        )
+
+        env.insert_attachment_mock.assert_not_called()
+        failure_calls = [
+            c for c in env.insert_event_mock.call_args_list
+            if c.kwargs["event_type"] == "ATTACHMENTS_PARTIAL_FAILURE"
+        ]
+        assert len(failure_calls) == 1
+        failure = failure_calls[0].kwargs["details"]["failures"][0]
+        assert failure["reason"] == "MISSING_GRAPH_ATTACHMENT_ID"
+        assert failure["graph_attachment_id"] is None
+
+    async def test_none_id_is_not_inserted(self, env):
+        att = _file_attachment(id=None)
+
+        await sync_service._process_attachments(
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            message_pk=1,
+            provider_message_id="m1",
+            case_id=10,
+            attachments_manifest=[att],
+        )
+
+        env.insert_attachment_mock.assert_not_called()
+        failure_calls = [
+            c for c in env.insert_event_mock.call_args_list
+            if c.kwargs["event_type"] == "ATTACHMENTS_PARTIAL_FAILURE"
+        ]
+        assert failure_calls[0].kwargs["details"]["failures"][0]["reason"] == (
+            "MISSING_GRAPH_ATTACHMENT_ID"
+        )
+
+    async def test_empty_string_id_is_not_inserted(self, env):
+        """Defensivo: Graph no debería mandar id='' nunca, pero si lo
+        hiciera, debe tratarse igual que ausente - no como identidad
+        válida vacía."""
+        att = _file_attachment(id="")
+
+        await sync_service._process_attachments(
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            message_pk=1,
+            provider_message_id="m1",
+            case_id=10,
+            attachments_manifest=[att],
+        )
+
+        env.insert_attachment_mock.assert_not_called()
+
+    async def test_whitespace_only_id_is_not_inserted(self, env):
+        att = _file_attachment(id="   ")
+
+        await sync_service._process_attachments(
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            message_pk=1,
+            provider_message_id="m1",
+            case_id=10,
+            attachments_manifest=[att],
+        )
+
+        env.insert_attachment_mock.assert_not_called()
+
+    async def test_valid_id_is_stripped_and_used_normally(self, env, monkeypatch):
+        """Un id con espacios alrededor (poco probable pero defensivo)
+        se limpia antes de usarse como identidad."""
+        monkeypatch.setattr(
+            sync_service, "save_attachment_bytes", Mock(return_value=_stored_ok())
+        )
+        att = _file_attachment(id="  att-123  ")
+
+        await sync_service._process_attachments(
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            message_pk=1,
+            provider_message_id="m1",
+            case_id=10,
+            attachments_manifest=[att],
+        )
+
+        env.insert_attachment_mock.assert_called_once()
+        assert (
+            env.insert_attachment_mock.call_args.kwargs["graph_attachment_id"]
+            == "att-123"
+        )
+
+    async def test_missing_id_mixed_with_valid_attachment_only_valid_is_inserted(
+        self, env, monkeypatch
+    ):
+        monkeypatch.setattr(
+            sync_service, "save_attachment_bytes", Mock(return_value=_stored_ok())
+        )
+        missing_id_att = _file_attachment(id=None, name="sin_id.pdf")
+        valid_att = _file_attachment(id="att-valid", name="con_id.pdf")
+
+        await sync_service._process_attachments(
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            message_pk=1,
+            provider_message_id="m1",
+            case_id=10,
+            attachments_manifest=[missing_id_att, valid_att],
+        )
+
+        env.insert_attachment_mock.assert_called_once()
+        details = [
+            c for c in env.insert_event_mock.call_args_list
+            if c.kwargs["event_type"] == "ATTACHMENTS_PARTIAL_FAILURE"
+        ][0].kwargs["details"]
+        assert details["expected"] == 2
+        assert details["downloaded"] == 1
+        assert details["failed"] == 1
+        assert details["failures"][0]["reason"] == "MISSING_GRAPH_ATTACHMENT_ID"
+
+    async def test_missing_id_never_produces_a_null_graph_attachment_id_insert(
+        self, env
+    ):
+        """Guarda de regresión explícita del motivo de D1-A: no debe
+        existir NINGÚN camino donde insert_attachment se llame con
+        graph_attachment_id=None - eso es exactamente el patrón legacy
+        (7146 filas) que este fix evita reproducir hacia adelante."""
+        att = _file_attachment(id=None)
+
+        await sync_service._process_attachments(
+            mailbox_email="buzon@icbf.gov.co",
+            graph_message_id="m1",
+            message_pk=1,
+            provider_message_id="m1",
+            case_id=10,
+            attachments_manifest=[att],
+        )
+
+        for call in env.insert_attachment_mock.call_args_list:
+            gid = call.kwargs.get("graph_attachment_id")
+            assert gid is not None
+            assert str(gid).strip() != ""

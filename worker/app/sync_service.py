@@ -151,22 +151,118 @@ def _should_accept(notification: dict[str, Any]) -> bool:
 # materializa en modo degradado (ver _process_single_message).
 # ---------------------------------------------------------------------------
 
+# Fuente única del status de "falta receivedDateTime", compartida entre
+# sync_service (quien lo produce) e inbound_queue_worker (quien lo
+# consume para decidir el camino de retry sin límite). Evita que el
+# literal "incomplete:MISSING_RECEIVED_DATETIME" quede duplicado en dos
+# módulos y se desincronice si alguno cambia.
+REASON_MISSING_RECEIVED_DATETIME = "MISSING_RECEIVED_DATETIME"
+STATUS_MISSING_RECEIVED_DATETIME = f"incomplete:{REASON_MISSING_RECEIVED_DATETIME}"
+
+REASON_ATTACHMENTS_FLAG_UNSTABLE = "ATTACHMENTS_FLAG_UNSTABLE"
+
+
 @dataclass
 class CompletenessResult:
     complete: bool
     reasons: list[str] = field(default_factory=list)
     # Manifiesto de adjuntos ya obtenido de Graph durante la evaluacion
-    # (si hasAttachments=True) - se reutiliza en _process_attachments para
-    # no volver a pedirlo.
+    # (si hasAttachments=True, o si se confirmó vía la verificación de
+    # estabilización aunque el flag dijera False) - se reutiliza en
+    # _process_attachments para no volver a pedirlo.
     attachments_manifest: list[dict[str, Any]] | None = None
-    # True si específicamente el motivo de incompletitud incluye adjuntos.
-    # Se usa para decidir, al degradar, si los adjuntos quedan pendientes
-    # de recuperación aparte.
+    # True si específicamente el motivo de incompletitud incluye adjuntos
+    # (manifiesto no listo con hasAttachments=true). Se usa para decidir,
+    # al degradar, si los adjuntos quedan pendientes de recuperación
+    # aparte. NO se activa por ATTACHMENTS_FLAG_UNSTABLE - ese motivo
+    # siempre se resuelve con datos reales (manifest vacío o poblado)
+    # antes de degradar, nunca queda "pendiente".
     attachments_pending: bool = False
+    # Snapshot a persistir en inbound_event_queue (Fase C) cuando
+    # ATTACHMENTS_FLAG_UNSTABLE sigue sin resolverse - None si ya no hace
+    # falta seguir rastreando (se resolvió, o el motivo no aplica).
+    stability_snapshot: dict[str, Any] | None = None
 
     @property
     def reason_code(self) -> str:
         return "+".join(self.reasons) if self.reasons else "unknown"
+
+
+@dataclass
+class AttachmentsStabilityResult:
+    reasons: list[str] = field(default_factory=list)
+    new_snapshot: dict[str, Any] | None = None
+    attachments_manifest: list[dict[str, Any]] | None = None
+
+
+async def _evaluate_attachments_flag_stability(
+    *,
+    mailbox_email: str,
+    graph_message_id: str,
+    received_at: datetime,
+    current_last_modified: str | None,
+    attachments_stability_snapshot: dict[str, Any] | None,
+    stabilization_window_minutes: int,
+) -> AttachmentsStabilityResult:
+    """
+    Evalúa si se puede confiar en hasAttachments=false, o si hace falta
+    esperar una segunda lectura antes de aceptarlo.
+
+    IMPORTANTE: lastModifiedDateTime es solo una SEÑAL de estabilización,
+    no una prueba de completitud - Microsoft Graph no documenta que dos
+    lecturas iguales certifiquen que la colección de adjuntos ya está
+    indexada. Por eso, incluso cuando el snapshot se estabiliza (mismo
+    lastModifiedDateTime en dos lecturas consecutivas), esta función
+    hace UNA verificación real con list_attachments() antes de aceptar
+    "sin adjuntos" - nunca se confía solo en el flag ni solo en que dos
+    fechas coincidan.
+    """
+    # "now" debe compararse en la MISMA zona horaria que received_at:
+    # _iso_to_dt() convierte receivedDateTime a hora de Bogotá naive
+    # antes de devolverlo (para que coincida con cómo se almacena
+    # received_at en toda la base). Comparar contra datetime.now(UTC)
+    # naive introduciría un desfase sistemático de 5 horas en el cálculo
+    # de "edad" del mensaje.
+    now = datetime.now(ZoneInfo("America/Bogota")).replace(tzinfo=None)
+    age_minutes = (now - received_at).total_seconds() / 60
+
+    if age_minutes > stabilization_window_minutes:
+        # Mensaje ya no es "reciente" según receivedDateTime real (medido,
+        # no supuesto) - se confía sin más lecturas.
+        return AttachmentsStabilityResult()
+
+    if attachments_stability_snapshot is None:
+        # Primera vez que vemos hasAttachments=false para este mensaje
+        # reciente -> forzar una segunda lectura antes de confiar.
+        return AttachmentsStabilityResult(
+            reasons=[REASON_ATTACHMENTS_FLAG_UNSTABLE],
+            new_snapshot={
+                "last_modified": current_last_modified,
+                "has_attachments": False,
+            },
+        )
+
+    if attachments_stability_snapshot.get("last_modified") != current_last_modified:
+        # El snapshot de Graph siguió cambiando entre lecturas -> aún
+        # inestable, seguir esperando con el snapshot actualizado.
+        return AttachmentsStabilityResult(
+            reasons=[REASON_ATTACHMENTS_FLAG_UNSTABLE],
+            new_snapshot={
+                "last_modified": current_last_modified,
+                "has_attachments": False,
+            },
+        )
+
+    # lastModifiedDateTime estable entre dos lecturas -> verificación
+    # real (una sola llamada), no se acepta solo por la coincidencia de
+    # fechas.
+    manifest = await graph_client.list_attachments(mailbox_email, graph_message_id)
+    if not manifest:
+        return AttachmentsStabilityResult()
+
+    # El manifiesto SÍ tiene adjuntos reales pese a hasAttachments=false
+    # -> no se confía en el flag, se usa el manifiesto real.
+    return AttachmentsStabilityResult(attachments_manifest=manifest)
 
 
 async def _evaluate_completeness(
@@ -174,6 +270,9 @@ async def _evaluate_completeness(
     *,
     mailbox_email: str,
     graph_message_id: str,
+    received_at: datetime,
+    attachments_stability_snapshot: dict[str, Any] | None = None,
+    stabilization_window_minutes: int = 15,
 ) -> CompletenessResult:
     """
     Evalua completitud de body y adjuntos. NO evalua receivedDateTime -
@@ -187,6 +286,7 @@ async def _evaluate_completeness(
     reasons: list[str] = []
     attachments_manifest: list[dict[str, Any]] | None = None
     attachments_pending = False
+    stability_snapshot: dict[str, Any] | None = None
 
     # Body: conservar la distinción entre "Graph no mandó el objeto body"
     # (BODY_NOT_READY) y "body.content vino explícitamente vacío" (válido -
@@ -213,12 +313,28 @@ async def _evaluate_completeness(
         if not attachments_manifest:
             reasons.append("ATTACHMENT_MANIFEST_NOT_READY")
             attachments_pending = True
+    else:
+        # hasAttachments=false puede ser un snapshot temprano de
+        # consistencia eventual - ver _evaluate_attachments_flag_stability.
+        stability = await _evaluate_attachments_flag_stability(
+            mailbox_email=mailbox_email,
+            graph_message_id=graph_message_id,
+            received_at=received_at,
+            current_last_modified=msg.get("lastModifiedDateTime"),
+            attachments_stability_snapshot=attachments_stability_snapshot,
+            stabilization_window_minutes=stabilization_window_minutes,
+        )
+        reasons.extend(stability.reasons)
+        stability_snapshot = stability.new_snapshot
+        if stability.attachments_manifest:
+            attachments_manifest = stability.attachments_manifest
 
     return CompletenessResult(
         complete=(len(reasons) == 0),
         reasons=reasons,
         attachments_manifest=attachments_manifest,
         attachments_pending=attachments_pending,
+        stability_snapshot=stability_snapshot,
     )
 
 
@@ -232,6 +348,13 @@ def _incomplete_or_degrade(
 ) -> tuple[bool, dict[str, Any] | None]:
     """
     Decide si un snapshot incompleto debe reintentarse o degradarse.
+
+    Aplica a BODY_NOT_READY y ATTACHMENT_MANIFEST_NOT_READY. NO aplica a
+    MISSING_RECEIVED_DATETIME - ese motivo nunca degrada (no debe
+    falsear el dato del que depende el SLA) y se resuelve con su propio
+    camino, sin llamar a esta función (ver el bloque `received_at_missing`
+    en _process_single_message y mark_retry_unbounded en
+    inbound_queue_repo.py).
 
     Retorna (should_degrade, early_return_or_None):
       - Si quedan reintentos: (False, dict) - el llamador debe retornar
@@ -414,6 +537,7 @@ async def process_message_id_async(
     *,
     attempts: int = 0,
     max_attempts: int = 8,
+    attachments_stability_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not settings.MAILBOX_EMAIL:
         logger.error(
@@ -444,6 +568,7 @@ async def process_message_id_async(
         message_id=message_id,
         attempts=attempts,
         max_attempts=max_attempts,
+        attachments_stability_snapshot=attachments_stability_snapshot,
     )
 
 
@@ -455,6 +580,7 @@ async def _process_single_message(
     message_id: str,
     attempts: int = 0,
     max_attempts: int = 8,
+    attachments_stability_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     mb = settings.MAILBOX_EMAIL
     msg = await graph_client.get_message(mb, message_id)
@@ -486,23 +612,34 @@ async def _process_single_message(
     incomplete_reasons: list[str] = []
 
     if received_at_missing:
-        incomplete_reasons.append("MISSING_RECEIVED_DATETIME")
-        should_degrade, early_return = _incomplete_or_degrade(
-            provider_message_id=provider_message_id,
-            reasons=incomplete_reasons,
-            attempts=attempts,
-            max_attempts=max_attempts,
+        # MISSING_RECEIVED_DATETIME es distinto EN NATURALEZA a
+        # BODY_NOT_READY/ATTACHMENT_MANIFEST_NOT_READY: degradar ahí
+        # significa insertar con menos contenido del que había, pero la
+        # fecha del correo queda intacta. Degradar AQUÍ significaría
+        # inventar el dato del que depende directamente el SLA
+        # (cases.received_at -> due_at -> sla_state). Por eso este motivo
+        # NUNCA pasa por _incomplete_or_degrade ni por materialización
+        # degradada, sin importar cuántos intentos lleve: la fila vuelve
+        # siempre a la cola, y es inbound_queue_worker/
+        # inbound_queue_repo.mark_retry_unbounded quien decide el backoff
+        # (ladder normal, luego long-tail) sin agotar nunca el
+        # presupuesto ni marcar la fila 'failed'.
+        logger.info(
+            "INCOMPLETE_SNAPSHOT | msg=%s | reasons=%s | attempts=%s/%s"
+            " -> retry (unbounded, ver mark_retry_unbounded)",
+            provider_message_id,
+            REASON_MISSING_RECEIVED_DATETIME,
+            attempts,
+            max_attempts,
         )
-        if not should_degrade:
-            return early_return
-
-        # Presupuesto agotado y seguimos sin receivedDateTime: se usa la
-        # hora de procesamiento como último recurso DOCUMENTADO (no
-        # silencioso - el caso queda marcado CASE_CREATED_DEGRADED con
-        # este motivo explícito en case_events, a diferencia del
-        # comportamiento anterior que lo hacía sin dejar rastro).
-        is_degraded = True
-        received_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        return {
+            "ok": True,
+            "status": STATUS_MISSING_RECEIVED_DATETIME,
+            "materialized": False,
+            "provider_message_id": provider_message_id,
+            "case_id": None,
+            "message_pk": None,
+        }
 
     # Filtro GO_LIVE_AT: descartar mensajes anteriores al arranque del portal
     go_live = settings.go_live_dt() if hasattr(settings, "go_live_dt") else None
@@ -647,6 +784,11 @@ async def _process_single_message(
             msg,
             mailbox_email=mb,
             graph_message_id=message_id,
+            received_at=received_at,
+            attachments_stability_snapshot=attachments_stability_snapshot,
+            stabilization_window_minutes=int(
+                getattr(settings, "ATTACHMENTS_STABILIZATION_WINDOW_MINUTES", 15)
+            ),
         )
         incomplete_reasons.extend(completeness.reasons)
 
@@ -658,11 +800,41 @@ async def _process_single_message(
                 max_attempts=max_attempts,
             )
             if not should_degrade:
+                if completeness.stability_snapshot is not None:
+                    early_return["attachments_stability_snapshot"] = (
+                        completeness.stability_snapshot
+                    )
                 return early_return
             is_degraded = True
 
+            # Al agotar el presupuesto por ATTACHMENTS_FLAG_UNSTABLE, no se
+            # degrada confiando ciegamente en hasAttachments=false: se hace
+            # una última verificación real antes de aceptarlo. Si Graph
+            # SÍ tiene adjuntos, se usan - nunca se pierde un adjunto por
+            # haber agotado el presupuesto de espera de estabilización.
+            if (
+                REASON_ATTACHMENTS_FLAG_UNSTABLE in incomplete_reasons
+                and not completeness.attachments_manifest
+            ):
+                final_manifest = await graph_client.list_attachments(mb, message_id)
+                if final_manifest:
+                    completeness.attachments_manifest = final_manifest
+                    logger.warning(
+                        "ATTACHMENTS_FLAG_UNSTABLE_RECOVERED_AT_BUDGET_EXHAUSTION"
+                        " | msg=%s | attachments_found=%s",
+                        provider_message_id,
+                        len(final_manifest),
+                    )
+
         attachments_manifest = completeness.attachments_manifest
         attachments_pending = completeness.attachments_pending
+
+        # has_attachments se recalcula aquí: si la verificación de
+        # estabilización encontró un manifiesto real pese a
+        # hasAttachments=false en el snapshot de Graph, se persiste
+        # reflejando la realidad, no el flag potencialmente desactualizado.
+        if attachments_manifest:
+            has_attachments = 1
 
         body_obj = msg.get("body") if isinstance(msg.get("body"), dict) else None
         body_type = (body_obj.get("contentType") or "").lower() if body_obj else ""
@@ -1185,18 +1357,41 @@ async def _process_attachments(
 
     for a in atts:
         odata_type = str(a.get("@odata.type") or "")
-        att_id = str(a.get("id") or "")
+        raw_id = a.get("id")
         filename = str(a.get("name") or "attachment.bin")
 
         if "fileAttachment" not in odata_type:
             logger.warning(
                 "Skipping non-file attachment type=%s id=%s",
                 odata_type,
-                att_id,
+                raw_id,
             )
             # No es una falla real (item/reference attachments no aplican
             # a este flujo) - no se cuenta como failure, es intencional.
             continue
+
+        # D1-A: el id de Graph es el identificador que Graph usa para
+        # direccionar este adjunto específico (incluso para descargar su
+        # contenido vía get_attachment más abajo) - sin él no hay forma
+        # de aplicar identidad real ni de recuperarlo individualmente
+        # después. Ausencia de id = snapshot incompleto, no "adjunto sin
+        # nombre" - se trata como fallo reintentable, NUNCA se guarda
+        # como NULL (evitar más filas legacy como las 7146 ya
+        # existentes en producción - ver auditoría D1 - que MariaDB no
+        # protege entre sí bajo UNIQUE porque NULL no colisiona consigo
+        # mismo).
+        if not raw_id or not str(raw_id).strip():
+            logger.warning(
+                "Attachment without Graph id filename=%s -> incomplete/retryable",
+                filename,
+            )
+            failures.append({
+                "filename": filename, "graph_attachment_id": None,
+                "reason": "MISSING_GRAPH_ATTACHMENT_ID",
+            })
+            continue
+
+        att_id = str(raw_id).strip()
 
         content_type = str(a.get("contentType") or "application/octet-stream")
         size = int(a.get("size") or 0)

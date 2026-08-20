@@ -28,15 +28,27 @@ class Settings(BaseSettings):
 
     def go_live_dt(self) -> datetime | None:
         """
-        Convierte GO_LIVE_AT (ISO 8601 con Z o con offset) a datetime UTC naive.
-        Compatible con el estilo de _iso_to_dt en sync_service (UTC y sin tzinfo).
+        Convierte GO_LIVE_AT (ISO 8601 con Z o con offset) al mismo
+        instante en hora de Bogotá, sin tzinfo.
+
+        FIX de auditoría de zona horaria (pre-Fase D): antes devolvía
+        UTC naive, mientras _iso_to_dt() (que calcula received_at) y
+        stop_new_inbound_dt() ya devolvían Bogotá naive. Comparar
+        "UTC naive" contra "Bogotá naive" como si fueran el mismo reloj
+        producía un desfase de 5 horas en el filtro GO_LIVE_AT - ver
+        auditoría de timezone previa a Fase D. El comentario anterior
+        ("compatible con el estilo de _iso_to_dt... UTC") era incorrecto:
+        _iso_to_dt() devuelve Bogotá, no UTC.
         """
         v = (self.GO_LIVE_AT or "").strip()
         if not v:
             return None
         try:
+            from zoneinfo import ZoneInfo
             dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
-            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+            bogota_tz = ZoneInfo("America/Bogota")
+            dt_bogota = dt.astimezone(bogota_tz)
+            return dt_bogota.replace(tzinfo=None)
         except Exception:
             return None
 
@@ -170,6 +182,26 @@ class Settings(BaseSettings):
     ATTACHMENT_RECOVERY_INTERVAL_SECONDS: int = 600
     ATTACHMENT_RECOVERY_JITTER_SECONDS: int = 30
     ATTACHMENT_RECOVERY_BATCH_SIZE: int = 50
+
+    # MISSING_RECEIVED_DATETIME: nunca degrada ni marca la fila 'failed'
+    # (ver inbound_queue_repo.mark_retry_unbounded). Mientras la edad de
+    # la fila de cola (queue_event_age, ver nota en inbound_queue_worker)
+    # no supere este umbral, usa el mismo ladder de backoff normal
+    # (30/120/300/900/1800s). Al superarlo, además de emitir una alerta
+    # operacional (log ALERT_STALLED_MISSING_RECEIVED_DATETIME), pasa a
+    # un intervalo fijo largo para no seguir golpeando Graph cada 30 min
+    # de forma indefinida en un caso que quizás nunca se resuelva.
+    MISSING_RECEIVED_DATETIME_ALERT_AGE_MINUTES: int = 60
+    MISSING_RECEIVED_DATETIME_LONG_RETRY_SECONDS: int = 21600  # 6 horas
+
+    # ATTACHMENTS_FLAG_UNSTABLE: hasAttachments=false puede ser un
+    # snapshot temprano de consistencia eventual de Graph. lastModified-
+    # DateTime es solo una SEÑAL de estabilización (Graph no documenta
+    # que dos lecturas iguales certifiquen indexación completa de
+    # adjuntos) - por eso, cuando se estabiliza, igual se verifica
+    # list_attachments() una vez antes de confiar. Ver
+    # sync_service._evaluate_attachments_flag_stability.
+    ATTACHMENTS_STABILIZATION_WINDOW_MINUTES: int = 15
 
     # Helpers
     def allowed_ext_set(self) -> Set[str]:
