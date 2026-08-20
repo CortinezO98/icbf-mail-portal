@@ -677,3 +677,74 @@ class TestAttachmentRecoveryForegroundIntegration:
         assert result["status"] == "created"
         env.upsert_pending_mock.assert_not_called()
         env.release_foreground_lock_mock.assert_not_called()
+
+
+async def test_d2_foreground_missing_type_uses_specific_reason(env):
+    """Si el manifiesto foreground trae un adjunto sin @odata.type,
+    D2 debe conservar MISSING_ATTACHMENT_TYPE y no degradarlo al motivo
+    histórico MISSING_GRAPH_ATTACHMENT_ID."""
+    env.list_attachments_mock.return_value = [{"id": "A"}]
+    env.get_persisted_graph_ids_mock.return_value = set()
+    env.process_attachments_mock.return_value = {
+        "attempted": 1,
+        "succeeded": 0,
+        "failed": 0,
+        "failures": [],
+    }
+
+    await _run(env, msg=_base_msg(hasAttachments=True))
+
+    kwargs = env.release_foreground_lock_mock.call_args.kwargs
+    assert kwargs["status"] == "pending"
+    assert kwargs["reason"] == "MISSING_ATTACHMENT_TYPE"
+
+
+async def test_d2_foreground_mixed_valid_and_missing_id_stays_pending(env):
+    """Un manifiesto con A válido + otro fileAttachment sin id sigue siendo
+    no verificable. Aunque A ya esté persistido, foreground no puede marcar
+    verifying/N-N porque todavía existe evidencia explícita de un adjunto sin
+    identidad Graph."""
+    env.list_attachments_mock.return_value = [
+        {"@odata.type": "#microsoft.graph.fileAttachment", "id": "A"},
+        {"@odata.type": "#microsoft.graph.fileAttachment", "id": None},
+    ]
+    env.get_persisted_graph_ids_mock.return_value = {"A"}
+    env.process_attachments_mock.return_value = {
+        "attempted": 2,
+        "succeeded": 1,
+        "failed": 1,
+        "failures": [
+            {
+                "filename": "attachment.bin",
+                "graph_attachment_id": None,
+                "reason": "MISSING_GRAPH_ATTACHMENT_ID",
+            }
+        ],
+    }
+
+    await _run(env, msg=_base_msg(hasAttachments=True))
+
+    kwargs = env.release_foreground_lock_mock.call_args.kwargs
+    assert kwargs["status"] == "pending"
+    assert kwargs["reason"] == "MISSING_GRAPH_ATTACHMENT_ID"
+
+
+async def test_d2_foreground_unsupported_only_blocks_instead_of_false_empty(env):
+    """Un tipo Graph conocido pero no soportado no debe terminar como
+    ATTACHMENT_MANIFEST_EMPTY ni verifying/complete silencioso."""
+    env.list_attachments_mock.return_value = [
+        {"@odata.type": "#microsoft.graph.itemAttachment", "id": "ITEM-1"}
+    ]
+    env.get_persisted_graph_ids_mock.return_value = set()
+    env.process_attachments_mock.return_value = {
+        "attempted": 1,
+        "succeeded": 0,
+        "failed": 0,
+        "failures": [],
+    }
+
+    await _run(env, msg=_base_msg(hasAttachments=True))
+
+    kwargs = env.release_foreground_lock_mock.call_args.kwargs
+    assert kwargs["status"] == "blocked"
+    assert kwargs["reason"] == "UNSUPPORTED_ATTACHMENT_TYPE"

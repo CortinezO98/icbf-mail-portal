@@ -348,3 +348,37 @@ class TestPollDoesNotCallGraphWithoutWork:
 
         assert counts["checked"] == 0
         env.list_attachments_mock.assert_not_called()
+
+
+class TestNormalizedGraphIdFiltering:
+    async def test_whitespace_graph_id_is_normalized_and_still_downloaded(self, env):
+        """La misma normalización de D1-A debe aplicarse al diff D2.
+        Graph puede entregar '  A  '; el normalizador produce 'A' y el
+        filtro de missing_ids no debe dejar el adjunto por fuera."""
+        env.list_attachments_mock.return_value = [_file_attachment(id="  A  ")]
+        env.get_persisted_mock.side_effect = [set(), {"A"}]
+        env.process_attachments_mock.return_value = {
+            "attempted": 1,
+            "succeeded": 1,
+            "failed": 0,
+            "failures": [],
+        }
+
+        result = await _run(_row())
+
+        assert result == "verifying"
+        called_manifest = env.process_attachments_mock.call_args.kwargs["attachments_manifest"]
+        assert len(called_manifest) == 1
+        assert called_manifest[0]["id"] == "  A  "
+
+
+class TestMissingContext:
+    async def test_missing_message_context_marks_blocked_and_releases_claim(self, env):
+        env.get_context_mock.return_value = None
+
+        result = await _run(_row())
+
+        assert result == "blocked"
+        env.mark_blocked_mock.assert_called_once()
+        assert env.mark_blocked_mock.call_args.kwargs["reason"] == "MESSAGE_CONTEXT_NOT_FOUND"
+        env.list_attachments_mock.assert_not_called()

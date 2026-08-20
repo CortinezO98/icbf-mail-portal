@@ -60,11 +60,25 @@ def upsert_pending(
             VALUES
                 (:message_id, 'pending', :reason, {locked_clause}, NOW(6))
             ON DUPLICATE KEY UPDATE
+                -- Solo una fila pending y SIN lock activo puede ser tomada
+                -- por el foreground. verifying/complete/blocked son estados
+                -- más avanzados y no se degradan ni se les roba el lock.
+                -- Tampoco se libera/reemplaza un lock pending que ya tenga
+                -- otro worker.
                 last_reason = IF(
-                    status IN ('complete','blocked'), last_reason, VALUES(last_reason)
+                    status = 'pending' AND locked_at IS NULL,
+                    VALUES(last_reason),
+                    last_reason
                 ),
                 locked_at = IF(
-                    status IN ('complete','blocked'), locked_at, VALUES(locked_at)
+                    status = 'pending' AND locked_at IS NULL,
+                    VALUES(locked_at),
+                    locked_at
+                ),
+                available_at = IF(
+                    status = 'pending' AND locked_at IS NULL,
+                    NOW(6),
+                    available_at
                 )
         """),
         {"message_id": message_id, "reason": reason[:80]},
@@ -90,6 +104,9 @@ def release_foreground_lock(
     'complete' directo desde el foreground (la estabilización de dos
     lecturas siempre pasa por el background, ver regla F).
     """
+    if status not in {"pending", "verifying", "blocked"}:
+        raise ValueError(f"invalid foreground recovery status: {status}")
+
     db.execute(
         text("""
             UPDATE attachment_recovery
@@ -103,6 +120,9 @@ def release_foreground_lock(
                 last_checked_at = NOW(6),
                 updated_at = NOW(6)
             WHERE message_id = :message_id
+              AND status = 'pending'
+              AND last_reason = 'MANIFEST_DETECTED'
+              AND locked_at IS NOT NULL
         """),
         {
             "message_id": message_id,
@@ -327,4 +347,8 @@ def get_persisted_graph_ids(db, *, message_id: int) -> set[str]:
         """),
         {"message_id": message_id},
     ).fetchall()
-    return {r[0] for r in rows}
+    return {
+        str(r[0]).strip()
+        for r in rows
+        if r[0] is not None and str(r[0]).strip()
+    }

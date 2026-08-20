@@ -177,7 +177,7 @@ class TestClassifyStillMissing:
         still_missing = {"A", "B"}
         failures = [
             {"graph_attachment_id": "A", "reason": "REJECTED_BY_POLICY"},
-            {"graph_attachment_id": "B", "reason": "MISSING_SHA256"},
+            {"graph_attachment_id": "B", "reason": "REJECTED_BY_POLICY"},
         ]
         assert ar._classify_still_missing(still_missing, failures) == "blocked"
 
@@ -196,3 +196,11 @@ class TestClassifyStillMissing:
 
     def test_empty_still_missing_is_pending_not_blocked(self):
         assert ar._classify_still_missing(set(), []) == "pending"
+
+
+def test_missing_sha256_remains_transient_by_d2_policy():
+    """D2 acordó que MISSING_SHA256 no es un bloqueo permanente.
+    Solo REJECTED_BY_POLICY se considera terminal por ahora."""
+    still_missing = {"A"}
+    failures = [{"graph_attachment_id": "A", "reason": "MISSING_SHA256"}]
+    assert ar._classify_still_missing(still_missing, failures) == "pending"

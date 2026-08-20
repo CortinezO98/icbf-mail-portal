@@ -176,8 +176,8 @@ class TestPartialFailuresAreStructured:
         ]
         assert len(failure_calls) == 1
         details = failure_calls[0].kwargs["details"]
-        assert details["expected"] == 1
-        assert details["downloaded"] == 0
+        assert details["attempted"] == 1
+        assert details["succeeded"] == 0
         assert details["failed"] == 1
         assert details["failures"][0]["reason"] == "NO_CONTENT_BYTES"
 
@@ -264,8 +264,8 @@ class TestPartialFailuresAreStructured:
             if c.kwargs["event_type"] == "ATTACHMENTS_PARTIAL_FAILURE"
         ]
         details = failure_calls[0].kwargs["details"]
-        assert details["expected"] == 2
-        assert details["downloaded"] == 1
+        assert details["attempted"] == 2
+        assert details["succeeded"] == 1
         assert details["failed"] == 1
 
     async def test_empty_manifest_returns_without_events(self, env):
@@ -416,8 +416,8 @@ class TestMissingGraphAttachmentId:
             c for c in env.insert_event_mock.call_args_list
             if c.kwargs["event_type"] == "ATTACHMENTS_PARTIAL_FAILURE"
         ][0].kwargs["details"]
-        assert details["expected"] == 2
-        assert details["downloaded"] == 1
+        assert details["attempted"] == 2
+        assert details["succeeded"] == 1
         assert details["failed"] == 1
         assert details["failures"][0]["reason"] == "MISSING_GRAPH_ATTACHMENT_ID"
 

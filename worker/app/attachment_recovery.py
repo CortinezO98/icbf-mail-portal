@@ -136,8 +136,11 @@ def _is_message_outside_stabilization_window(received_at: datetime | None) -> bo
 # TRANSIENT por defecto (más seguro: seguir reintentando que bloquear
 # de más).
 _PERMANENT_ATTACHMENT_FAILURE_REASONS = frozenset({
+    # Único fallo individual que hoy sabemos con certeza que no cambiará
+    # con reintentos. MISSING_SHA256 permanece TRANSIENT por diseño D2:
+    # si la capa de almacenamiento devolvió un snapshot anómalo, preferimos
+    # reintentar antes que bloquear definitivamente el mensaje.
     "REJECTED_BY_POLICY",
-    "MISSING_SHA256",
 })
 
 
@@ -200,8 +203,16 @@ async def _process_one_recovery(*, row: dict[str, Any], message_id: int, attempt
 
     if ctx is None:
         # El mensaje ya no existe (no debería pasar, FK ON DELETE CASCADE
-        # se encarga de la fila de recovery en ese caso) - defensivo.
+        # normalmente elimina también la fila de recovery). Si hubo una
+        # carrera y la fila aún existe, se libera el lock y se deja marcada
+        # para diagnóstico en vez de quedar reclamándose cada 10 minutos.
         logger.warning("ATTACHMENT_RECOVERY_MESSAGE_NOT_FOUND | message_id=%s", message_id)
+        with get_db_session() as db:
+            repo.mark_blocked(
+                db,
+                message_id=message_id,
+                reason="MESSAGE_CONTEXT_NOT_FOUND",
+            )
         return "blocked"
 
     mailbox_email = ctx["mailbox_email"]

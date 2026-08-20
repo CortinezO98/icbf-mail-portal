@@ -1158,10 +1158,46 @@ async def _process_single_message(
             )
         still_missing = norm.expected_graph_ids - persisted_ids
 
-        if norm.expected_graph_ids and not still_missing:
-            current_hash = attachment_recovery._compute_manifest_hash(
-                norm.expected_graph_ids
-            )
+        # Un manifiesto no verificable (p. ej. un fileAttachment sin id
+        # o un objeto sin @odata.type) NUNCA puede avanzar a verifying,
+        # aunque todos los IDs válidos que sí alcanzamos a observar ya
+        # estén persistidos. Esa era una variante del mismo falso N/N que
+        # D2 existe para evitar.
+        if norm.unverifiable:
+            with get_db_session() as db:
+                attachment_recovery_repo.release_foreground_lock(
+                    db, message_id=message_pk, status="pending",
+                    reason=norm.unverifiable_reason,
+                    error=str(result.get("failures", ""))[:1000],
+                    expected_count=(len(norm.expected_graph_ids) or None),
+                    downloaded_count=len(norm.expected_graph_ids & persisted_ids),
+                    available_at_delay_seconds=30,
+                )
+        elif still_missing:
+            with get_db_session() as db:
+                attachment_recovery_repo.release_foreground_lock(
+                    db, message_id=message_pk, status="pending",
+                    reason=("PARTIAL_DOWNLOAD" if persisted_ids else "NO_PROGRESS"),
+                    error=str(result.get("failures", ""))[:1000],
+                    expected_count=(len(norm.expected_graph_ids) or None),
+                    downloaded_count=len(norm.expected_graph_ids & persisted_ids),
+                    available_at_delay_seconds=30,  # primer intento del ladder normal
+                )
+        elif norm.unsupported_count > 0:
+            # Ya persistimos todos los fileAttachment soportados, pero el
+            # mensaje contiene al menos un tipo que el portal no sabe
+            # materializar. No declararlo completo silenciosamente.
+            with get_db_session() as db:
+                attachment_recovery_repo.release_foreground_lock(
+                    db, message_id=message_pk, status="blocked",
+                    reason="UNSUPPORTED_ATTACHMENT_TYPE",
+                    error=(
+                        f"{norm.unsupported_count} adjunto(s) de tipo no soportado"
+                    ),
+                    expected_count=(len(norm.expected_graph_ids) or None),
+                    downloaded_count=len(norm.expected_graph_ids & persisted_ids),
+                )
+        elif norm.expected_graph_ids:
             with get_db_session() as db:
                 attachment_recovery_repo.release_foreground_lock(
                     db, message_id=message_pk, status="verifying",
@@ -1184,18 +1220,17 @@ async def _process_single_message(
             # de verificación antes de poder declarar complete - seguro,
             # solo cuesta un ciclo adicional, nunca un falso complete.
         else:
+            # has_attachments=True pero no apareció ningún fileAttachment
+            # verificable ni tipo explícitamente no soportado. Tratarlo
+            # como snapshot incompleto, nunca como complete 0/0.
             with get_db_session() as db:
                 attachment_recovery_repo.release_foreground_lock(
                     db, message_id=message_pk, status="pending",
-                    reason=(
-                        "MISSING_GRAPH_ATTACHMENT_ID" if norm.unverifiable
-                        else "PARTIAL_DOWNLOAD" if persisted_ids
-                        else "NO_PROGRESS"
-                    ),
+                    reason="ATTACHMENT_MANIFEST_EMPTY",
                     error=str(result.get("failures", ""))[:1000],
-                    expected_count=(len(norm.expected_graph_ids) or None),
-                    downloaded_count=len(norm.expected_graph_ids & persisted_ids),
-                    available_at_delay_seconds=30,  # primer intento del ladder normal
+                    expected_count=None,
+                    downloaded_count=0,
+                    available_at_delay_seconds=30,
                 )
     elif has_attachments and attachments_pending:
         # Gate degradado sin manifiesto confirmado: no hubo
