@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 import app.sync_service as sync_service
+import app.attachment_recovery_repo as attachment_recovery_repo
 
 pytestmark = pytest.mark.unit
 
@@ -108,8 +109,24 @@ def env(monkeypatch):
         sync_service.graph_client, "list_attachments", list_attachments_mock
     )
 
-    process_attachments_mock = AsyncMock()
+    process_attachments_mock = AsyncMock(
+        return_value={"attempted": 0, "succeeded": 0, "failed": 0, "failures": []}
+    )
     monkeypatch.setattr(sync_service, "_process_attachments", process_attachments_mock)
+
+    # D2: puntos de integración con attachment_recovery_repo (import
+    # perezoso dentro de _process_single_message - se mockea el módulo
+    # real, ya que el import local resuelve al mismo objeto en sys.modules).
+    upsert_pending_mock = Mock()
+    release_foreground_lock_mock = Mock()
+    get_persisted_graph_ids_mock = Mock(return_value=set())
+    monkeypatch.setattr(attachment_recovery_repo, "upsert_pending", upsert_pending_mock)
+    monkeypatch.setattr(
+        attachment_recovery_repo, "release_foreground_lock", release_foreground_lock_mock
+    )
+    monkeypatch.setattr(
+        attachment_recovery_repo, "get_persisted_graph_ids", get_persisted_graph_ids_mock
+    )
 
     return SimpleNamespace(
         fake_db=fake_db,
@@ -120,6 +137,9 @@ def env(monkeypatch):
         get_message_mock=get_message_mock,
         list_attachments_mock=list_attachments_mock,
         process_attachments_mock=process_attachments_mock,
+        upsert_pending_mock=upsert_pending_mock,
+        release_foreground_lock_mock=release_foreground_lock_mock,
+        get_persisted_graph_ids_mock=get_persisted_graph_ids_mock,
     )
 
 
@@ -573,3 +593,87 @@ class TestAttachmentsFlagStabilization:
         assert result["status"] == "created"
         assert result["materialized"] is True
         env.list_attachments_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# D2: integración crash-safe con attachment_recovery. La fila de recovery
+# debe crearse y quedar bloqueada por el foreground ANTES de tocar
+# cualquier attachment - si el worker muere a mitad de _process_
+# attachments, la fila ya existe y su lock eventualmente queda stale
+# para que el background la reclame (nunca invisible).
+# ---------------------------------------------------------------------------
+
+class TestAttachmentRecoveryForegroundIntegration:
+    def _manifest(self, *ids):
+        return [
+            {"@odata.type": "#microsoft.graph.fileAttachment", "id": i} for i in ids
+        ]
+
+    async def test_upsert_pending_called_before_process_attachments_with_lock(
+        self, env
+    ):
+        """Crash-safety: upsert_pending(locked=True) debe ocurrir ANTES
+        de _process_attachments, no después - si no, un crash a mitad de
+        la descarga dejaría el mensaje sin fila de recovery (el bug
+        original que motivó D2)."""
+        call_order: list[str] = []
+        env.upsert_pending_mock.side_effect = lambda *a, **k: call_order.append("upsert_pending")
+        env.process_attachments_mock.side_effect = (
+            lambda *a, **k: call_order.append("process_attachments")
+            or {"attempted": 1, "succeeded": 1, "failed": 0, "failures": []}
+        )
+
+        manifest = self._manifest("A")
+        env.list_attachments_mock.return_value = manifest
+        env.get_persisted_graph_ids_mock.return_value = {"A"}
+
+        await _run(env, msg=_base_msg(hasAttachments=True))
+
+        assert call_order == ["upsert_pending", "process_attachments"]
+        kwargs = env.upsert_pending_mock.call_args.kwargs
+        assert kwargs["reason"] == "MANIFEST_DETECTED"
+        assert kwargs["locked"] is True
+
+    async def test_full_success_releases_lock_as_verifying(self, env):
+        manifest = self._manifest("A", "B")
+        env.list_attachments_mock.return_value = manifest
+        env.get_persisted_graph_ids_mock.return_value = {"A", "B"}
+
+        await _run(env, msg=_base_msg(hasAttachments=True))
+
+        env.release_foreground_lock_mock.assert_called_once()
+        kwargs = env.release_foreground_lock_mock.call_args.kwargs
+        assert kwargs["status"] == "verifying"
+
+    async def test_partial_success_releases_lock_as_pending(self, env):
+        manifest = self._manifest("A", "B")
+        env.list_attachments_mock.return_value = manifest
+        env.get_persisted_graph_ids_mock.return_value = {"A"}  # solo 1 de 2
+
+        await _run(env, msg=_base_msg(hasAttachments=True))
+
+        kwargs = env.release_foreground_lock_mock.call_args.kwargs
+        assert kwargs["status"] == "pending"
+
+    async def test_degraded_manifest_not_ready_creates_unlocked_pending_row(self, env):
+        """Camino degradado (gate nunca confirmó el manifiesto): la fila
+        de recovery se crea SIN lock (locked=False) - no hubo
+        procesamiento foreground activo, el background puede tomarla de
+        inmediato."""
+        env.list_attachments_mock.return_value = []  # nunca se estabiliza
+
+        result = await _run(
+            env, msg=_base_msg(hasAttachments=True), attempts=7, max_attempts=8
+        )
+
+        assert result["status"] == "created_degraded"
+        kwargs = env.upsert_pending_mock.call_args.kwargs
+        assert kwargs["reason"] == "ATTACHMENT_MANIFEST_NOT_READY"
+        assert kwargs["locked"] is False
+
+    async def test_no_attachments_never_touches_recovery_table(self, env):
+        result = await _run(env, msg=_base_msg(hasAttachments=False))
+
+        assert result["status"] == "created"
+        env.upsert_pending_mock.assert_not_called()
+        env.release_foreground_lock_mock.assert_not_called()

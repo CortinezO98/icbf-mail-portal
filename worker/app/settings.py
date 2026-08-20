@@ -176,11 +176,22 @@ class Settings(BaseSettings):
 
     RECONCILE_FORCE_REPROCESS: bool = False
 
-    # Recuperación de adjuntos pendientes (sin límite de intentos propio,
-    # ver sync_service.recover_missing_attachments)
+    # Recuperación de adjuntos pendientes (D2, tabla operacional
+    # attachment_recovery - ver attachment_recovery.py). Reemplaza el
+    # motor viejo basado en "0 filas persistidas" (sync_service.
+    # recover_missing_attachments, eliminado).
+    #
+    # POLL: cada cuánto se consulta la BD buscando trabajo vencido - es
+    # una query indexada barata (idx_attachment_recovery_claim), NO una
+    # llamada a Graph. Si no hay filas con available_at <= NOW(), esta
+    # corrida no llama a Graph en absoluto.
+    # BACKOFF real: lo decide available_at por fila (ver
+    # attachment_recovery._recovery_backoff_seconds), no el poll.
     ATTACHMENT_RECOVERY_ENABLED: int = 1
-    ATTACHMENT_RECOVERY_INTERVAL_SECONDS: int = 600
-    ATTACHMENT_RECOVERY_JITTER_SECONDS: int = 30
+    ATTACHMENT_RECOVERY_POLL_SECONDS: int = 30
+    ATTACHMENT_RECOVERY_VERIFICATION_DELAY_SECONDS: int = 120
+    ATTACHMENT_RECOVERY_STALE_LOCK_MINUTES: int = 10
+    ATTACHMENT_RECOVERY_LONG_TAIL_SECONDS: int = 21600  # 6 horas
     ATTACHMENT_RECOVERY_BATCH_SIZE: int = 50
 
     # MISSING_RECEIVED_DATETIME: nunca degrada ni marca la fila 'failed'

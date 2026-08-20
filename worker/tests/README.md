@@ -68,9 +68,11 @@ fallaban exactamente los tests esperados, ni más ni menos.
   tests del gate se mockean completas (correcto para un test unitario);
   probarlas de verdad requiere una base de datos real — nivel de
   integración, pendiente de Fase de Docker/DB de pruebas.
-- **`recover_missing_attachments`** (el job de recuperación sin límite de
-  intentos) — implementado, sin tests dedicados todavía. Candidato
-  inmediato para la siguiente pasada.
+- **`recover_missing_attachments`** — **eliminada** (D2). Reemplazada por
+  `attachment_recovery.py`/`attachment_recovery_repo.py` (tabla
+  operacional `attachment_recovery`, identidad real por
+  `graph_attachment_id`, 54 tests dedicados incluyendo integración real
+  contra MariaDB para CAS/stale-lock/crash-safety).
 - **`_notify_agent_new_case`** y **`process_notifications_async`** (el
   segundo es un entrypoint que ya no usa ningún camino activo del
   sistema — webhook, delta y reconcile pasan por

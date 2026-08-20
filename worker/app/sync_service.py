@@ -1111,12 +1111,29 @@ async def _process_single_message(
 
     # Adjuntos (fuera de cualquier transacción de DB, sigue el mismo
     # principio que ya existía: no bloquear la sesión mientras se llama
-    # a Graph / se escribe a disco). Si el manifiesto no estaba listo
-    # (attachments_pending), NO se intenta procesar aquí: queda para
-    # recover_missing_attachments(), que reintenta sin límite de intentos
-    # de forma independiente al presupuesto de materialización.
+    # a Graph / se escribe a disco).
+    #
+    # D2: import perezoso (no a nivel de módulo) para evitar un ciclo de
+    # imports - attachment_recovery.py importa sync_service para
+    # reutilizar _process_attachments, así que sync_service.py no puede
+    # importar attachment_recovery a nivel de módulo.
+    from app import attachment_recovery
+    from app import attachment_recovery_repo
+
     if has_attachments and message_pk is not None and not attachments_pending:
-        await _process_attachments(
+        # Regla de crash-safety (auditoría D2 final, punto 1): el
+        # registro de recovery se crea y se marca como propiedad del
+        # foreground (locked_at=NOW()) ANTES de tocar cualquier
+        # attachment - así, si el worker muere a mitad de _process_
+        # attachments (ej. guardó 2 de 3), la fila ya existe y queda con
+        # un lock que expirará (stale-lock) para que el background la
+        # reclame, en vez de quedar invisible como ocurría antes de D2.
+        with get_db_session() as db:
+            attachment_recovery_repo.upsert_pending(
+                db, message_id=message_pk, reason="MANIFEST_DETECTED", locked=True,
+            )
+
+        result = await _process_attachments(
             mailbox_email=mb,
             graph_message_id=message_id,
             message_pk=message_pk,
@@ -1125,10 +1142,73 @@ async def _process_single_message(
             conversation_id=conversation_id_str,
             attachments_manifest=attachments_manifest,
         )
+
+        # Liberar el lock foreground con el estado que corresponda. La
+        # clasificación fina (blocked por tipo no soportado, manifiesto
+        # vacío inestable, etc.) la hace el ciclo de background en su
+        # primer reclamo - aquí solo se decide entre "quedó N/N ya
+        # mismo" (verifying) o "algo sigue faltando" (pending), sin
+        # duplicar el algoritmo completo de attachment_recovery.py.
+        norm = attachment_recovery._normalize_attachment_manifest(
+            attachments_manifest or []
+        )
+        with get_db_session() as db:
+            persisted_ids = attachment_recovery_repo.get_persisted_graph_ids(
+                db, message_id=message_pk
+            )
+        still_missing = norm.expected_graph_ids - persisted_ids
+
+        if norm.expected_graph_ids and not still_missing:
+            current_hash = attachment_recovery._compute_manifest_hash(
+                norm.expected_graph_ids
+            )
+            with get_db_session() as db:
+                attachment_recovery_repo.release_foreground_lock(
+                    db, message_id=message_pk, status="verifying",
+                    reason="FOREGROUND_FIRST_PASS_COMPLETE",
+                    expected_count=len(norm.expected_graph_ids),
+                    downloaded_count=len(norm.expected_graph_ids),
+                    available_at_delay_seconds=int(
+                        getattr(
+                            settings,
+                            "ATTACHMENT_RECOVERY_VERIFICATION_DELAY_SECONDS",
+                            120,
+                        )
+                    ),
+                )
+            # manifest_hash no lo escribe release_foreground_lock (solo
+            # mark_verifying del ciclo de background lo hace) - el
+            # background, al reclamarla, recalculará el hash de todas
+            # formas en su primera pasada; queda con manifest_hash=NULL
+            # entretanto, lo cual simplemente fuerza una lectura extra
+            # de verificación antes de poder declarar complete - seguro,
+            # solo cuesta un ciclo adicional, nunca un falso complete.
+        else:
+            with get_db_session() as db:
+                attachment_recovery_repo.release_foreground_lock(
+                    db, message_id=message_pk, status="pending",
+                    reason=(
+                        "MISSING_GRAPH_ATTACHMENT_ID" if norm.unverifiable
+                        else "PARTIAL_DOWNLOAD" if persisted_ids
+                        else "NO_PROGRESS"
+                    ),
+                    error=str(result.get("failures", ""))[:1000],
+                    expected_count=(len(norm.expected_graph_ids) or None),
+                    downloaded_count=len(norm.expected_graph_ids & persisted_ids),
+                    available_at_delay_seconds=30,  # primer intento del ladder normal
+                )
     elif has_attachments and attachments_pending:
+        # Gate degradado sin manifiesto confirmado: no hubo
+        # procesamiento foreground, así que la fila queda disponible de
+        # inmediato para el background (locked=False).
+        with get_db_session() as db:
+            attachment_recovery_repo.upsert_pending(
+                db, message_id=message_pk,
+                reason="ATTACHMENT_MANIFEST_NOT_READY", locked=False,
+            )
         logger.info(
             "ATTACHMENTS_LEFT_PENDING_FOR_RECOVERY | msg=%s | case_id=%s"
-            " | recover_missing_attachments() los recogerá",
+            " | attachment_recovery lo recogerá",
             provider_message_id,
             case_id,
         )
@@ -1338,7 +1418,16 @@ async def _process_attachments(
     case_id: int | None = None,
     conversation_id: str | None = None,
     attachments_manifest: list[dict[str, Any]] | None = None,
-) -> None:
+) -> dict[str, Any]:
+    """
+    Retorna {"attempted", "succeeded", "failed", "failures"} sobre el
+    conjunto de adjuntos que se le pasó en ESTA llamada - no es lo mismo
+    que "cuántos esperaba Graph en total" (D2/attachment_recovery.py
+    puede llamar esta función con solo un subconjunto de missing_ids,
+    nunca con el manifiesto completo). El cálculo de expected_count real
+    del mensaje vive exclusivamente en attachment_recovery.py, a partir
+    del manifiesto normalizado - nunca de len(atts) aquí.
+    """
     # Si el Completeness Gate ya obtuvo el manifiesto (caso normal: mensaje
     # nuevo, completo desde el primer intento), se reutiliza tal cual en
     # vez de volver a pedirlo a Graph. Si no vino (ej. resync de un mensaje
@@ -1350,7 +1439,7 @@ async def _process_attachments(
         atts = await graph_client.list_attachments(mailbox_email, graph_message_id)
 
     if not atts:
-        return
+        return {"attempted": 0, "succeeded": 0, "failed": 0, "failures": []}
 
     prepared: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
@@ -1482,7 +1571,7 @@ async def _process_attachments(
         )
 
     if not prepared and not failures:
-        return
+        return {"attempted": len(atts), "succeeded": 0, "failed": 0, "failures": []}
 
     with get_db_session() as db:
         existing_count = _attachments_count(db, message_pk=message_pk)
@@ -1530,10 +1619,12 @@ async def _process_attachments(
         if case_id and failures:
             # A5: los fallos por adjunto (sin contentBytes, base64
             # inválido, rechazado por política de extensión/tamaño, sin
-            # sha256) ya no desaparecen en un `continue` silencioso -
-            # quedan aquí, consultables desde el portal. No se reintentan
-            # automáticamente: son errores de contenido/política, no de
-            # disponibilidad temporal, así que reintentar no los resuelve.
+            # sha256, sin graph_attachment_id) ya no desaparecen en un
+            # `continue` silencioso - quedan aquí, consultables desde el
+            # portal. "attempted"/"succeeded" son sobre ESTE lote (todo
+            # el manifiesto en ingestion normal, o solo missing_ids si
+            # esta llamada vino de attachment_recovery.py) - no el total
+            # esperado del mensaje.
             repos.insert_case_event(
                 db,
                 case_id=case_id,
@@ -1545,14 +1636,14 @@ async def _process_attachments(
                 details={
                     "provider_message_id": provider_message_id,
                     "message_pk": message_pk,
-                    "expected": len(atts),
-                    "downloaded": inserted,
+                    "attempted": len(atts),
+                    "succeeded": inserted,
                     "failed": len(failures),
                     "failures": failures,
                 },
             )
             logger.warning(
-                "ATTACHMENTS_PARTIAL_FAILURE | message_pk=%s | expected=%s | downloaded=%s | failed=%s",
+                "ATTACHMENTS_PARTIAL_FAILURE | message_pk=%s | attempted=%s | succeeded=%s | failed=%s",
                 message_pk,
                 len(atts),
                 inserted,
@@ -1566,110 +1657,24 @@ async def _process_attachments(
         provider_message_id,
     )
 
-
-# ---------------------------------------------------------------------------
-# Recuperación de adjuntos pendientes (sin límite de intentos)
-#
-# Cubre dos caminos que dejan un mensaje materializado con has_attachments=1
-# pero sin filas en `attachments`:
-#   1. El caso se creó en modo degradado porque el manifiesto de adjuntos
-#      no estaba listo tras agotar el presupuesto de la cola principal
-#      (ver CASE_CREATED_DEGRADED / attachments_pending en
-#      _process_single_message).
-#   2. Cualquier otro hueco histórico con la misma forma (ej. datos
-#      previos a este cambio).
-#
-# A diferencia de inbound_event_queue (presupuesto fijo de
-# INBOUND_QUEUE_MAX_ATTEMPTS intentos), esta función no tiene límite
-# propio: se invoca periódicamente desde background_jobs y cada corrida
-# reintenta lo que siga pendiente. El caso ya es visible para el agente
-# desde que se creó - esto solo completa los archivos.
-#
-# Limitación conocida: si TODOS los adjuntos de un mensaje fallan de forma
-# permanente (ej. contenido corrupto en origen), este mecanismo los
-# reintentará indefinidamente en cada corrida sin converger. No se
-# implementó todavía la distinción TRANSIENT vs PERMANENT para esos casos
-# (ver diagnóstico) - queda como mejora de una fase posterior. El impacto
-# práctico es bajo: son llamadas de bajo costo (una por mensaje pendiente,
-# acotadas por ATTACHMENT_RECOVERY_BATCH_SIZE) y no afectan el SLA del
-# caso, que ya está visible.
-# ---------------------------------------------------------------------------
-
-async def recover_missing_attachments(*, limit: int = 50) -> dict[str, Any]:
-    mb = settings.MAILBOX_EMAIL
-    if not mb:
-        return {"ok": False, "error": "MAILBOX_EMAIL is required"}
-
-    with get_db_session() as db:
-        rows = db.execute(
-            text("""
-                SELECT m.id, m.provider_message_id, m.case_id, m.conversation_id
-                FROM messages m
-                LEFT JOIN attachments a ON a.message_id = m.id
-                WHERE m.has_attachments = 1
-                  AND a.id IS NULL
-                  AND m.case_id IS NOT NULL
-                ORDER BY m.id ASC
-                LIMIT :limit
-            """),
-            {"limit": limit},
-        ).fetchall()
-
-    if not rows:
-        return {"ok": True, "checked": 0, "recovered": 0, "still_pending": 0}
-
-    recovered = 0
-    still_pending = 0
-
-    for message_pk, provider_message_id, case_id, conversation_id in rows:
-        try:
-            manifest = await graph_client.list_attachments(mb, provider_message_id)
-        except Exception as e:
-            logger.warning(
-                "ATTACHMENT_RECOVERY_FETCH_FAILED | message_pk=%s | err=%s",
-                message_pk,
-                e,
-            )
-            still_pending += 1
-            continue
-
-        if not manifest:
-            logger.info(
-                "ATTACHMENT_RECOVERY_STILL_NOT_READY | message_pk=%s"
-                " | provider_message_id=%s",
-                message_pk,
-                provider_message_id,
-            )
-            still_pending += 1
-            continue
-
-        await _process_attachments(
-            mailbox_email=mb,
-            graph_message_id=provider_message_id,
-            message_pk=int(message_pk),
-            provider_message_id=provider_message_id,
-            case_id=int(case_id) if case_id else None,
-            conversation_id=conversation_id,
-            attachments_manifest=manifest,
-        )
-
-        with get_db_session() as db:
-            still_missing = _attachments_count(db, message_pk=int(message_pk)) == 0
-
-        if still_missing:
-            still_pending += 1
-        else:
-            recovered += 1
-
-    logger.info(
-        "ATTACHMENT_RECOVERY_DONE | checked=%s | recovered=%s | still_pending=%s",
-        len(rows),
-        recovered,
-        still_pending,
-    )
     return {
-        "ok": True,
-        "checked": len(rows),
-        "recovered": recovered,
-        "still_pending": still_pending,
+        "attempted": len(atts),
+        "succeeded": inserted,
+        "failed": len(failures),
+        "failures": failures,
     }
+
+
+# ---------------------------------------------------------------------------
+# Recuperación de adjuntos pendientes: motor movido a D2
+# (worker/app/attachment_recovery.py + attachment_recovery_repo.py).
+#
+# La función recover_missing_attachments() que vivía aquí (basada en
+# "COUNT(*) == 0 filas persistidas") se ELIMINÓ - solo detectaba 0/N y
+# podía declarar "recovered" un mensaje que en realidad seguía en 2/3
+# (bug encontrado en la auditoría D2). El motor nuevo usa identidad real
+# (graph_attachment_id) vía una tabla operacional dedicada
+# (attachment_recovery), con estabilización de dos lecturas y
+# clasificación transient/blocked. Ver background_jobs.py para el
+# wiring del loop.
+# ---------------------------------------------------------------------------

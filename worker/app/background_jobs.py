@@ -18,7 +18,7 @@ from app.settings import settings
 from app.delta_service import run_delta_backstop
 from app.subscriptions_service import ensure_subscription
 from app.reconcile_service import reconcile_recent_inbox
-from app import sync_service
+from app import attachment_recovery
 
 logger = logging.getLogger("app.background")
 
@@ -197,33 +197,41 @@ async def _reconcile_loop(stop_event: asyncio.Event) -> None:
 
 async def _attachment_recovery_loop(stop_event: asyncio.Event) -> None:
     """
-    Reintenta, sin límite propio de intentos, los mensajes ya
-    materializados que se quedaron con has_attachments=1 y sin adjuntos
-    descargados (ver sync_service.recover_missing_attachments). Distinto
-    del presupuesto de INBOUND_QUEUE_MAX_ATTEMPTS de la cola principal -
-    ese presupuesto es para decidir si crear el caso; este loop solo
-    completa archivos de casos que ya existen y son visibles al agente.
+    D2: motor basado en identidad real (graph_attachment_id) vía la
+    tabla operacional attachment_recovery - reemplaza el criterio viejo
+    ("0 filas persistidas", sync_service.recover_missing_attachments,
+    eliminado) que solo detectaba mensajes 0/N y podía dar por
+    "recovered" un mensaje que en realidad seguía en 2/3.
+
+    POLL_SECONDS (30s por defecto) es distinto del BACKOFF real de cada
+    fila (30s/2m/5m/15m/30m -> 6h+jitter, ver attachment_recovery.
+    _recovery_backoff_seconds): el poll solo consulta si hay trabajo
+    vencido (query indexada barata); si no hay filas con
+    available_at <= NOW(), esta corrida no llama a Graph en absoluto.
     """
-    interval = _cfg_int("ATTACHMENT_RECOVERY_INTERVAL_SECONDS", 600)
-    jitter = _cfg_int("ATTACHMENT_RECOVERY_JITTER_SECONDS", 30)
+    poll_seconds = _cfg_int("ATTACHMENT_RECOVERY_POLL_SECONDS", 30)
     batch_size = _cfg_int("ATTACHMENT_RECOVERY_BATCH_SIZE", 50)
 
     await asyncio.sleep(5)
 
     while not stop_event.is_set():
         try:
-            res = await sync_service.recover_missing_attachments(limit=batch_size)
+            counts = await attachment_recovery.run_attachment_recovery_cycle(
+                limit=batch_size
+            )
             logger.info(
-                "Attachment recovery loop | ok=%s | checked=%s | recovered=%s | still_pending=%s",
-                res.get("ok"),
-                res.get("checked"),
-                res.get("recovered"),
-                res.get("still_pending"),
+                "Attachment recovery loop | checked=%s | verifying=%s"
+                " | complete=%s | blocked=%s | pending=%s",
+                counts.get("checked"),
+                counts.get("verifying"),
+                counts.get("complete"),
+                counts.get("blocked"),
+                counts.get("pending"),
             )
         except Exception as e:
             logger.exception("Attachment recovery loop failed: %s", e)
 
-        sleep_s = max(60, interval + random.randint(0, jitter))
+        sleep_s = max(1, poll_seconds)
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=sleep_s)
         except asyncio.TimeoutError:
