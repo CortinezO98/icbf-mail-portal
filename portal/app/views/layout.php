@@ -496,7 +496,6 @@ window.addEventListener('DOMContentLoaded', function () {
   };
 
   const heartbeat = async () => {
-    if (document.visibilityState === 'hidden') return;
     try {
       const data = await postForm(heartbeatUrl);
       // Si hubo una reconexión después del stale timeout, el backend fuerza
