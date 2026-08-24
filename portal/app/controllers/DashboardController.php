@@ -123,9 +123,9 @@ final class DashboardController
 
         $summary['semaforo_legend'] = $summary['semaforo_legend']
             ?? [
-                'VERDE' => '0 a < 5 horas habiles (Dentro del plazo)',
-                'AMARILLO' => '5 a 12 horas hábiles (Próximo a vencer)',
-                'ROJO' => ' > 12 horas hábiles (Vencido)',
+                'VERDE' => '0 a < 2 horas hábiles (Dentro del plazo)',
+                'AMARILLO' => '2 a 4 horas hábiles (Próximo a vencer)',
+                'ROJO' => ' > 4 horas hábiles (Vencido)',
             ];
 
         $semaforoDistribution = $this->metrics->getSemaforoDistribution($uid);

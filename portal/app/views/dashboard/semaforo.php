@@ -90,9 +90,9 @@ $total = count($cases);
 
 // Leyenda contractual (UI)
 $semaforoLegend = [
-    'VERDE' => '0 a < 5 horas hábiles',
-    'AMARILLO' => '5 a 12 horas hábiles',
-    'ROJO' => '> 12 horas hábiles',
+    'VERDE' => '0 a < 2 horas hábiles',
+    'AMARILLO' => '2 a 4 horas hábiles',
+    'ROJO' => '> 4 horas hábiles',
 ];
 
 ?>

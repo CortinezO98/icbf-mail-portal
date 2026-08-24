@@ -53,9 +53,9 @@ $semaforoHint = $summary['semaforo_hint']
     ?? 'Semáforo calculado por horas hábiles (L–V 08:00–17:00).';
 
 $semaforoLegend = $summary['semaforo_legend'] ?? [
-    'VERDE' => '0 a < 5 horas hábiles',
-    'AMARILLO' => '5 a 12 horas hábiles',
-    'ROJO' => '> 12 horas hábiles',
+    'VERDE' => '0 a < 2 horas hábiles',
+    'AMARILLO' => '2 a 4 horas hábiles',
+    'ROJO' => '> 4 horas hábiles',
 ];
 
 $criticalCases = $criticalCases ?? $critical ?? [];

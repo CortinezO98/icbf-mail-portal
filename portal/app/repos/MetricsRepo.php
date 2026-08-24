@@ -93,9 +93,9 @@ final class MetricsRepo
 
     private function semaforoFromBusinessMinutes(int $mins): string
     {
-        // <5h / 5-12h / >12h (mantengo tu regla original: 12h exactas es AMARILLO)
-        if ($mins < 300) return 'VERDE';
-        if ($mins <= 720) return 'AMARILLO';
+        // <2h / 2-4h / >4h (4h exactas es AMARILLO)
+        if ($mins < 120) return 'VERDE';
+        if ($mins <= 240) return 'AMARILLO';
         return 'ROJO';
     }
 
@@ -157,9 +157,9 @@ final class MetricsRepo
 
         $row['semaforo_hint'] = 'Semáforo calculado por horas hábiles (L–V 08:00–17:00) + festivos.';
         $row['semaforo_legend'] = [
-            'VERDE' => '0 a < 5 horas hábiles',
-            'AMARILLO' => '5 a 12 horas hábiles',
-            'ROJO' => '> 12 horas hábiles',
+            'VERDE' => '0 a < 2 horas hábiles',
+            'AMARILLO' => '2 a 4 horas hábiles',
+            'ROJO' => '> 4 horas hábiles',
         ];
 
         return $row;
@@ -387,10 +387,10 @@ final class MetricsRepo
             if ($bizMins < 0) $bizMins = 0;
 
             $state    = $this->semaforoFromBusinessMinutes($bizMins);
-            $breached = ($bizMins > 720) ? 1 : 0;
+            $breached = ($bizMins > 240) ? 1 : 0;
 
-            // due_at hábil: sumar 12h hábiles desde slaStart
-            $dueAt = $clock->addBusinessMinutes($slaStart, 720)->format('Y-m-d H:i:s');
+            // due_at hábil: sumar 4h hábiles desde slaStart
+            $dueAt = $clock->addBusinessMinutes($slaStart, 240)->format('Y-m-d H:i:s');
 
             $upd->execute([
                 ':sla_started_at'   => $slaStart->format('Y-m-d H:i:s'),
