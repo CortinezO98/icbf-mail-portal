@@ -42,6 +42,7 @@ final class AuthController
         $this->render('auth/login.php', [
             'error' => $error,
             'success' => $success,
+            'recaptcha' => $this->config['recaptcha'] ?? [],
         ]);
     }
 
@@ -50,6 +51,30 @@ final class AuthController
         Auth::initSession($this->config);
 
         Csrf::validate($_POST['_csrf'] ?? null);
+
+        $recaptcha = $this->verifyRecaptcha('login');
+        if (!$recaptcha['ok']) {
+            $this->securityLogRepo->log(
+                'RECAPTCHA_LOGIN_REJECTED',
+                null,
+                null,
+                false,
+                [
+                    'reason' => $recaptcha['reason'],
+                    'score' => $recaptcha['score'],
+                    'action' => $recaptcha['action'],
+                    'hostname' => $recaptcha['hostname'],
+                    'error_codes' => $recaptcha['error_codes'],
+                    'ip' => $_SERVER['REMOTE_ADDR'] ?? null,
+                ]
+            );
+
+            $_SESSION['_flash_error'] =
+                'No fue posible validar la seguridad de la solicitud. Intenta nuevamente.';
+
+            header('Location: ' . url('/login'));
+            exit;
+        }
 
         $login = trim((string)($_POST['login'] ?? ''));
         $password = (string)($_POST['password'] ?? '');
@@ -129,6 +154,7 @@ final class AuthController
         $this->render('auth/forgot_password.php', [
             'message' => $message,
             'error' => $error,
+            'recaptcha' => $this->config['recaptcha'] ?? [],
         ]);
     }
 
@@ -137,6 +163,30 @@ final class AuthController
         Auth::initSession($this->config);
 
         Csrf::validate($_POST['_csrf'] ?? null);
+
+        $recaptcha = $this->verifyRecaptcha('password_reset');
+        if (!$recaptcha['ok']) {
+            $this->securityLogRepo->log(
+                'RECAPTCHA_PASSWORD_RESET_REJECTED',
+                null,
+                null,
+                false,
+                [
+                    'reason' => $recaptcha['reason'],
+                    'score' => $recaptcha['score'],
+                    'action' => $recaptcha['action'],
+                    'hostname' => $recaptcha['hostname'],
+                    'error_codes' => $recaptcha['error_codes'],
+                    'ip' => $_SERVER['REMOTE_ADDR'] ?? null,
+                ]
+            );
+
+            $_SESSION['_flash_error'] =
+                'No fue posible validar la seguridad de la solicitud. Intenta nuevamente.';
+
+            header('Location: ' . url('/forgot-password'));
+            exit;
+        }
 
         $email = trim((string)($_POST['email'] ?? ''));
 
@@ -356,6 +406,159 @@ final class AuthController
             header('Location: ' . url('/reset-password?token=' . urlencode($token)));
             exit;
         }
+    }
+
+    /**
+     * Valida Google reCAPTCHA por puntuación.
+     * Cuando está habilitado se comporta fail-closed.
+     */
+    private function verifyRecaptcha(string $expectedAction): array
+    {
+        $cfg = is_array($this->config['recaptcha'] ?? null)
+            ? $this->config['recaptcha']
+            : [];
+
+        if (!(bool)($cfg['enabled'] ?? false)) {
+            return [
+                'ok' => true,
+                'reason' => 'disabled',
+                'score' => null,
+                'action' => null,
+                'hostname' => null,
+                'error_codes' => [],
+            ];
+        }
+
+        $secret = trim((string)($cfg['secret_key'] ?? ''));
+        $token = trim((string)($_POST['g-recaptcha-response'] ?? ''));
+        $minScore = (float)($cfg['min_score'] ?? 0.5);
+        $expectedHostname = strtolower(trim((string)($cfg['hostname'] ?? '')));
+
+        $fail = static function (
+            string $reason,
+            ?float $score = null,
+            ?string $action = null,
+            ?string $hostname = null,
+            array $errorCodes = []
+        ): array {
+            return [
+                'ok' => false,
+                'reason' => $reason,
+                'score' => $score,
+                'action' => $action,
+                'hostname' => $hostname,
+                'error_codes' => $errorCodes,
+            ];
+        };
+
+        if ($secret === '') {
+            return $fail('missing_secret');
+        }
+
+        if ($token === '') {
+            return $fail('missing_token');
+        }
+
+        if (!function_exists('curl_init')) {
+            return $fail('curl_unavailable');
+        }
+
+        $payload = [
+            'secret' => $secret,
+            'response' => $token,
+        ];
+
+        $remoteIp = trim((string)($_SERVER['REMOTE_ADDR'] ?? ''));
+        if ($remoteIp !== '') {
+            $payload['remoteip'] = $remoteIp;
+        }
+
+        $ch = curl_init('https://www.google.com/recaptcha/api/siteverify');
+
+        if ($ch === false) {
+            return $fail('curl_init_failed');
+        }
+
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => http_build_query($payload),
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 3,
+            CURLOPT_TIMEOUT => 5,
+            CURLOPT_HTTPHEADER => [
+                'Content-Type: application/x-www-form-urlencoded',
+            ],
+        ]);
+
+        $raw = curl_exec($ch);
+        $curlError = curl_error($ch);
+        $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($raw === false || $httpCode !== 200) {
+            error_log(
+                '[reCAPTCHA] SiteVerify transport error: HTTP=' .
+                $httpCode .
+                ($curlError !== '' ? ' CURL=' . $curlError : '')
+            );
+
+            return $fail('verify_transport_error');
+        }
+
+        $data = json_decode((string)$raw, true);
+
+        if (!is_array($data)) {
+            return $fail('invalid_google_response');
+        }
+
+        $success = (bool)($data['success'] ?? false);
+        $score = isset($data['score']) ? (float)$data['score'] : 0.0;
+        $action = (string)($data['action'] ?? '');
+        $hostname = strtolower((string)($data['hostname'] ?? ''));
+
+        $errorCodes = [];
+        foreach ((array)($data['error-codes'] ?? []) as $code) {
+            $code = trim((string)$code);
+            if ($code !== '') {
+                $errorCodes[] = $code;
+            }
+        }
+
+        // Incluso si Google devuelve success=true, cualquier error reportado
+        // se considera rechazo para evitar un fail-open silencioso.
+        if (!$success || $errorCodes !== []) {
+            return $fail(
+                'google_rejected',
+                $score,
+                $action,
+                $hostname,
+                $errorCodes
+            );
+        }
+
+        if ($action === '' || !hash_equals($expectedAction, $action)) {
+            return $fail('action_mismatch', $score, $action, $hostname);
+        }
+
+        if (
+            $expectedHostname !== '' &&
+            ($hostname === '' || !hash_equals($expectedHostname, $hostname))
+        ) {
+            return $fail('hostname_mismatch', $score, $action, $hostname);
+        }
+
+        if ($score < $minScore) {
+            return $fail('score_too_low', $score, $action, $hostname);
+        }
+
+        return [
+            'ok' => true,
+            'reason' => 'accepted',
+            'score' => $score,
+            'action' => $action,
+            'hostname' => $hostname,
+            'error_codes' => [],
+        ];
     }
 
     /**

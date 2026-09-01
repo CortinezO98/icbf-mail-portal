@@ -67,6 +67,20 @@ function load_config(): array
 
         'attachments_dir' => rtrim((string)(getenv('PORTAL_ATTACHMENTS_DIR') ?: '/var/lib/icbf-mail-portal/attachments'), "\\/"),
 
+        // Google reCAPTCHA - protección de login y recuperación
+        'recaptcha' => [
+            'enabled' => (int)(getenv('PORTAL_RECAPTCHA_ENABLED') ?: 0) === 1,
+            'site_key' => trim((string)(getenv('PORTAL_RECAPTCHA_SITE_KEY') ?: '')),
+            'secret_key' => trim((string)(getenv('PORTAL_RECAPTCHA_SECRET_KEY') ?: '')),
+            'min_score' => max(
+                0.0,
+                min(1.0, (float)(getenv('PORTAL_RECAPTCHA_MIN_SCORE') ?: 0.5))
+            ),
+            'hostname' => strtolower(
+                trim((string)(getenv('PORTAL_RECAPTCHA_HOSTNAME') ?: 'portalcorreo.asdcloud.co'))
+            ),
+        ],
+
         // Presencia y asignación de agentes (R1/R2)
         'agent_presence' => [
             'heartbeat_seconds' => max(10, (int)(getenv('PORTAL_AGENT_HEARTBEAT_SECONDS') ?: 30)),

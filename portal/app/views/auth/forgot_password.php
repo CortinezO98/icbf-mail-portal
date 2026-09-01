@@ -4,6 +4,10 @@ use function App\Config\url;
 
 $year = date('Y');
 $emailValue = htmlspecialchars((string)($_POST['email'] ?? ''), ENT_QUOTES, 'UTF-8');
+
+$recaptcha = is_array($recaptcha ?? null) ? $recaptcha : [];
+$recaptchaEnabled = (bool)($recaptcha['enabled'] ?? false);
+$recaptchaSiteKey = trim((string)($recaptcha['site_key'] ?? ''));
 ?>
 <div class="login-wrap">
   <div class="login-col">
@@ -52,6 +56,9 @@ $emailValue = htmlspecialchars((string)($_POST['email'] ?? ''), ENT_QUOTES, 'UTF
         <?php endif; ?>
 
         <form method="post" action="<?= htmlspecialchars(url('/forgot-password'), ENT_QUOTES, 'UTF-8') ?>" id="forgotForm" novalidate>
+          <?php if ($recaptchaEnabled): ?>
+          <input type="hidden" name="g-recaptcha-response" id="forgotRecaptchaToken" value="">
+          <?php endif; ?>
           <input
             type="hidden"
             name="_csrf"
@@ -187,3 +194,61 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 }
 </style>
+
+<?php if ($recaptchaEnabled && $recaptchaSiteKey !== ''): ?>
+<script
+  src="https://www.google.com/recaptcha/api.js?render=<?= htmlspecialchars($recaptchaSiteKey, ENT_QUOTES, 'UTF-8') ?>"
+></script>
+
+<script>
+(function () {
+  const form = document.getElementById('forgotForm');
+  const tokenInput = document.getElementById('forgotRecaptchaToken');
+  const submitBtn = document.getElementById('submitBtn');
+  const submitSpinner = document.getElementById('submitSpinner');
+
+  const siteKey = <?= json_encode(
+      $recaptchaSiteKey,
+      JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+  ) ?>;
+
+  if (!form || !tokenInput || !siteKey) return;
+
+  let recaptchaReadyToSubmit = false;
+
+  form.addEventListener('submit', function (event) {
+    if (recaptchaReadyToSubmit || event.defaultPrevented) return;
+
+    event.preventDefault();
+
+    if (submitBtn) submitBtn.disabled = true;
+
+    if (
+      !window.grecaptcha
+    ) {
+      if (submitBtn) submitBtn.disabled = false;
+      if (submitSpinner) submitSpinner.classList.add('d-none');
+
+      alert('No fue posible cargar la validación de seguridad. Recarga la página e intenta nuevamente.');
+      return;
+    }
+
+    grecaptcha.ready(function () {
+      grecaptcha
+        .execute(siteKey, { action: 'password_reset' })
+        .then(function (token) {
+          tokenInput.value = token;
+          recaptchaReadyToSubmit = true;
+          form.submit();
+        })
+        .catch(function () {
+          if (submitBtn) submitBtn.disabled = false;
+          if (submitSpinner) submitSpinner.classList.add('d-none');
+
+          alert('No fue posible completar la validación de seguridad. Intenta nuevamente.');
+        });
+    });
+  });
+})();
+</script>
+<?php endif; ?>

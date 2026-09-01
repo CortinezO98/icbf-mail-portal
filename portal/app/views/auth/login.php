@@ -3,6 +3,10 @@ use App\Auth\Csrf;
 use function App\Config\url;
 
 $year = date('Y');
+
+$recaptcha = is_array($recaptcha ?? null) ? $recaptcha : [];
+$recaptchaEnabled = (bool)($recaptcha['enabled'] ?? false);
+$recaptchaSiteKey = trim((string)($recaptcha['site_key'] ?? ''));
 ?>
 <div class="login-wrap">
   <div class="login-col">
@@ -40,7 +44,10 @@ $year = date('Y');
           </div>
         <?php endif; ?>
 
-        <form method="post" action="<?= htmlspecialchars(url('/login'), ENT_QUOTES, 'UTF-8') ?>" novalidate>
+        <form method="post" action="<?= htmlspecialchars(url('/login'), ENT_QUOTES, 'UTF-8') ?>" id="loginForm" novalidate>
+          <?php if ($recaptchaEnabled): ?>
+          <input type="hidden" name="g-recaptcha-response" id="loginRecaptchaToken" value="">
+          <?php endif; ?>
           <input
             type="hidden"
             name="_csrf"
@@ -74,7 +81,7 @@ $year = date('Y');
           </div>
 
           <div class="d-grid">
-            <button type="submit" class="btn btn-brand">
+            <button type="submit" class="btn btn-brand" id="loginSubmitBtn">
               <i class="bi bi-box-arrow-in-right me-1"></i>Ingresar
             </button>
           </div>
@@ -97,3 +104,57 @@ $year = date('Y');
 
   </div>
 </div>
+
+<?php if ($recaptchaEnabled && $recaptchaSiteKey !== ''): ?>
+<script
+  src="https://www.google.com/recaptcha/api.js?render=<?= htmlspecialchars($recaptchaSiteKey, ENT_QUOTES, 'UTF-8') ?>"
+></script>
+
+<script>
+(function () {
+  const form = document.getElementById('loginForm');
+  const tokenInput = document.getElementById('loginRecaptchaToken');
+  const submitBtn = document.getElementById('loginSubmitBtn');
+  const siteKey = <?= json_encode(
+      $recaptchaSiteKey,
+      JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+  ) ?>;
+
+  if (!form || !tokenInput || !siteKey) return;
+
+  let recaptchaReadyToSubmit = false;
+
+  form.addEventListener('submit', function (event) {
+    if (recaptchaReadyToSubmit) return;
+
+    event.preventDefault();
+
+    if (submitBtn) submitBtn.disabled = true;
+
+    if (
+      !window.grecaptcha
+    ) {
+      if (submitBtn) submitBtn.disabled = false;
+      alert('No fue posible cargar la validación de seguridad. Recarga la página e intenta nuevamente.');
+      return;
+    }
+
+    grecaptcha.ready(function () {
+      grecaptcha
+        .execute(siteKey, { action: 'login' })
+        .then(function (token) {
+          tokenInput.value = token;
+          recaptchaReadyToSubmit = true;
+
+          // submit() evita pedir un segundo token en el mismo envío.
+          form.submit();
+        })
+        .catch(function () {
+          if (submitBtn) submitBtn.disabled = false;
+          alert('No fue posible completar la validación de seguridad. Intenta nuevamente.');
+        });
+    });
+  });
+})();
+</script>
+<?php endif; ?>
