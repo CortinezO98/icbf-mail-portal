@@ -64,7 +64,8 @@ final class EventsRepo
         ?int $fromStatusId,
         ?int $toStatusId,
         string $ipAddress,
-        string $userAgent
+        string $userAgent,
+        bool $priorityOverride = false
     ): void {
         $this->insertEvent(
             caseId: $caseId,
@@ -78,6 +79,7 @@ final class EventsRepo
             details: [
                 'assigned_to' => $assignedToUserId,
                 'mode' => 'manual',
+                'priority_override' => $priorityOverride,
             ],
         );
     }

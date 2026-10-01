@@ -71,6 +71,18 @@ final class ReportsController
         $start = $this->safeDate($_POST['start_date'] ?? '') ?? date('Y-m-d', strtotime('-7 days'));
         $end   = $this->safeDate($_POST['end_date'] ?? '') ?? date('Y-m-d');
 
+        // ✅ Tipo de reporte: 'sla' (comportamiento original) o los 3 tipos
+        // de agentes agregados. results.php tiene columnas fijas de
+        // casos/SLA (Asunto, Remitente, Vence...) - mostrar ahí un dataset
+        // de agentes se vería roto, así que los tipos de agente SIEMPRE se
+        // exportan (csv/excel), nunca se renderizan en la vista HTML
+        // compartida. Se fuerza csv como defensa en el backend por si
+        // llega format=html para un tipo de agente (la UI ya no debería
+        // permitirlo, ver reports/index.php).
+        $type = strtolower(trim((string)($_POST['type'] ?? 'sla')));
+        $allowedTypes = ['sla', 'agent_presence_history', 'agent_presence_summary', 'agent_presence_live'];
+        if (!in_array($type, $allowedTypes, true)) $type = 'sla';
+
         // filtros (compatibles con tu UI)
         $status   = strtoupper(trim((string)($_POST['status'] ?? '')));   // NUEVO/ASIGNADO/EN_PROCESO/RESPONDIDO/CERRADO
         $agentId  = trim((string)($_POST['agent_id'] ?? ''));
@@ -81,24 +93,23 @@ final class ReportsController
         $agentIdInt = $agentId !== '' ? (int)$agentId : null;
 
         if (!in_array($format, ['html', 'csv', 'excel'], true)) $format = 'html';
-
-        // Dataset base (misma fuente que export)
-        $rows = $this->repo->exportSlaDataset($start, $end, null);
-
-        // Filtros adicionales sin tocar repo (no rompe)
-        $rows = $this->filterRows($rows, $status, $agentIdInt, $semaforo);
+        if ($type !== 'sla' && $format === 'html') $format = 'csv';
 
         // Export si aplica (reusa export() para auditoría y storage)
         if ($format === 'csv' || $format === 'excel') {
-            $_GET['type'] = 'sla';
+            $_GET['type'] = $type;
             $_GET['format'] = ($format === 'excel') ? 'xlsx' : 'csv';
             $_GET['start'] = $start;
             $_GET['end'] = $end;
+            if ($agentIdInt) $_GET['user_id'] = $agentIdInt;
             $this->export();
             return;
         }
 
-        // Summary para results.php
+        // Solo llega aquí type === 'sla' (por la regla de arriba) - mismo
+        // comportamiento original, sin cambios.
+        $rows = $this->repo->exportSlaDataset($start, $end, null);
+        $rows = $this->filterRows($rows, $status, $agentIdInt, $semaforo);
         $summary = $this->buildSummary($rows);
 
         $this->render('reports/results.php', [
@@ -120,20 +131,42 @@ final class ReportsController
     public function export(): void
     {
         // GET /reports/export?type=sla&start=YYYY-MM-DD&end=YYYY-MM-DD&format=csv|xlsx&mailbox_id=#
+        // Tipos de agente: type=agent_presence_history|agent_presence_summary|agent_presence_live
+        //   + user_id=# opcional para filtrar por un solo agente
         $type = strtolower(trim((string)($_GET['type'] ?? 'sla')));
         $format = strtolower(trim((string)($_GET['format'] ?? 'xlsx')));
 
         $end = $this->safeDate($_GET['end'] ?? date('Y-m-d')) ?? date('Y-m-d');
         $start = $this->safeDate($_GET['start'] ?? date('Y-m-d', strtotime('-6 days'))) ?? date('Y-m-d', strtotime('-6 days'));
         $mailboxId = isset($_GET['mailbox_id']) && $_GET['mailbox_id'] !== '' ? (int)$_GET['mailbox_id'] : null;
+        $userId2 = isset($_GET['user_id']) && $_GET['user_id'] !== '' ? (int)$_GET['user_id'] : null;
 
-        if (!in_array($type, ['sla'], true)) {
+        $allowedExportTypes = ['sla', 'agent_presence_history', 'agent_presence_summary', 'agent_presence_live'];
+        if (!in_array($type, $allowedExportTypes, true)) {
             http_response_code(400);
             echo "Tipo de export no soportado";
             exit;
         }
 
-        $rows = $this->repo->exportSlaDataset($start, $end, $mailboxId);
+        switch ($type) {
+            case 'agent_presence_history':
+                $rows = $this->repo->exportAgentPresenceHistoryDataset($start, $end, $userId2);
+                break;
+            case 'agent_presence_summary':
+                $rows = $this->repo->exportAgentPresenceSummaryDataset($start, $end, $userId2);
+                break;
+            case 'agent_presence_live':
+                // Snapshot en tiempo real - NO usa rango de fechas, 90s es
+                // el mismo default que AGENT_PRESENCE_STALE_SECONDS del
+                // worker (ver worker/app/settings.py); si ese valor cambia
+                // ahí, actualizar también aquí para que el reporte siga
+                // siendo consistente con el criterio real de asignación.
+                $rows = $this->repo->exportAgentPresenceLiveDataset(90);
+                break;
+            default:
+                $rows = $this->repo->exportSlaDataset($start, $end, $mailboxId);
+                break;
+        }
 
         // Guardar el archivo en portal/storage/reports y registrar en generated_reports
         $reportsDir = dirname(__DIR__, 2) . '/storage/reports';
@@ -141,9 +174,14 @@ final class ReportsController
             mkdir($reportsDir, 0777, true);
         }
 
-        $baseName = "reporte_{$type}_{$start}_{$end}";
+        $baseName = ($type === 'agent_presence_live')
+            ? "reporte_{$type}_" . date('Ymd_His')
+            : "reporte_{$type}_{$start}_{$end}";
         if ($mailboxId) {
             $baseName .= "_mb{$mailboxId}";
+        }
+        if ($userId2) {
+            $baseName .= "_u{$userId2}";
         }
 
         $userId = (int)(Auth::user()['id'] ?? 0);
@@ -175,7 +213,7 @@ final class ReportsController
             $path = $reportsDir . '/' . $baseName . '_' . date('Ymd_His') . '.xlsx';
 
             // ✅ Guardar XLSX (método compatible con tu versión)
-            $this->saveXlsx($path, $rows);
+            $this->saveXlsx($path, $rows, $type);
 
             $params = [
                 'type' => $type,
@@ -203,7 +241,7 @@ final class ReportsController
 
         // CSV guardado
         $path = $reportsDir . '/' . $baseName . '_' . date('Ymd_His') . '.csv';
-        $this->saveCsv($path, $rows);
+        $this->saveCsv($path, $rows, $type);
 
         $params = [
             'type' => $type,
@@ -375,21 +413,38 @@ final class ReportsController
      * - Si existe exportColumnOrder() en el repo: usa ese orden fijo.
      * - Si no existe: usa el orden natural del dataset.
      */
-    private function getHeaderMapAndKeys(array $rows): array
+    /**
+     * ✅ Mapea 'type' -> los métodos exportXxxHeaderMap()/exportXxxColumnOrder()
+     * del repo. 'sla' conserva el comportamiento original (exportHeaderMap/
+     * exportColumnOrder, sin sufijo) para no tocar nada de lo existente.
+     */
+    private function headerMapMethodsForType(string $type): array
+    {
+        return match ($type) {
+            'agent_presence_history' => ['exportAgentPresenceHistoryHeaderMap', 'exportAgentPresenceHistoryColumnOrder'],
+            'agent_presence_summary' => ['exportAgentPresenceSummaryHeaderMap', 'exportAgentPresenceSummaryColumnOrder'],
+            'agent_presence_live'    => ['exportAgentPresenceLiveHeaderMap', 'exportAgentPresenceLiveColumnOrder'],
+            default                  => ['exportHeaderMap', 'exportColumnOrder'],
+        };
+    }
+
+    private function getHeaderMapAndKeys(array $rows, string $type = 'sla'): array
     {
         if (empty($rows)) {
             return [[], []];
         }
 
-        $headerMap = method_exists($this->repo, 'exportHeaderMap')
-            ? (array)$this->repo->exportHeaderMap()
+        [$headerMapMethod, $columnOrderMethod] = $this->headerMapMethodsForType($type);
+
+        $headerMap = method_exists($this->repo, $headerMapMethod)
+            ? (array)$this->repo->{$headerMapMethod}()
             : [];
 
         $rowKeys = array_keys($rows[0]);
 
         // ✅ Orden fijo si existe en el repo
-        if (method_exists($this->repo, 'exportColumnOrder')) {
-            $ordered = (array)$this->repo->exportColumnOrder();
+        if (method_exists($this->repo, $columnOrderMethod)) {
+            $ordered = (array)$this->repo->{$columnOrderMethod}();
 
             // solo columnas presentes en el dataset
             $keys = array_values(array_filter($ordered, static fn($k) => in_array($k, $rowKeys, true)));
@@ -407,7 +462,7 @@ final class ReportsController
         return [$keys, $headers];
     }
 
-    private function saveCsv(string $path, array $rows): void
+    private function saveCsv(string $path, array $rows, string $type = 'sla'): void
     {
         $f = fopen($path, 'wb');
         if (!$f) throw new \RuntimeException("No se pudo crear archivo: {$path}");
@@ -418,7 +473,7 @@ final class ReportsController
             return;
         }
 
-        [$keys, $headers] = $this->getHeaderMapAndKeys($rows);
+        [$keys, $headers] = $this->getHeaderMapAndKeys($rows, $type);
 
         // ✅ headers en español
         fputcsv($f, $headers);
@@ -438,7 +493,17 @@ final class ReportsController
         fclose($f);
     }
 
-    private function saveXlsx(string $path, array $rows): void
+    private function sheetTitleForType(string $type): string
+    {
+        return match ($type) {
+            'agent_presence_history' => 'Historico Agentes',
+            'agent_presence_summary' => 'Resumen Agentes',
+            'agent_presence_live'    => 'Agentes Tiempo Real',
+            default                  => 'SLA',
+        };
+    }
+
+    private function saveXlsx(string $path, array $rows, string $type = 'sla'): void
     {
         // ✅ Asegura que PhpSpreadsheet esté cargado (usa el vendor del project root)
         $autoload = realpath(dirname(__DIR__, 3) . '/vendor/autoload.php');
@@ -448,12 +513,12 @@ final class ReportsController
 
         $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
         $sheet = $spreadsheet->getActiveSheet();
-        $sheet->setTitle('SLA');
+        $sheet->setTitle($this->sheetTitleForType($type));
 
         if (empty($rows)) {
             $sheet->setCellValue('A1', 'sin_datos');
         } else {
-            [$keys, $headers] = $this->getHeaderMapAndKeys($rows);
+            [$keys, $headers] = $this->getHeaderMapAndKeys($rows, $type);
 
             // Headers (API compatible con tu versión 5.4.0)
             $col = 1;

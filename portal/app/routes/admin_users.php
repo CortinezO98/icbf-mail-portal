@@ -94,6 +94,15 @@ $routes = [
             \App\Middleware\require_role(['ADMIN']);
             $controller->import();
         },
+        // El botón "Exportar" de admin/users/index.php envía un <form
+        // method="post"> - esta ruta faltaba bajo POST (solo existía
+        // bajo GET), causando "Admin route not found: /export" cada vez
+        // que se usaba el botón real de la vista.
+        '/export' => function () use ($controller) {
+            \App\Middleware\require_login();
+            \App\Middleware\require_role(['ADMIN']);
+            $controller->exportExcel();
+        },
     ],
 ];
 

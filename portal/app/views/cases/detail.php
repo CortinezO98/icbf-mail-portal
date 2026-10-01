@@ -283,6 +283,11 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
     <h3 class="m-0"><?= esc($case['case_number'] ?? '') ?></h3>
     <div class="text-muted small d-flex flex-wrap gap-2 align-items-center mt-1">
       <span class="badge badge-status <?= esc($statusClass) ?>"><?= esc($statusName ?: $statusCode) ?></span>
+      <?php if (!empty($case['had_priority_override'])): ?>
+        <span class="badge bg-warning text-dark" title="Este caso fue asignado o reasignado con prioridad, superando el límite normal de 2 casos activos por agente.">
+          <i class="bi bi-lightning-fill"></i> Reasignado prioritario
+        </span>
+      <?php endif; ?>
       <span class="badge <?= esc($slaBadge) ?>">ANS: <?= esc($slaLabel) ?></span>
       <span class="text-muted">• Recibido: <?= esc($case['received_at'] ?? '—') ?></span>
     </div>
@@ -640,15 +645,29 @@ $showClose      = $canAgentFlowActions && $statusCode === 'RESPONDIDO';
                     $agId   = (int)($ag['id'] ?? 0);
                     $agName = (string)($ag['full_name'] ?? '');
                     $agUser = (string)($ag['username'] ?? '');
+                    $agActiveCases = (int)($ag['active_cases'] ?? 0);
+                    $agLabel = $agName . ' (' . $agUser . ')';
+                    if ($agActiveCases >= 2) {
+                        $agLabel .= ' - ' . $agActiveCases . ' casos activos (requiere prioritaria)';
+                    } elseif ($agActiveCases === 1) {
+                        $agLabel .= ' - 1 caso activo';
+                    }
                   ?>
                   <option value="<?= $agId ?>">
-                    <?= esc($agName . ' (' . $agUser . ')') ?>
+                    <?= esc($agLabel) ?>
                   </option>
                 <?php endforeach; ?>
               </select>
               <div class="form-text">
                 Solo supervisores/administradores pueden asignar casos.
               </div>
+            </div>
+
+            <div class="mb-2 form-check">
+              <input class="form-check-input" type="checkbox" name="priority_override" value="1" id="priorityOverride">
+              <label class="form-check-label small" for="priorityOverride">
+                <strong>Asignación prioritaria</strong> - permite superar el límite de 2 casos activos por agente. Usar solo para casos urgentes que deban tramitarse de inmediato.
+              </label>
             </div>
 
             <button class="btn btn-brand w-100" type="submit">

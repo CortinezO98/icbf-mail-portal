@@ -112,17 +112,30 @@ $agents = $agents ?? [];
             <input type="hidden" name="_csrf" value="<?= esc($csrfToken) ?>">
 
             <div class="row g-3">
-              <div class="col-md-6">
+              <div class="col-12">
+                <label class="form-label">Tipo de Reporte</label>
+                <select name="type" id="reportType" class="form-select">
+                  <option value="sla" selected>Casos / SLA</option>
+                  <option value="agent_presence_summary">Agentes — Resumen (horas por estado, por día)</option>
+                  <option value="agent_presence_history">Agentes — Histórico detallado de estados</option>
+                  <option value="agent_presence_live">Agentes — Estado en Tiempo Real (ahora mismo)</option>
+                </select>
+                <small class="text-muted" id="reportTypeHint">
+                  Casos/SLA: exportable en Vista HTML, CSV o Excel.
+                </small>
+              </div>
+
+              <div class="col-md-6" id="fieldStartDate">
                 <label class="form-label">Fecha Desde</label>
                 <input type="date" name="start_date" class="form-control" value="<?= esc(date('Y-m-d', strtotime('-7 days'))) ?>">
               </div>
 
-              <div class="col-md-6">
+              <div class="col-md-6" id="fieldEndDate">
                 <label class="form-label">Fecha Hasta</label>
                 <input type="date" name="end_date" class="form-control" value="<?= esc(date('Y-m-d')) ?>">
               </div>
 
-              <div class="col-md-6">
+              <div class="col-md-6" id="fieldStatus">
                 <label class="form-label">Estado del Caso</label>
                 <select name="status" class="form-select">
                   <option value="">Todos</option>
@@ -135,7 +148,7 @@ $agents = $agents ?? [];
               </div>
 
               <div class="col-md-6">
-                <label class="form-label">Agente</label>
+                <label class="form-label" id="fieldAgentLabel">Agente</label>
                 <select name="agent_id" class="form-select">
                   <option value="">Todos</option>
                   <?php foreach ($agents as $agent): ?>
@@ -144,9 +157,12 @@ $agents = $agents ?? [];
                     </option>
                   <?php endforeach; ?>
                 </select>
+                <small class="text-muted" id="fieldAgentHint" style="display:none;">
+                  Opcional — deja "Todos" para incluir a todo el equipo.
+                </small>
               </div>
 
-              <div class="col-md-6">
+              <div class="col-md-6" id="fieldSemaforo">
                 <label class="form-label">Semáforo (SLA)</label>
                 <select name="semaforo" class="form-select">
                   <option value="">Todos</option>
@@ -160,7 +176,7 @@ $agents = $agents ?? [];
 
               <div class="col-md-6">
                 <label class="form-label">Formato</label>
-                <select name="format" class="form-select" required>
+                <select name="format" id="reportFormat" class="form-select" required>
                   <option value="html" selected>Vista HTML</option>
                   <option value="csv">CSV</option>
                   <option value="excel">Excel</option>
@@ -227,7 +243,50 @@ function resetForm() {
   f.reset();
   f.querySelector('input[name="start_date"]').value = '<?= esc(date('Y-m-d', strtotime('-7 days'))) ?>';
   f.querySelector('input[name="end_date"]').value = '<?= esc(date('Y-m-d')) ?>';
+  applyReportTypeUI();
 }
+
+/**
+ * Ajusta el formulario según el tipo de reporte elegido:
+ * - Casos/SLA: comportamiento original, sin cambios.
+ * - Agentes (resumen/histórico): oculta filtros de casos (Estado, Semáforo)
+ *   que no aplican; "Vista HTML" no es una opción real para estos tipos
+ *   (resultados.php tiene columnas fijas de casos) así que se retira del
+ *   selector de formato - el backend igual lo forzaría a CSV como defensa,
+ *   pero es más claro no ofrecerlo.
+ * - Agentes (tiempo real): además de lo anterior, oculta el rango de
+ *   fechas - el snapshot siempre es "ahora mismo", no admite rango.
+ */
+function applyReportTypeUI() {
+  const type = document.getElementById('reportType').value;
+  const isAgentReport = type.startsWith('agent_presence');
+  const isLive = type === 'agent_presence_live';
+
+  document.getElementById('fieldStatus').style.display = isAgentReport ? 'none' : '';
+  document.getElementById('fieldSemaforo').style.display = isAgentReport ? 'none' : '';
+  document.getElementById('fieldStartDate').style.display = isLive ? 'none' : '';
+  document.getElementById('fieldEndDate').style.display = isLive ? 'none' : '';
+  document.getElementById('fieldAgentLabel').textContent = isAgentReport ? 'Agente (opcional)' : 'Agente';
+  document.getElementById('fieldAgentHint').style.display = isAgentReport ? '' : 'none';
+
+  const formatSelect = document.getElementById('reportFormat');
+  const htmlOption = formatSelect.querySelector('option[value="html"]');
+  const hint = document.getElementById('reportTypeHint');
+
+  if (isAgentReport) {
+    htmlOption.disabled = true;
+    if (formatSelect.value === 'html') formatSelect.value = 'excel';
+    hint.textContent = isLive
+      ? 'Estado en Tiempo Real: siempre exporta el momento actual (no usa rango de fechas). Descargable en CSV o Excel.'
+      : 'Reportes de Agentes: descargables en CSV o Excel (no disponible en Vista HTML).';
+  } else {
+    htmlOption.disabled = false;
+    hint.textContent = 'Casos/SLA: exportable en Vista HTML, CSV o Excel.';
+  }
+}
+
+document.getElementById('reportType').addEventListener('change', applyReportTypeUI);
+document.addEventListener('DOMContentLoaded', applyReportTypeUI);
 
 document.getElementById('reportForm').addEventListener('submit', function(e) {
   const start = this.querySelector('input[name="start_date"]').value;

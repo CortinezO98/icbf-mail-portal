@@ -56,6 +56,7 @@ class GraphClient:
         return {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
+            "Prefer": 'IdType="immutable"',
         }
 
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
@@ -295,7 +296,7 @@ class GraphClient:
                 "$select": "id,receivedDateTime,createdDateTime",
             }
             headers = await self._headers()
-            headers["Prefer"] = f"odata.maxpagesize={int(page_size)}"
+            headers["Prefer"] = f'odata.maxpagesize={int(page_size)}, IdType="immutable"'
             resp = await self._request("GET", delta_url, params=params, headers=headers)
 
         status = resp.status_code

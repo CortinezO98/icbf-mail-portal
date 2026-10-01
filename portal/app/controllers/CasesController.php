@@ -146,9 +146,17 @@ final class CasesController
 
         $agents = [];
         if (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN')) {
+            // Límite artificialmente alto (9999): el dropdown debe mostrar
+            // TODOS los agentes disponibles, incluidos los que ya tienen
+            // 2+ casos activos - la asignación prioritaria (checkbox en
+            // cases/detail.php + AssignmentsController::assign) necesita
+            // poder elegirlos. La validación real de capacidad sigue
+            // ocurriendo en el backend al momento de asignar; esto solo
+            // cambia qué opciones aparecen en el <select>. El filtro de
+            // disponibilidad real (DISPONIBLE, heartbeat vivo) no cambia.
             $agents = $this->usersRepo->listAvailableAgentsForAssignment(
                 (int)($this->config['agent_presence']['stale_seconds'] ?? 90),
-                (int)($this->config['agent_presence']['max_active_cases'] ?? 2)
+                9999
             );
         }
 

@@ -151,7 +151,13 @@ final class CasesRepo
                     c.due_at, c.sla_state,
                     c.assigned_user_id,
                     cs.code AS status_code, cs.name AS status_name,
-                    u.full_name AS assigned_user_name
+                    u.full_name AS assigned_user_name,
+                    EXISTS (
+                        SELECT 1 FROM case_events ce
+                        WHERE ce.case_id = c.id
+                          AND ce.event_type = 'ASSIGNED'
+                          AND JSON_EXTRACT(ce.details_json, '$.priority_override') = true
+                    ) AS had_priority_override
                 FROM cases c
                 JOIN case_statuses cs ON cs.id = c.status_id
                 LEFT JOIN users u ON u.id = c.assigned_user_id";
@@ -253,7 +259,13 @@ final class CasesRepo
         $sql = "SELECT
                   c.*,
                   cs.code AS status_code, cs.name AS status_name,
-                  u.full_name AS assigned_user_name, u.username AS assigned_username
+                  u.full_name AS assigned_user_name, u.username AS assigned_username,
+                  EXISTS (
+                    SELECT 1 FROM case_events ce
+                    WHERE ce.case_id = c.id
+                      AND ce.event_type = 'ASSIGNED'
+                      AND JSON_EXTRACT(ce.details_json, '$.priority_override') = true
+                  ) AS had_priority_override
                 FROM cases c
                 JOIN case_statuses cs ON cs.id = c.status_id
                 LEFT JOIN users u ON u.id = c.assigned_user_id

@@ -502,6 +502,11 @@ $casesCount = count($cases ?? []);
                                         <span class="badge rounded-pill <?= $statusClass ?> px-3 py-2">
                                             <?= esc($statusName) ?>
                                         </span>
+                                        <?php if (!empty($c['had_priority_override'])): ?>
+                                            <span class="badge bg-warning text-dark d-block mt-1" title="Asignado o reasignado con prioridad, superando el límite normal de 2 casos activos por agente.">
+                                                <i class="bi bi-lightning-fill"></i> Prioritario
+                                            </span>
+                                        <?php endif; ?>
                                     </td>
 
                                     <td class="text-center">

@@ -140,6 +140,23 @@ final class ReportsRepo
               c.in_process_at,
               c.first_response_at,
               c.closed_at,
+              c.closed_ticket AS radicado_cierre,
+              c.closed_note AS observacion_cierre,
+              (
+                SELECT CASE
+                    WHEN JSON_EXTRACT(ce.details_json, '$.priority_override') = true THEN 'Sí'
+                    ELSE 'No'
+                END
+                FROM case_events ce
+                WHERE ce.case_id = c.id
+                  AND ce.event_type = 'ASSIGNED'
+                ORDER BY ce.created_at DESC
+                LIMIT 1
+              ) AS asignacion_prioritaria,
+              c.escalated_at,
+              c.escalated_by_user_id,
+              ue.full_name AS escalated_by_user,
+              c.escalated_note,
               c.is_responded,
               c.due_at,
               c.sla_state,
@@ -198,6 +215,7 @@ final class ReportsRepo
             FROM cases c
             JOIN case_statuses cs ON cs.id = c.status_id
             LEFT JOIN users u ON u.id = c.assigned_user_id
+            LEFT JOIN users ue ON ue.id = c.escalated_by_user_id
             LEFT JOIN case_sla_tracking cst ON cst.case_id = c.id
 
             LEFT JOIN (
@@ -313,6 +331,13 @@ final class ReportsRepo
             'in_process_at'             => 'Fecha Inicio Gestión',
             'first_response_at'         => 'Fecha Primera Respuesta',
             'closed_at'                 => 'Fecha Cierre',
+            'radicado_cierre'           => 'Radicado de Cierre',
+            'observacion_cierre'        => 'Observación de Cierre (Tipificación)',
+            'asignacion_prioritaria'    => 'Asignación Prioritaria (supera límite de 2 casos)',
+            'escalated_at'              => 'Fecha de Escalamiento',
+            'escalated_by_user_id'      => 'ID Usuario que Escaló',
+            'escalated_by_user'         => 'Usuario que Escaló',
+            'escalated_note'            => 'Observación de Escalamiento',
             'is_responded'              => 'Respondido (1/0)',
             'due_at'                    => 'Vencimiento (cases.due_at)',
             'sla_state'                 => 'Estado SLA (cases)',
@@ -364,6 +389,9 @@ final class ReportsRepo
             'assigned_user_id', 'assigned_user',
             'received_at', 'assigned_at', 'in_process_at',
             'first_response_at', 'closed_at',
+            'radicado_cierre', 'observacion_cierre', 'asignacion_prioritaria',
+            'escalated_at', 'escalated_by_user_id',
+            'escalated_by_user', 'escalated_note',
             'is_responded', 'due_at', 'sla_state',
             'current_sla_state', 'breached',
             'sla_started_at', 'sla_due_at',
@@ -495,5 +523,295 @@ final class ReportsRepo
         $st->bindValue(':offset', $offset,   PDO::PARAM_INT);
         $st->execute();
         return $st->fetchAll() ?: [];
+    }
+
+    // =====================================================================
+    // Reportería de agentes: histórico de estados, resumen agregado y
+    // snapshot en tiempo real. Misma tabla base (agent_presence_history /
+    // agent_presence) que ya usa el assignment_worker para decidir a quién
+    // asignar casos - este reporte no depende de ninguna tabla nueva.
+    // =====================================================================
+
+    /**
+     * Detalle forense: una fila por cada transición de estado de cada
+     * agente dentro del rango. ended_at puede venir NULL si el tramo
+     * sigue abierto (el agente sigue en ese estado en este momento).
+     */
+    public function exportAgentPresenceHistoryDataset(
+        string $startDate,
+        string $endDate,
+        ?int $userId = null
+    ): array {
+        $whereUser = $userId ? " AND h.user_id = :uid " : "";
+
+        // 'tipo_evento' distingue explícitamente si la fila representa una
+        // acción real del agente (PORTAL/LOGOUT) o un evento automático del
+        // sistema de heartbeat (HEARTBEAT_INIT/HEARTBEAT_RECONNECT) - ver
+        // AgentPresenceRepo::heartbeat(). Un HEARTBEAT_RECONNECT ocurre
+        // cuando el navegador deja de enviar heartbeat por más de
+        // AGENT_PRESENCE_STALE_SECONDS (típicamente porque el navegador
+        // limita los timers de una pestaña en segundo plano, o hay un
+        // microcorte de red) y luego reconecta - el agente NO tocó nada,
+        // el sistema simplemente confirma que sigue conectado antes de
+        // seguir considerándolo disponible. Sin esta distinción, el
+        // reporte hacía ver como "cambios de estado" del agente lo que en
+        // realidad eran reconexiones técnicas.
+        $sql = "
+            SELECT
+              h.id AS history_id,
+              h.user_id,
+              u.full_name AS agente,
+              u.email AS agente_email,
+              aps.code AS estado_code,
+              aps.name AS estado_nombre,
+              h.started_at,
+              h.ended_at,
+              (h.ended_at IS NULL) AS estado_abierto,
+              TIMESTAMPDIFF(SECOND, h.started_at, COALESCE(h.ended_at, NOW(6))) AS duracion_segundos,
+              ROUND(TIMESTAMPDIFF(SECOND, h.started_at, COALESCE(h.ended_at, NOW(6))) / 60, 2) AS duracion_minutos,
+              ROUND(TIMESTAMPDIFF(SECOND, h.started_at, COALESCE(h.ended_at, NOW(6))) / 3600, 2) AS duracion_horas,
+              h.source AS origen_cambio,
+              CASE h.source
+                WHEN 'PORTAL' THEN 'Cambio Manual del Agente'
+                WHEN 'LOGOUT' THEN 'Cierre de Sesión'
+                WHEN 'HEARTBEAT_INIT' THEN 'Primera Conexión Detectada'
+                WHEN 'HEARTBEAT_RECONNECT' THEN 'Reconexión Automática (sin acción del agente)'
+                ELSE h.source
+              END AS tipo_evento,
+              (h.source IN ('HEARTBEAT_INIT', 'HEARTBEAT_RECONNECT')) AS es_evento_automatico,
+              cu.full_name AS cambiado_por
+            FROM agent_presence_history h
+            JOIN users u ON u.id = h.user_id
+            JOIN agent_presence_statuses aps ON aps.id = h.status_id
+            LEFT JOIN users cu ON cu.id = h.changed_by_user_id
+            WHERE h.started_at < :end_next_day
+              AND (h.ended_at IS NULL OR h.ended_at >= :start)
+              {$whereUser}
+            ORDER BY h.user_id ASC, h.started_at ASC
+        ";
+
+        $params = [
+            ':start' => $startDate . ' 00:00:00',
+            ':end_next_day' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00',
+        ];
+        if ($userId) {
+            $params[':uid'] = $userId;
+        }
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute($params);
+        return $st->fetchAll() ?: [];
+    }
+
+    public function exportAgentPresenceHistoryHeaderMap(): array
+    {
+        return [
+            'history_id'            => 'ID Registro',
+            'user_id'               => 'ID Agente',
+            'agente'                => 'Agente',
+            'agente_email'          => 'Correo Agente',
+            'estado_code'           => 'Código Estado',
+            'estado_nombre'         => 'Estado',
+            'started_at'            => 'Inicio del Estado',
+            'ended_at'              => 'Fin del Estado',
+            'estado_abierto'        => 'Estado Activo Ahora (1/0)',
+            'duracion_segundos'     => 'Duración (segundos)',
+            'duracion_minutos'      => 'Duración (minutos)',
+            'duracion_horas'        => 'Duración (horas)',
+            'origen_cambio'         => 'Origen del Cambio (código técnico)',
+            'tipo_evento'           => 'Tipo de Evento',
+            'es_evento_automatico'  => 'Es Reconexión Automática, no Acción del Agente (1/0)',
+            'cambiado_por'          => 'Cambiado Por (si fue manual/admin)',
+        ];
+    }
+
+    public function exportAgentPresenceHistoryColumnOrder(): array
+    {
+        return [
+            'user_id', 'agente', 'agente_email',
+            'estado_code', 'estado_nombre',
+            'started_at', 'ended_at', 'estado_abierto',
+            'duracion_segundos', 'duracion_minutos', 'duracion_horas',
+            'tipo_evento', 'es_evento_automatico', 'origen_cambio', 'cambiado_por',
+        ];
+    }
+
+    /**
+     * Resumen ejecutivo: totales por agente y por día dentro del rango -
+     * horas en cada estado, número de transiciones (proxy de
+     * conexiones/desconexiones), primera y última actividad del día.
+     */
+    public function exportAgentPresenceSummaryDataset(
+        string $startDate,
+        string $endDate,
+        ?int $userId = null
+    ): array {
+        $whereUser = $userId ? " AND h.user_id = :uid " : "";
+
+        // total_transiciones se mantiene (todas las filas), pero se
+        // desglosa explícitamente en manuales vs automáticas para no
+        // repetir la confusión reportada: un HEARTBEAT_RECONNECT no es
+        // una decisión del agente, es el sistema confirmando reconexión
+        // tras un corte de heartbeat (ver AgentPresenceRepo::heartbeat).
+        // veces_desconectado no cambia - DESCONECTADO solo se alcanza vía
+        // LOGOUT (real), heartbeat nunca mueve a ese estado.
+        $sql = "
+            SELECT
+              h.user_id,
+              u.full_name AS agente,
+              u.email AS agente_email,
+              DATE(h.started_at) AS dia,
+              MIN(h.started_at) AS primera_actividad,
+              MAX(COALESCE(h.ended_at, NOW(6))) AS ultima_actividad,
+              COUNT(*) AS total_transiciones,
+              SUM(CASE WHEN h.source IN ('PORTAL', 'LOGOUT') THEN 1 ELSE 0 END) AS cambios_manuales_estado,
+              SUM(CASE WHEN h.source IN ('HEARTBEAT_INIT', 'HEARTBEAT_RECONNECT') THEN 1 ELSE 0 END) AS reconexiones_automaticas_heartbeat,
+              SUM(CASE WHEN aps.code = 'DISPONIBLE'
+                THEN TIMESTAMPDIFF(SECOND, h.started_at, COALESCE(h.ended_at, NOW(6))) ELSE 0 END) AS segundos_disponible,
+              SUM(CASE WHEN aps.code NOT IN ('DISPONIBLE', 'DESCONECTADO')
+                THEN TIMESTAMPDIFF(SECOND, h.started_at, COALESCE(h.ended_at, NOW(6))) ELSE 0 END) AS segundos_no_disponible_conectado,
+              SUM(CASE WHEN aps.code = 'DESCONECTADO'
+                THEN TIMESTAMPDIFF(SECOND, h.started_at, COALESCE(h.ended_at, NOW(6))) ELSE 0 END) AS segundos_desconectado,
+              ROUND(SUM(CASE WHEN aps.code = 'DISPONIBLE'
+                THEN TIMESTAMPDIFF(SECOND, h.started_at, COALESCE(h.ended_at, NOW(6))) ELSE 0 END) / 3600, 2) AS horas_disponible,
+              ROUND(SUM(CASE WHEN aps.code NOT IN ('DISPONIBLE', 'DESCONECTADO')
+                THEN TIMESTAMPDIFF(SECOND, h.started_at, COALESCE(h.ended_at, NOW(6))) ELSE 0 END) / 3600, 2) AS horas_no_disponible_conectado,
+              ROUND(SUM(CASE WHEN aps.code = 'DESCONECTADO'
+                THEN TIMESTAMPDIFF(SECOND, h.started_at, COALESCE(h.ended_at, NOW(6))) ELSE 0 END) / 3600, 2) AS horas_desconectado,
+              SUM(CASE WHEN aps.code = 'DESCONECTADO' THEN 1 ELSE 0 END) AS veces_desconectado
+            FROM agent_presence_history h
+            JOIN users u ON u.id = h.user_id
+            JOIN agent_presence_statuses aps ON aps.id = h.status_id
+            WHERE h.started_at < :end_next_day
+              AND (h.ended_at IS NULL OR h.ended_at >= :start)
+              {$whereUser}
+            GROUP BY h.user_id, DATE(h.started_at)
+            ORDER BY dia DESC, agente ASC
+        ";
+
+        $params = [
+            ':start' => $startDate . ' 00:00:00',
+            ':end_next_day' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00',
+        ];
+        if ($userId) {
+            $params[':uid'] = $userId;
+        }
+
+        $st = $this->pdo->prepare($sql);
+        $st->execute($params);
+        return $st->fetchAll() ?: [];
+    }
+
+    public function exportAgentPresenceSummaryHeaderMap(): array
+    {
+        return [
+            'user_id'                            => 'ID Agente',
+            'agente'                              => 'Agente',
+            'agente_email'                        => 'Correo Agente',
+            'dia'                                 => 'Día',
+            'primera_actividad'                   => 'Primera Actividad',
+            'ultima_actividad'                    => 'Última Actividad',
+            'total_transiciones'                  => 'Total de Registros (manuales + automáticos)',
+            'cambios_manuales_estado'             => 'Cambios de Estado Reales (hechos por el Agente)',
+            'reconexiones_automaticas_heartbeat'  => 'Reconexiones Automáticas (sin acción del Agente)',
+            'horas_disponible'                    => 'Horas en Disponible',
+            'horas_no_disponible_conectado'       => 'Horas Conectado (No Disponible)',
+            'horas_desconectado'                  => 'Horas Desconectado',
+            'veces_desconectado'                  => 'Veces Desconectado (cierre de sesión real)',
+            'segundos_disponible'                 => 'Segundos en Disponible',
+            'segundos_no_disponible_conectado'    => 'Segundos Conectado (No Disponible)',
+            'segundos_desconectado'               => 'Segundos Desconectado',
+        ];
+    }
+
+    public function exportAgentPresenceSummaryColumnOrder(): array
+    {
+        return [
+            'dia', 'user_id', 'agente', 'agente_email',
+            'primera_actividad', 'ultima_actividad',
+            'cambios_manuales_estado', 'reconexiones_automaticas_heartbeat', 'total_transiciones',
+            'horas_disponible', 'horas_no_disponible_conectado', 'horas_desconectado',
+            'veces_desconectado',
+            'segundos_disponible', 'segundos_no_disponible_conectado', 'segundos_desconectado',
+        ];
+    }
+
+    /**
+     * Snapshot en tiempo real: estado actual de cada agente en este
+     * instante. No usa rango de fechas - siempre es "ahora". Reutiliza
+     * el mismo umbral AGENT_PRESENCE_STALE_SECONDS que usa el
+     * assignment_worker para marcar heartbeats caídos, así el reporte
+     * es consistente con el criterio real que decide asignaciones.
+     */
+    public function exportAgentPresenceLiveDataset(int $staleSeconds = 90): array
+    {
+        $sql = "
+            SELECT
+              u.id AS user_id,
+              u.full_name AS agente,
+              u.email AS agente_email,
+              aps.code AS estado_code,
+              aps.name AS estado_nombre,
+              aps.is_assignable AS estado_es_asignable,
+              ap.status_since,
+              TIMESTAMPDIFF(SECOND, ap.status_since, NOW(6)) AS segundos_en_estado_actual,
+              ROUND(TIMESTAMPDIFF(SECOND, ap.status_since, NOW(6)) / 60, 2) AS minutos_en_estado_actual,
+              ap.last_seen_at,
+              TIMESTAMPDIFF(SECOND, ap.last_seen_at, NOW(6)) AS segundos_desde_ultimo_heartbeat,
+              CASE
+                WHEN TIMESTAMPDIFF(SECOND, ap.last_seen_at, NOW(6)) > :stale_seconds
+                  THEN 'DESACTUALIZADO'
+                ELSE 'ACTIVO'
+              END AS conexion_real,
+              (
+                SELECT COUNT(*) FROM cases c
+                JOIN case_statuses cs ON cs.id = c.status_id
+                WHERE c.assigned_user_id = u.id
+                  AND cs.code IN ('ASIGNADO', 'EN_PROCESO')
+              ) AS casos_activos_ahora
+            FROM users u
+            JOIN agent_presence ap ON ap.user_id = u.id
+            JOIN agent_presence_statuses aps ON aps.id = ap.status_id
+            JOIN user_roles ur ON ur.user_id = u.id
+            JOIN roles r ON r.id = ur.role_id
+            WHERE UPPER(TRIM(r.code)) IN ('AGENTE', 'AGENT')
+            GROUP BY u.id
+            ORDER BY aps.sort_order ASC, u.full_name ASC
+        ";
+
+        $st = $this->pdo->prepare($sql);
+        $st->bindValue(':stale_seconds', $staleSeconds, PDO::PARAM_INT);
+        $st->execute();
+        return $st->fetchAll() ?: [];
+    }
+
+    public function exportAgentPresenceLiveHeaderMap(): array
+    {
+        return [
+            'user_id'                           => 'ID Agente',
+            'agente'                              => 'Agente',
+            'agente_email'                        => 'Correo Agente',
+            'estado_code'                        => 'Código Estado',
+            'estado_nombre'                      => 'Estado Actual',
+            'estado_es_asignable'                => 'Estado Permite Asignación (1/0)',
+            'status_since'                       => 'Desde Cuándo en Este Estado',
+            'segundos_en_estado_actual'          => 'Segundos en Estado Actual',
+            'minutos_en_estado_actual'           => 'Minutos en Estado Actual',
+            'last_seen_at'                       => 'Último Heartbeat',
+            'segundos_desde_ultimo_heartbeat'    => 'Segundos Desde Último Heartbeat',
+            'conexion_real'                      => 'Conexión Real (Activo/Desactualizado)',
+            'casos_activos_ahora'                => 'Casos Activos Asignados Ahora',
+        ];
+    }
+
+    public function exportAgentPresenceLiveColumnOrder(): array
+    {
+        return [
+            'user_id', 'agente', 'agente_email',
+            'estado_code', 'estado_nombre', 'estado_es_asignable',
+            'status_since', 'segundos_en_estado_actual', 'minutos_en_estado_actual',
+            'last_seen_at', 'segundos_desde_ultimo_heartbeat', 'conexion_real',
+            'casos_activos_ahora',
+        ];
     }
 }

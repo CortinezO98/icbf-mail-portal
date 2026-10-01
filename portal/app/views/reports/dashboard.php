@@ -41,22 +41,91 @@ $slaRojoRate = $slaTotal > 0 ? round(($rojo / $slaTotal) * 100, 1) : 0;
         <i class="bi bi-calendar-range me-1"></i>
         <?= htmlspecialchars(date('d/m/Y', strtotime($start)), ENT_QUOTES, 'UTF-8') ?> - <?= htmlspecialchars(date('d/m/Y', strtotime($end)), ENT_QUOTES, 'UTF-8') ?>
       </div>
-      <div class="dropdown">
-        <button class="btn btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown">
-          <i class="bi bi-download me-1"></i> Exportar
-        </button>
-        <ul class="dropdown-menu">
-          <li>
-            <a class="dropdown-item" href="<?= htmlspecialchars(url('/reports/export?type=sla&start='.$start.'&end='.$end.'&format=csv' . ($mailbox_id ? '&mailbox_id='.$mailbox_id : '')), ENT_QUOTES, 'UTF-8') ?>">
-              <i class="bi bi-filetype-csv me-2"></i> CSV
-            </a>
-          </li>
-          <li>
-            <a class="dropdown-item" href="<?= htmlspecialchars(url('/reports/export?type=sla&start='.$start.'&end='.$end.'&format=xlsx' . ($mailbox_id ? '&mailbox_id='.$mailbox_id : '')), ENT_QUOTES, 'UTF-8') ?>">
-              <i class="bi bi-file-earmark-excel me-2"></i> Excel
-            </a>
-          </li>
-        </ul>
+      <button class="btn btn-outline-primary" type="button" data-bs-toggle="modal" data-bs-target="#exportModal">
+        <i class="bi bi-download me-1"></i> Exportar
+      </button>
+    </div>
+  </div>
+
+  <!-- Modal de exportación: reemplaza el dropdown largo por tarjetas
+       organizadas, evita que la lista se monte encima de los filtros. -->
+  <div class="modal fade" id="exportModal" tabindex="-1" aria-labelledby="exportModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="exportModalLabel">
+            <i class="bi bi-download me-2"></i>Exportar Reportes
+          </h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted small mb-3">
+            Los reportes de Casos/SLA, Resumen de Agentes e Histórico de Agentes usan el rango de fechas
+            seleccionado arriba (<?= htmlspecialchars(date('d/m/Y', strtotime($start)), ENT_QUOTES, 'UTF-8') ?> -
+            <?= htmlspecialchars(date('d/m/Y', strtotime($end)), ENT_QUOTES, 'UTF-8') ?>).
+            El Estado en Tiempo Real siempre exporta el momento actual, sin rango.
+          </p>
+
+          <div class="export-option-card d-flex align-items-center justify-content-between p-3 mb-2 border rounded">
+            <div>
+              <div class="fw-semibold"><i class="bi bi-inboxes me-2 text-primary"></i>Casos / SLA</div>
+              <div class="small text-muted">Detalle de casos, tiempos y estado de cumplimiento SLA.</div>
+            </div>
+            <div class="d-flex gap-2">
+              <a class="btn btn-sm btn-outline-secondary" href="<?= htmlspecialchars(url('/reports/export?type=sla&start='.$start.'&end='.$end.'&format=csv' . ($mailbox_id ? '&mailbox_id='.$mailbox_id : '')), ENT_QUOTES, 'UTF-8') ?>">
+                <i class="bi bi-filetype-csv me-1"></i>CSV
+              </a>
+              <a class="btn btn-sm btn-outline-success" href="<?= htmlspecialchars(url('/reports/export?type=sla&start='.$start.'&end='.$end.'&format=xlsx' . ($mailbox_id ? '&mailbox_id='.$mailbox_id : '')), ENT_QUOTES, 'UTF-8') ?>">
+                <i class="bi bi-file-earmark-excel me-1"></i>Excel
+              </a>
+            </div>
+          </div>
+
+          <div class="export-option-card d-flex align-items-center justify-content-between p-3 mb-2 border rounded">
+            <div>
+              <div class="fw-semibold"><i class="bi bi-person-check me-2 text-primary"></i>Agentes — Resumen</div>
+              <div class="small text-muted">Horas totales por estado y desconexiones, por agente y por día.</div>
+            </div>
+            <div class="d-flex gap-2">
+              <a class="btn btn-sm btn-outline-secondary" href="<?= htmlspecialchars(url('/reports/export?type=agent_presence_summary&start='.$start.'&end='.$end.'&format=csv'), ENT_QUOTES, 'UTF-8') ?>">
+                <i class="bi bi-filetype-csv me-1"></i>CSV
+              </a>
+              <a class="btn btn-sm btn-outline-success" href="<?= htmlspecialchars(url('/reports/export?type=agent_presence_summary&start='.$start.'&end='.$end.'&format=xlsx'), ENT_QUOTES, 'UTF-8') ?>">
+                <i class="bi bi-file-earmark-excel me-1"></i>Excel
+              </a>
+            </div>
+          </div>
+
+          <div class="export-option-card d-flex align-items-center justify-content-between p-3 mb-2 border rounded">
+            <div>
+              <div class="fw-semibold"><i class="bi bi-clock-history me-2 text-primary"></i>Agentes — Histórico Detallado</div>
+              <div class="small text-muted">Cada transición de estado con hora exacta de inicio y fin.</div>
+            </div>
+            <div class="d-flex gap-2">
+              <a class="btn btn-sm btn-outline-secondary" href="<?= htmlspecialchars(url('/reports/export?type=agent_presence_history&start='.$start.'&end='.$end.'&format=csv'), ENT_QUOTES, 'UTF-8') ?>">
+                <i class="bi bi-filetype-csv me-1"></i>CSV
+              </a>
+              <a class="btn btn-sm btn-outline-success" href="<?= htmlspecialchars(url('/reports/export?type=agent_presence_history&start='.$start.'&end='.$end.'&format=xlsx'), ENT_QUOTES, 'UTF-8') ?>">
+                <i class="bi bi-file-earmark-excel me-1"></i>Excel
+              </a>
+            </div>
+          </div>
+
+          <div class="export-option-card d-flex align-items-center justify-content-between p-3 border rounded">
+            <div>
+              <div class="fw-semibold"><i class="bi bi-broadcast me-2 text-primary"></i>Agentes — Estado en Tiempo Real</div>
+              <div class="small text-muted">Snapshot ahora mismo: estado actual, desde cuándo, último heartbeat.</div>
+            </div>
+            <div class="d-flex gap-2">
+              <a class="btn btn-sm btn-outline-secondary" href="<?= htmlspecialchars(url('/reports/export?type=agent_presence_live&format=csv'), ENT_QUOTES, 'UTF-8') ?>">
+                <i class="bi bi-filetype-csv me-1"></i>CSV
+              </a>
+              <a class="btn btn-sm btn-outline-success" href="<?= htmlspecialchars(url('/reports/export?type=agent_presence_live&format=xlsx'), ENT_QUOTES, 'UTF-8') ?>">
+                <i class="bi bi-file-earmark-excel me-1"></i>Excel
+              </a>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -424,5 +493,12 @@ $slaRojoRate = $slaTotal > 0 ? round(($rojo / $slaTotal) * 100, 1) : 0;
 }
 .form-control:focus + .input-group-text {
   border-color: #86b7fe;
+}
+.export-option-card {
+  transition: background-color 0.15s ease-in-out, border-color 0.15s ease-in-out;
+}
+.export-option-card:hover {
+  background-color: rgba(var(--bs-primary-rgb), 0.04);
+  border-color: rgba(var(--bs-primary-rgb), 0.3) !important;
 }
 </style>

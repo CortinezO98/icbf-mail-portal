@@ -54,12 +54,23 @@ final class AssignmentsController
             $case = $this->casesRepo->findCaseForUpdate($caseId);
             $fromStatusId = isset($case['status_id']) ? (int)$case['status_id'] : null;
 
+            // Asignación prioritaria: solo supervisor/admin, checkbox
+            // explícito en la vista (cases/detail.php). Se salta el tope de
+            // max_active_cases pero NO las validaciones de disponibilidad
+            // real del agente (DISPONIBLE, assign_enabled, heartbeat vivo)
+            // - ver AgentPresenceRepo::lockAssignableAgent.
+            $priorityOverride = !empty($_POST['priority_override']);
+
             $capacity = $this->presenceRepo->lockAssignableAgent(
                 $agentId,
                 $staleSeconds,
-                $maxActiveCases
+                $maxActiveCases,
+                $priorityOverride
             );
-            if ($capacity === null || (int)($capacity['free_slots'] ?? 0) < 1) {
+            if ($capacity === null) {
+                throw new \RuntimeException('El asesor no está Disponible, perdió conexión, o no cumple los requisitos para recibir el caso.');
+            }
+            if (!$priorityOverride && (int)($capacity['free_slots'] ?? 0) < 1) {
                 throw new \RuntimeException('El asesor no está Disponible, perdió conexión o ya alcanzó su capacidad máxima.');
             }
 
@@ -72,7 +83,8 @@ final class AssignmentsController
                 $fromStatusId,
                 $statusAsignadoId,
                 $ip,
-                $ua
+                $ua,
+                $priorityOverride
             );
 
             $this->pdo->commit();

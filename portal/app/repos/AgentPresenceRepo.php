@@ -417,7 +417,7 @@ final class AgentPresenceRepo
      * de bloqueo que el assignment worker (caso -> presencia) para evitar que
      * una asignación manual pueda superar el límite configurado.
      */
-    public function lockAssignableAgent(int $userId, int $staleSeconds, int $maxActiveCases): ?array
+    public function lockAssignableAgent(int $userId, int $staleSeconds, int $maxActiveCases, bool $bypassCapacity = false): ?array
     {
         if (!$this->pdo->inTransaction()) {
             throw new \RuntimeException('lockAssignableAgent requiere una transacción activa.');
@@ -471,7 +471,13 @@ final class AgentPresenceRepo
         ");
         $st->execute([':uid' => $userId]);
         $activeCases = (int)$st->fetchColumn();
-        if ($activeCases >= $maxActiveCases) {
+        // bypassCapacity: asignación prioritaria manual (supervisor/admin,
+        // ver AssignmentsController::assign) - se salta SOLO el tope de
+        // carga, todas las demás validaciones de arriba (DISPONIBLE,
+        // assign_enabled, heartbeat vivo) siguen aplicando igual. El
+        // assignment_worker automático y la reasignación masiva nunca
+        // pasan este flag, así que su comportamiento no cambia.
+        if (!$bypassCapacity && $activeCases >= $maxActiveCases) {
             return null;
         }
 

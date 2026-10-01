@@ -234,11 +234,14 @@ async def _evaluate_attachments_flag_stability(
     if attachments_stability_snapshot is None:
         # Primera vez que vemos hasAttachments=false para este mensaje
         # reciente -> forzar una segunda lectura antes de confiar.
+        # Se guarda first_seen_at para poder exigir después un tiempo
+        # minimo real entre lecturas (ver comentario mas abajo).
         return AttachmentsStabilityResult(
             reasons=[REASON_ATTACHMENTS_FLAG_UNSTABLE],
             new_snapshot={
                 "last_modified": current_last_modified,
                 "has_attachments": False,
+                "first_seen_at": now.isoformat(),
             },
         )
 
@@ -250,12 +253,42 @@ async def _evaluate_attachments_flag_stability(
             new_snapshot={
                 "last_modified": current_last_modified,
                 "has_attachments": False,
+                "first_seen_at": attachments_stability_snapshot.get(
+                    "first_seen_at", now.isoformat()
+                ),
             },
         )
 
-    # lastModifiedDateTime estable entre dos lecturas -> verificación
-    # real (una sola llamada), no se acepta solo por la coincidencia de
-    # fechas.
+    # lastModifiedDateTime coincide con la lectura anterior, PERO eso
+    # solo es prueba real de estabilidad si paso tiempo suficiente para
+    # que Graph tuviera oportunidad de actualizar ese campo. Incidente
+    # 2026-09-01 (caso ICBF-2026-000595): dos lecturas con apenas 31s de
+    # diferencia coincidieron en lastModifiedDateTime simplemente porque
+    # Graph aun no habia tenido tiempo de tocarlo, no porque el
+    # procesamiento hubiera terminado - el adjunto real (que si existia)
+    # se perdio. Se exige un minimo de separacion real entre la primera
+    # lectura y esta antes de confiar en la coincidencia.
+    min_gap_seconds = max(30, int(getattr(settings, "ATTACHMENTS_STABILITY_MIN_GAP_SECONDS", 60)))
+    first_seen_raw = attachments_stability_snapshot.get("first_seen_at")
+    if first_seen_raw:
+        try:
+            first_seen_at = datetime.fromisoformat(first_seen_raw)
+            elapsed_seconds = (now - first_seen_at).total_seconds()
+        except ValueError:
+            elapsed_seconds = min_gap_seconds
+        if elapsed_seconds < min_gap_seconds:
+            return AttachmentsStabilityResult(
+                reasons=[REASON_ATTACHMENTS_FLAG_UNSTABLE],
+                new_snapshot={
+                    "last_modified": current_last_modified,
+                    "has_attachments": False,
+                    "first_seen_at": first_seen_raw,
+                },
+            )
+
+    # lastModifiedDateTime estable entre dos lecturas Y con tiempo
+    # minimo real transcurrido -> verificación real (una sola llamada),
+    # no se acepta solo por la coincidencia de fechas.
     manifest = await graph_client.list_attachments(mailbox_email, graph_message_id)
     if not manifest:
         return AttachmentsStabilityResult()
@@ -410,6 +443,38 @@ def _find_last_case_by_conversation(
             LIMIT 1
         """),
         {"mbid": mailbox_id, "cid": conversation_id},
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
+def _find_duplicate_message_in_thread(
+    db, *, mailbox_id: int, conversation_id: str, received_at: datetime
+) -> int | None:
+    """
+    Corrección 2026-09-07: busca un mensaje YA PROCESADO en el mismo
+    hilo con el mismo segundo exacto de recepción. Microsoft a veces
+    reasigna el id interno de un mensaje o notifica changeType=updated
+    para un correo que no cambió realmente del lado del ciudadano - el
+    webhook handler no distingue created de updated, así que ambos
+    casos llegan aquí igual. Cuando eso pasa, dos provider_message_id
+    distintos representan el MISMO correo físico. received_at exacto
+    coincidiendo dentro del mismo hilo es la señal más confiable de
+    esto - dos correos genuinamente distintos casi nunca llegan en el
+    mismo segundo exacto. No reemplaza el dedup por provider_message_id
+    (UNIQUE KEY) - es una capa adicional solo para este escenario.
+    """
+    row = db.execute(
+        text("""
+            SELECT case_id
+            FROM messages
+            WHERE mailbox_id = :mbid
+              AND conversation_id = :cid
+              AND received_at = :received_at
+              AND case_id IS NOT NULL
+            ORDER BY id ASC
+            LIMIT 1
+        """),
+        {"mbid": mailbox_id, "cid": conversation_id, "received_at": received_at},
     ).fetchone()
     return int(row[0]) if row else None
 
@@ -866,6 +931,36 @@ async def _process_single_message(
                     mailbox_id=mailbox_id,
                     conversation_id=str(conversation_id),
                 )
+
+                # Correccion 2026-09-07: ver _find_duplicate_message_in_thread.
+                # Si Microsoft ya notifico este correo antes (mismo hilo,
+                # mismo segundo exacto de recepcion) bajo un id distinto o
+                # como changeType=updated, se omite - NO afecta mensajes
+                # nuevos genuinos del mismo hilo (llegan en un momento
+                # distinto), solo evita el duplicado con el mismo instante.
+                duplicate_case_id = _find_duplicate_message_in_thread(
+                    db,
+                    mailbox_id=mailbox_id,
+                    conversation_id=str(conversation_id),
+                    received_at=received_at,
+                )
+                if duplicate_case_id:
+                    logger.warning(
+                        "DUPLICATE_MESSAGE_SAME_THREAD_SKIPPED | provider_message_id=%s"
+                        " | conversation_id=%s | received_at=%s | existing_case_id=%s",
+                        provider_message_id,
+                        conversation_id,
+                        received_at,
+                        duplicate_case_id,
+                    )
+                    return {
+                        "ok": True,
+                        "status": "duplicate_thread_skipped",
+                        "materialized": False,
+                        "provider_message_id": provider_message_id,
+                        "case_id": duplicate_case_id,
+                        "message_pk": None,
+                    }
 
             case_id = repos.create_case(
                 db,
