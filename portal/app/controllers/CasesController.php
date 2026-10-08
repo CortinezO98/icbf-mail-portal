@@ -36,8 +36,14 @@ final class CasesController
 
     public function inbox(): void
     {
-        $status = isset($_GET['status']) ? strtoupper(trim((string)$_GET['status'])) : null;
-        if ($status === '') $status = null;
+        $statusWasProvided = array_key_exists('status', $_GET);
+        $status = $statusWasProvided
+            ? strtoupper(trim((string)($_GET['status'] ?? '')))
+            : null;
+
+        if ($status === 'ALL' || $status === '') {
+            $status = null;
+        }
 
         $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
         $perPage = isset($_GET['per_page']) ? max(1, min(100, (int)$_GET['per_page'])) : 20;
@@ -67,7 +73,10 @@ final class CasesController
             $assignedUserId = Auth::id();
         }
 
-        if (($status === null || $status === '') && (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN'))) {
+        if (
+            !$statusWasProvided &&
+            (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN'))
+        ) {
             $status = 'NUEVO';
         }
 
