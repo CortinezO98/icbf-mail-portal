@@ -359,6 +359,8 @@ $casesCount = count($cases ?? []);
                     <form method="GET" action="<?= esc(url('/cases')) ?>" class="row g-2 justify-content-end" id="searchForm">
                         <?php if ($status): ?>
                             <input type="hidden" name="status" value="<?= esc($status) ?>">
+                        <?php elseif (isset($_GET['status']) && strtoupper((string)$_GET['status']) === 'ALL'): ?>
+                            <input type="hidden" name="status" value="ALL">
                         <?php endif; ?>
 
                         <div class="col-md-5">
@@ -584,9 +586,17 @@ $casesCount = count($cases ?? []);
                                         <i class="bi bi-hourglass me-1"></i>Sin iniciar
                                     </span>
                                 <?php else: ?>
-                                    <span class="badge rounded-pill management-time-badge px-3 py-2"
+                                    <?php
+                                        $managementMinutesInt = (int)$managementMinutes;
+                                        $managementTimeClass = $managementMinutesInt >= 120
+                                            ? 'management-time-critical'
+                                            : ($managementMinutesInt >= 60
+                                                ? 'management-time-warning'
+                                                : 'management-time-ok');
+                                    ?>
+                                    <span class="badge rounded-pill management-time-badge <?= $managementTimeClass ?> px-3 py-2"
                                           title="Tiempo desde el inicio de gestión hasta la respuesta, cierre o momento actual">
-                                        <i class="bi bi-stopwatch me-1"></i><?= esc(formatManagementTime($managementMinutes)) ?>
+                                        <i class="bi bi-stopwatch me-1"></i><?= esc(formatManagementTime($managementMinutesInt)) ?>
                                     </span>
                                 <?php endif; ?>
                             </td>
@@ -1047,9 +1057,25 @@ document.addEventListener('DOMContentLoaded', function() {
 }
 
 .management-time-badge {
+    border: 1px solid transparent;
+}
+
+.management-time-ok {
     background: #eef7ef;
     color: #2e7d32;
-    border: 1px solid #b7dfba;
+    border-color: #b7dfba;
+}
+
+.management-time-warning {
+    background: #fff6df;
+    color: #8a5a00;
+    border-color: #f2cf73;
+}
+
+.management-time-critical {
+    background: #fde8e8;
+    color: #a61b1b;
+    border-color: #efb0b0;
 }
 
 .table > :not(caption) > * > * {
