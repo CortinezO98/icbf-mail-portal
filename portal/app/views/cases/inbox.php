@@ -7,6 +7,11 @@ use function App\Config\url;
 
 $roleIsSupervisor = Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN');
 $status = $status ?? null;
+$q = trim((string)($q ?? ($_GET['q'] ?? '')));
+$timeFilter = strtoupper(trim((string)($timeFilter ?? ($_GET['gestion'] ?? ''))));
+$filterAgentId = (int)($filterAgentId ?? ($_GET['agente'] ?? 0));
+$sort = strtolower(trim((string)($sort ?? ($_GET['orden'] ?? 'recent'))));
+$agents = is_array($agents ?? null) ? $agents : [];
 $pagination = $pagination ?? [
     'page' => 1,
     'per_page' => 20,
@@ -38,18 +43,44 @@ function badge_sla(string $sla): array {
     };
 }
 
-function buildPaginationUrl($page, $status = null): string {
-    $params = [];
-    if ($page > 1) $params['page'] = $page;
-    if ($status) $params['status'] = $status;
-    
-    // Mantener el parámetro per_page si existe
-    if (isset($_GET['per_page'])) {
-        $params['per_page'] = $_GET['per_page'];
+function buildCasesUrl(array $overrides = []): string {
+    $params = is_array($_GET ?? null) ? $_GET : [];
+
+    foreach ($overrides as $key => $value) {
+        if ($value === null || $value === '') {
+            unset($params[$key]);
+        } else {
+            $params[$key] = $value;
+        }
     }
-    
+
     $query = http_build_query($params);
-    return url('/cases' . ($query ? '?' . $query : ''));
+    return url('/cases' . ($query !== '' ? '?' . $query : ''));
+}
+
+function buildPaginationUrl($page, $status = null): string {
+    return buildCasesUrl([
+        'page' => $page > 1 ? $page : null,
+        'status' => $status === null ? 'ALL' : $status,
+    ]);
+}
+
+function formatManagementTime($minutes): string {
+    if ($minutes === null || $minutes === '' || (int)$minutes < 0) {
+        return 'Sin iniciar';
+    }
+
+    $minutes = (int)$minutes;
+    if ($minutes < 60) {
+        return $minutes . ' min';
+    }
+
+    $hours = intdiv($minutes, 60);
+    $remaining = $minutes % 60;
+
+    return $remaining > 0
+        ? $hours . ' h ' . $remaining . ' min'
+        : $hours . ' h';
 }
 
 $csrfToken = Csrf::token();
@@ -154,6 +185,64 @@ $casesCount = count($cases ?? []);
                         </a></li>
                     </ul>
                 </div>
+
+                <div class="dropdown">
+                    <button class="btn btn-outline-brand dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                        <i class="bi bi-stopwatch me-1"></i>
+                        <?= $timeFilter === 'SIN_GESTION' ? 'Sin gestión iniciada' : ($timeFilter === '0_15' ? '0–15 min' : ($timeFilter === '15_30' ? '15–30 min' : ($timeFilter === '30_60' ? '30–60 min' : ($timeFilter === '60_120' ? '1–2 h' : ($timeFilter === '120_PLUS' ? '+2 h' : 'Tiempo de gestión')))) ?>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end">
+                        <li><h6 class="dropdown-header">Tiempo de gestión</h6></li>
+                        <?php
+                        $timeOptions = [
+                            '' => 'Todos',
+                            'SIN_GESTION' => 'Sin gestión iniciada',
+                            '0_15' => '0–15 minutos',
+                            '15_30' => '15–30 minutos',
+                            '30_60' => '30–60 minutos',
+                            '60_120' => '1–2 horas',
+                            '120_PLUS' => 'Más de 2 horas',
+                        ];
+                        foreach ($timeOptions as $value => $label):
+                            $href = buildCasesUrl([
+                                'gestion' => $value !== '' ? $value : null,
+                                'page' => null,
+                            ]);
+                        ?>
+                            <li>
+                                <a class="dropdown-item <?= $timeFilter === $value ? 'active' : '' ?>" href="<?= esc($href) ?>">
+                                    <i class="bi bi-circle-fill <?= $value === '120_PLUS' ? 'text-danger' : ($value === '60_120' ? 'text-warning' : ($value === 'SIN_GESTION' ? 'text-secondary' : 'text-info')) ?> me-2"></i>
+                                    <?= esc($label) ?>
+                                </a>
+                            </li>
+                        <?php endforeach; ?>
+                    </ul>
+                </div>
+
+                <?php if ($roleIsSupervisor): ?>
+                <div class="dropdown">
+                    <button class="btn btn-outline-brand dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                        <i class="bi bi-person-lines-fill me-1"></i>
+                        <?= $filterAgentId > 0 ? 'Agente filtrado' : 'Filtrar por agente' ?>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end" style="max-height: 320px; overflow-y: auto;">
+                        <li><h6 class="dropdown-header">Agente responsable</h6></li>
+                        <li>
+                            <a class="dropdown-item <?= $filterAgentId <= 0 ? 'active' : '' ?>" href="<?= esc(buildCasesUrl(['agente' => null, 'page' => null])) ?>">
+                                <i class="bi bi-people me-2"></i>Todos
+                            </a>
+                        </li>
+                        <?php foreach ($agents as $agent): ?>
+                            <?php $agentId = (int)($agent['id'] ?? 0); ?>
+                            <li>
+                                <a class="dropdown-item <?= $filterAgentId === $agentId ? 'active' : '' ?>" href="<?= esc(buildCasesUrl(['agente' => $agentId, 'page' => null])) ?>">
+                                    <i class="bi bi-person me-2"></i><?= esc((string)($agent['full_name'] ?? 'Agente')) ?>
+                                </a>
+                            </li>
+                        <?php endforeach; ?>
+                    </ul>
+                </div>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -248,21 +337,94 @@ $casesCount = count($cases ?? []);
     <!-- Tabla de Casos -->
     <div class="card shadow-sm border-0">
         <div class="card-header bg-transparent border-bottom">
-            <div class="d-flex justify-content-between align-items-center">
-                <div>
+            <div class="row g-3 align-items-end">
+                <div class="col-lg-3">
                     <h5 class="mb-0">Listado de Casos</h5>
-                </div>
-                <div class="d-flex align-items-center gap-2">
-                    <div class="input-group input-group-sm" style="width: 250px;">
-                        <span class="input-group-text bg-transparent border-end-0">
-                            <i class="bi bi-search text-muted"></i>
-                        </span>
-                        <input type="text" class="form-control border-start-0" 
-                               placeholder="Buscar casos..." id="searchInput">
+                    <div class="small text-muted mt-1">
+                        Gestión ordenada y filtrable por tiempo
                     </div>
-                    <button class="btn btn-sm btn-outline-secondary" type="button" id="refreshBtn">
-                        <i class="bi bi-arrow-clockwise"></i>
-                    </button>
+                </div>
+
+                <div class="col-lg-9">
+                    <form method="GET" action="<?= esc(url('/cases')) ?>" class="row g-2 justify-content-end" id="searchForm">
+                        <?php if ($status): ?>
+                            <input type="hidden" name="status" value="<?= esc($status) ?>">
+                        <?php endif; ?>
+
+                        <div class="col-md-5">
+                            <label class="form-label small text-muted mb-1">Buscar</label>
+                            <div class="input-group input-group-sm">
+                                <span class="input-group-text bg-transparent border-end-0">
+                                    <i class="bi bi-search text-muted"></i>
+                                </span>
+                                <input type="text"
+                                       class="form-control border-start-0"
+                                       name="q"
+                                       value="<?= esc($q) ?>"
+                                       placeholder="Caso, asunto, nombre o correo..."
+                                       autocomplete="off">
+                            </div>
+                        </div>
+
+                        <div class="col-md-3">
+                            <label class="form-label small text-muted mb-1">Tiempo de gestión</label>
+                            <select name="gestion" class="form-select form-select-sm">
+                                <option value="">Todos</option>
+                                <option value="SIN_GESTION" <?= $timeFilter === 'SIN_GESTION' ? 'selected' : '' ?>>Sin iniciar</option>
+                                <option value="0_15" <?= $timeFilter === '0_15' ? 'selected' : '' ?>>0–15 min</option>
+                                <option value="15_30" <?= $timeFilter === '15_30' ? 'selected' : '' ?>>15–30 min</option>
+                                <option value="30_60" <?= $timeFilter === '30_60' ? 'selected' : '' ?>>30–60 min</option>
+                                <option value="60_120" <?= $timeFilter === '60_120' ? 'selected' : '' ?>>1–2 h</option>
+                                <option value="120_PLUS" <?= $timeFilter === '120_PLUS' ? 'selected' : '' ?>>+2 h</option>
+                            </select>
+                        </div>
+
+                        <?php if ($roleIsSupervisor): ?>
+                        <div class="col-md-3">
+                            <label class="form-label small text-muted mb-1">Agente</label>
+                            <select name="agente" class="form-select form-select-sm">
+                                <option value="">Todos</option>
+                                <?php foreach ($agents as $agent): ?>
+                                    <?php $agentId = (int)($agent['id'] ?? 0); ?>
+                                    <option value="<?= $agentId ?>" <?= $filterAgentId === $agentId ? 'selected' : '' ?>>
+                                        <?= esc((string)($agent['full_name'] ?? 'Agente')) ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <?php endif; ?>
+
+                        <div class="col-md-3">
+                            <label class="form-label small text-muted mb-1">Ordenar</label>
+                            <select name="orden" class="form-select form-select-sm">
+                                <option value="recent" <?= $sort === 'recent' ? 'selected' : '' ?>>Última actividad</option>
+                                <option value="gestion_desc" <?= $sort === 'gestion_desc' ? 'selected' : '' ?>>Mayor tiempo de gestión</option>
+                                <option value="gestion_asc" <?= $sort === 'gestion_asc' ? 'selected' : '' ?>>Menor tiempo de gestión</option>
+                                <option value="oldest" <?= $sort === 'oldest' ? 'selected' : '' ?>>Más antiguos</option>
+                            </select>
+                        </div>
+
+                        <div class="col-auto">
+                            <label class="form-label small text-muted mb-1 d-block">&nbsp;</label>
+                            <button class="btn btn-sm btn-brand" type="submit">
+                                <i class="bi bi-search me-1"></i>Buscar
+                            </button>
+                        </div>
+
+                        <div class="col-auto">
+                            <label class="form-label small text-muted mb-1 d-block">&nbsp;</label>
+                            <a class="btn btn-sm btn-outline-secondary" href="<?= esc(url('/cases?status=ALL')) ?>">
+                                <i class="bi bi-eraser me-1"></i>Limpiar
+                            </a>
+                        </div>
+
+                        <div class="col-auto">
+                            <label class="form-label small text-muted mb-1 d-block">&nbsp;</label>
+                            <button class="btn btn-sm btn-outline-secondary" type="button" id="refreshBtn" title="Actualizar">
+                                <i class="bi bi-arrow-clockwise"></i>
+                            </button>
+                        </div>
+                    </form>
                 </div>
             </div>
         </div>
@@ -303,6 +465,7 @@ $casesCount = count($cases ?? []);
                             <th style="width: 200px;">Solicitante</th>
                             <th style="width: 140px;" class="text-center">Estado</th>
                             <th style="width: 120px;" class="text-center">SLA</th>
+                            <th style="width: 150px;" class="text-center">Tiempo gestión</th>
                             <th style="width: 150px;">Recibido</th>
                             <th style="width: 150px;" class="pe-4">Últ. Actividad</th>
                         </tr>
@@ -324,17 +487,20 @@ $casesCount = count($cases ?? []);
                             [$slaBadge, $slaLabel] = badge_sla((string)($c['sla_bucket'] ?? $c['sla_state'] ?? ''));
                             $receivedAt = formatDate($c['received_at'] ?? '');
                             $lastActivity = formatDate($c['last_activity_at'] ?? '');
-                            
-                            // Colores según estado
-                            $priorityClass = match($statusCode) {
-                                'NUEVO' => 'border-start border-primary border-3',
-                                'ASIGNADO' => 'border-start border-warning border-3',
-                                'EN_PROCESO' => 'border-start border-info border-3',
-                                'RESPONDIDO' => 'border-start border-success border-3',
-                                default => 'border-start border-secondary border-3'
+                            $managementMinutes = $c['management_minutes'] ?? null;
+
+                            $stateClass = match($statusCode) {
+                                'NUEVO' => 'state-nuevo',
+                                'ASIGNADO' => 'state-asignado',
+                                'EN_PROCESO' => 'state-en-proceso',
+                                'ESPERANDO_INFO' => 'state-esperando',
+                                'ESCALADO', 'ESCALATED' => 'state-escalado',
+                                'RESPONDIDO' => 'state-respondido',
+                                'CERRADO' => 'state-cerrado',
+                                default => 'state-default'
                             };
                         ?>
-                        <tr class="case-row <?= $priorityClass ?>" 
+                        <tr class="case-row <?= $stateClass ?>" 
                             data-id="<?= $caseId ?>"
                             data-number="<?= esc($caseNumber) ?>"
                             data-subject="<?= esc($subject) ?>"
@@ -401,7 +567,20 @@ $casesCount = count($cases ?? []);
                                     <?= $slaLabel ?>
                                 </span>
                             </td>
-                            
+
+                            <td class="text-center">
+                                <?php if ($managementMinutes === null): ?>
+                                    <span class="badge rounded-pill bg-light text-secondary border px-3 py-2">
+                                        <i class="bi bi-hourglass me-1"></i>Sin iniciar
+                                    </span>
+                                <?php else: ?>
+                                    <span class="badge rounded-pill management-time-badge px-3 py-2"
+                                          title="Tiempo desde el inicio de gestión hasta la respuesta, cierre o momento actual">
+                                        <i class="bi bi-stopwatch me-1"></i><?= esc(formatManagementTime($managementMinutes)) ?>
+                                    </span>
+                                <?php endif; ?>
+                            </td>
+
                             <td>
                                 <div class="text-nowrap">
                                     <div class="fw-medium"><?= $receivedAt ?></div>
@@ -713,51 +892,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    // Búsqueda en tiempo real
-    const searchInput = document.getElementById('searchInput');
-    const casesTable = document.getElementById('casesTable');
-    
-    if (searchInput && casesTable) {
-        let searchTimeout;
-        
-        searchInput.addEventListener('input', function() {
-            clearTimeout(searchTimeout);
-            searchTimeout = setTimeout(() => {
-                const searchTerm = this.value.toLowerCase().trim();
-                const rows = casesTable.querySelectorAll('tbody tr.case-row');
-                let visibleCount = 0;
-                
-                rows.forEach(row => {
-                    const text = row.textContent.toLowerCase();
-                    const match = text.includes(searchTerm);
-                    row.style.display = match ? '' : 'none';
-                    if (match) visibleCount++;
-                });
-                
-                // Mostrar mensaje si no hay resultados
-                const noResultsRow = casesTable.querySelector('tr.no-results');
-                if (searchTerm && visibleCount === 0) {
-                    if (!noResultsRow) {
-                        const tr = document.createElement('tr');
-                        tr.className = 'no-results';
-                        tr.innerHTML = `
-                            <td colspan="7" class="text-center py-4">
-                                <i class="bi bi-search display-6 text-muted opacity-50 mb-3"></i>
-                                <h5 class="text-muted">No se encontraron casos</h5>
-                                <p class="text-muted small">No hay casos que coincidan con "${searchTerm}"</p>
-                                <button class="btn btn-sm btn-outline-secondary" onclick="document.getElementById('searchInput').value=''; document.getElementById('searchInput').dispatchEvent(new Event('input'));">
-                                    Limpiar búsqueda
-                                </button>
-                            </td>
-                        `;
-                        casesTable.querySelector('tbody').appendChild(tr);
-                    }
-                } else if (noResultsRow) {
-                    noResultsRow.remove();
-                }
-            }, 300);
-        });
-    }
+    // La búsqueda y los filtros se procesan en servidor para conservar paginación y resultados completos.
 
     // Botón de refresh
     const refreshBtn = document.getElementById('refreshBtn');
@@ -874,7 +1009,26 @@ document.addEventListener('DOMContentLoaded', function() {
 }
 
 .case-row {
-    transition: all 0.2s ease;
+    transition: background-color 0.18s ease, box-shadow 0.18s ease;
+    border-top: 2px solid var(--case-color) !important;
+}
+
+.case-row td:first-child {
+    border-left: 4px solid var(--case-color) !important;
+}
+
+.case-row.state-nuevo { --case-color: #0d6efd; }
+.case-row.state-asignado { --case-color: #f0ad00; }
+.case-row.state-en-proceso { --case-color: #12b8d4; }
+.case-row.state-esperando { --case-color: #f0ad00; }
+.case-row.state-escalado { --case-color: #dc3545; }
+.case-row.state-respondido { --case-color: #198754; }
+.case-row.state-cerrado { --case-color: #6c757d; }
+.case-row.state-default { --case-color: #adb5bd; }
+
+.case-row:hover {
+    background-color: rgba(76, 175, 80, 0.04);
+    box-shadow: inset 0 0 0 1px rgba(76, 175, 80, 0.08);
 }
 
 .badge {
@@ -882,8 +1036,20 @@ document.addEventListener('DOMContentLoaded', function() {
     letter-spacing: 0.3px;
 }
 
-.border-start {
-    border-left-width: 4px !important;
+.management-time-badge {
+    background: #eef7ef;
+    color: #2e7d32;
+    border: 1px solid #b7dfba;
+}
+
+.table > :not(caption) > * > * {
+    padding-top: .85rem;
+    padding-bottom: .85rem;
+}
+
+#searchForm .form-select,
+#searchForm .form-control {
+    min-height: 34px;
 }
 
 /* Paginación */
