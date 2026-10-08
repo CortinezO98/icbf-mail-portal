@@ -42,6 +42,26 @@ final class CasesController
         $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
         $perPage = isset($_GET['per_page']) ? max(1, min(100, (int)$_GET['per_page'])) : 20;
 
+        $q = trim((string)($_GET['q'] ?? ''));
+        $timeFilter = strtoupper(trim((string)($_GET['gestion'] ?? '')));
+        $sort = strtolower(trim((string)($_GET['orden'] ?? 'recent')));
+
+        $allowedTimeFilters = ['', 'SIN_GESTION', '0_15', '15_30', '30_60', '60_120', '120_PLUS'];
+        if (!in_array($timeFilter, $allowedTimeFilters, true)) {
+            $timeFilter = '';
+        }
+
+        $allowedSorts = ['recent', 'gestion_desc', 'gestion_asc', 'oldest'];
+        if (!in_array($sort, $allowedSorts, true)) {
+            $sort = 'recent';
+        }
+
+        $filterAgentId = null;
+        if (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN')) {
+            $candidateAgentId = (int)($_GET['agente'] ?? 0);
+            $filterAgentId = $candidateAgentId > 0 ? $candidateAgentId : null;
+        }
+
         $assignedUserId = null;
         if (Auth::hasRole('AGENTE') && !Auth::hasRole('SUPERVISOR') && !Auth::hasRole('ADMIN')) {
             $assignedUserId = Auth::id();
@@ -51,7 +71,16 @@ final class CasesController
             $status = 'NUEVO';
         }
 
-        $result = $this->casesRepo->listInbox($status, $assignedUserId, $page, $perPage);
+        $result = $this->casesRepo->listInbox(
+            $status,
+            $assignedUserId,
+            $page,
+            $perPage,
+            $q,
+            $timeFilter,
+            $filterAgentId,
+            $sort
+        );
 
         if (isset($result['data']) && isset($result['pagination'])) {
             $cases = $result['data'];
@@ -69,6 +98,11 @@ final class CasesController
             ];
         }
 
+        $agents = [];
+        if (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN')) {
+            $agents = $this->usersRepo->listAgents();
+        }
+
         $unassignedCount = 0;
         if (Auth::hasRole('SUPERVISOR') || Auth::hasRole('ADMIN')) {
             $statusNuevoId = $this->casesRepo->getStatusIdByCode('NUEVO');
@@ -81,6 +115,11 @@ final class CasesController
         $this->render('cases/inbox.php', [
             'cases' => $cases,
             'status' => $status,
+            'q' => $q,
+            'timeFilter' => $timeFilter,
+            'filterAgentId' => $filterAgentId,
+            'sort' => $sort,
+            'agents' => $agents,
             'unassignedCount' => $unassignedCount,
             'pagination' => $pagination,
             'flash' => $flash,
