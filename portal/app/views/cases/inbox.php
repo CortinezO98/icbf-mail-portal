@@ -12,6 +12,16 @@ $timeFilter = strtoupper(trim((string)($timeFilter ?? ($_GET['gestion'] ?? '')))
 $filterAgentId = (int)($filterAgentId ?? ($_GET['agente'] ?? 0));
 $sort = strtolower(trim((string)($sort ?? ($_GET['orden'] ?? 'recent'))));
 $agents = is_array($agents ?? null) ? $agents : [];
+
+$timeFilterLabel = match ($timeFilter) {
+    'SIN_GESTION' => 'Sin gestión iniciada',
+    '0_15' => '0–15 min',
+    '15_30' => '15–30 min',
+    '30_60' => '30–60 min',
+    '60_120' => '1–2 h',
+    '120_PLUS' => '+2 h',
+    default => 'Tiempo de gestión',
+};
 $pagination = $pagination ?? [
     'page' => 1,
     'per_page' => 20,
@@ -189,7 +199,7 @@ $casesCount = count($cases ?? []);
                 <div class="dropdown">
                     <button class="btn btn-outline-brand dropdown-toggle" type="button" data-bs-toggle="dropdown">
                         <i class="bi bi-stopwatch me-1"></i>
-                        <?= $timeFilter === 'SIN_GESTION' ? 'Sin gestión iniciada' : ($timeFilter === '0_15' ? '0–15 min' : ($timeFilter === '15_30' ? '15–30 min' : ($timeFilter === '30_60' ? '30–60 min' : ($timeFilter === '60_120' ? '1–2 h' : ($timeFilter === '120_PLUS' ? '+2 h' : 'Tiempo de gestión')))) ?>
+                        <?= esc($timeFilterLabel) ?>
                     </button>
                     <ul class="dropdown-menu dropdown-menu-end">
                         <li><h6 class="dropdown-header">Tiempo de gestión</h6></li>
