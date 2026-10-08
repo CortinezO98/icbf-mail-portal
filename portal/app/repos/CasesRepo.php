@@ -10,7 +10,16 @@ final class CasesRepo
     public function __construct(private PDO $pdo) {}
 
 
-    public function listInbox(?string $statusCode, ?int $assignedUserId, int $page = 1, int $perPage = 20)
+    public function listInbox(
+        ?string $statusCode,
+        ?int $assignedUserId,
+        int $page = 1,
+        int $perPage = 20,
+        string $q = '',
+        string $timeFilter = '',
+        ?int $filterAgentId = null,
+        string $sort = 'recent'
+    )
     {
         $numArgs = func_num_args();
 
@@ -19,7 +28,16 @@ final class CasesRepo
             return $this->listInboxLegacy($statusCode, $assignedUserId, (int)$limit);
         }
 
-        return $this->listInboxPaginated($statusCode, $assignedUserId, $page, $perPage);
+        return $this->listInboxPaginated(
+            $statusCode,
+            $assignedUserId,
+            $page,
+            $perPage,
+            $q,
+            $timeFilter,
+            $filterAgentId,
+            $sort
+        );
     }
 
     private function listInboxLegacy(?string $statusCode, ?int $assignedUserId, int $limit = 200): array
@@ -63,14 +81,43 @@ final class CasesRepo
      * Versión nueva con paginación.
      * Devuelve ['data'=>..., 'pagination'=>...]
      */
-    private function listInboxPaginated(?string $statusCode, ?int $assignedUserId, int $page = 1, int $perPage = 20): array
+    private function listInboxPaginated(
+        ?string $statusCode,
+        ?int $assignedUserId,
+        int $page = 1,
+        int $perPage = 20,
+        string $q = '',
+        string $timeFilter = '',
+        ?int $filterAgentId = null,
+        string $sort = 'recent'
+    ): array
     {
         $perPage = max(1, min(100, $perPage));
         $page = max(1, $page);
         $offset = ($page - 1) * $perPage;
 
+        $q = trim($q);
+        $timeFilter = strtoupper(trim($timeFilter));
+        $sort = strtolower(trim($sort));
+
         $where = [];
         $params = [];
+
+        // Tiempo real de gestión: desde que el caso entra en EN_PROCESO
+        // hasta primera respuesta/cierre o el momento actual si sigue activo.
+        $managementMinutesSql = "
+            CASE
+                WHEN c.in_process_at IS NULL THEN NULL
+                ELSE GREATEST(
+                    0,
+                    TIMESTAMPDIFF(
+                        MINUTE,
+                        c.in_process_at,
+                        COALESCE(c.closed_at, c.first_response_at, NOW(6))
+                    )
+                )
+            END
+        ";
 
         $countSql = "SELECT COUNT(*) as total
                      FROM cases c
@@ -82,6 +129,8 @@ final class CasesRepo
                   c.requester_email, c.requester_name,
                   c.received_at, c.due_at, c.sla_state, c.last_activity_at,
                   c.assigned_user_id,
+                  c.in_process_at, c.first_response_at, c.closed_at,
+                  {$managementMinutesSql} AS management_minutes,
                   cs.code AS status_code, cs.name AS status_name,
                   u.full_name AS assigned_user_name
                 FROM cases c
@@ -95,6 +144,49 @@ final class CasesRepo
         if ($assignedUserId !== null) {
             $where[] = "c.assigned_user_id = :uid";
             $params[':uid'] = $assignedUserId;
+        }
+
+        if ($filterAgentId !== null && $filterAgentId > 0) {
+            $where[] = "c.assigned_user_id = :filter_agent_id";
+            $params[':filter_agent_id'] = $filterAgentId;
+        }
+
+        if ($q !== '') {
+            $where[] = "(
+                c.case_number LIKE :q_case_number
+                OR c.subject LIKE :q_subject
+                OR c.requester_name LIKE :q_requester_name
+                OR c.requester_email LIKE :q_requester_email
+                OR CONCAT('', c.id) LIKE :q_case_id
+            )";
+
+            $search = '%' . $q . '%';
+            $params[':q_case_number'] = $search;
+            $params[':q_subject'] = $search;
+            $params[':q_requester_name'] = $search;
+            $params[':q_requester_email'] = $search;
+            $params[':q_case_id'] = $search;
+        }
+
+        switch ($timeFilter) {
+            case 'SIN_GESTION':
+                $where[] = "c.in_process_at IS NULL";
+                break;
+            case '0_15':
+                $where[] = "{$managementMinutesSql} >= 0 AND {$managementMinutesSql} < 15";
+                break;
+            case '15_30':
+                $where[] = "{$managementMinutesSql} >= 15 AND {$managementMinutesSql} < 30";
+                break;
+            case '30_60':
+                $where[] = "{$managementMinutesSql} >= 30 AND {$managementMinutesSql} < 60";
+                break;
+            case '60_120':
+                $where[] = "{$managementMinutesSql} >= 60 AND {$managementMinutesSql} < 120";
+                break;
+            case '120_PLUS':
+                $where[] = "{$managementMinutesSql} >= 120";
+                break;
         }
 
         $whereClause = $where ? " WHERE " . implode(" AND ", $where) : "";
@@ -113,7 +205,15 @@ final class CasesRepo
         }
 
         $sql .= $whereClause;
-        $sql .= " ORDER BY c.last_activity_at DESC, c.received_at DESC
+
+        $orderSql = match ($sort) {
+            'gestion_desc' => "CASE WHEN ({$managementMinutesSql}) IS NULL THEN 1 ELSE 0 END ASC, ({$managementMinutesSql}) DESC, c.last_activity_at DESC",
+            'gestion_asc' => "CASE WHEN ({$managementMinutesSql}) IS NULL THEN 1 ELSE 0 END ASC, ({$managementMinutesSql}) ASC, c.last_activity_at DESC",
+            'oldest' => "c.received_at ASC, c.last_activity_at ASC",
+            default => "c.last_activity_at DESC, c.received_at DESC",
+        };
+
+        $sql .= " ORDER BY {$orderSql}
                   LIMIT :limit OFFSET :offset";
 
         $st = $this->pdo->prepare($sql);
