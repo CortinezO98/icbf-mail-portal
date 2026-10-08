@@ -187,6 +187,14 @@ $casesCount = count($cases ?? []);
                                href="<?= esc(buildPaginationUrl(1, 'EN_PROCESO')) ?>">
                             <i class="bi bi-circle-fill text-info me-2"></i>En Proceso
                         </a></li>
+                        <li><a class="dropdown-item <?= $status === 'ESPERANDO_INFO' ? 'active' : '' ?>" 
+                               href="<?= esc(buildPaginationUrl(1, 'ESPERANDO_INFO')) ?>">
+                            <i class="bi bi-circle-fill text-warning me-2"></i>Esperando información
+                        </a></li>
+                        <li><a class="dropdown-item <?= in_array($status, ['ESCALADO', 'ESCALATED'], true) ? 'active' : '' ?>" 
+                               href="<?= esc(buildPaginationUrl(1, 'ESCALADO')) ?>">
+                            <i class="bi bi-circle-fill text-danger me-2"></i>Escalado
+                        </a></li>
                         <li><a class="dropdown-item <?= $status === 'RESPONDIDO' ? 'active' : '' ?>" 
                                href="<?= esc(buildPaginationUrl(1, 'RESPONDIDO')) ?>">
                             <i class="bi bi-circle-fill text-success me-2"></i>Respondidos
