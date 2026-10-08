@@ -37,6 +37,8 @@ function badge_status_class(string $code): string {
         'NUEVO' => 'bg-primary-subtle text-primary border-primary',
         'ASIGNADO' => 'bg-warning-subtle text-warning-emphasis border-warning',
         'EN_PROCESO' => 'bg-info-subtle text-info-emphasis border-info',
+        'ESPERANDO_INFO' => 'bg-warning-subtle text-warning-emphasis border-warning',
+        'ESCALADO', 'ESCALATED' => 'bg-danger-subtle text-danger-emphasis border-danger',
         'RESPONDIDO' => 'bg-success-subtle text-success-emphasis border-success',
         'CERRADO' => 'bg-secondary-subtle text-secondary border-secondary',
         default => 'bg-light text-dark border',
