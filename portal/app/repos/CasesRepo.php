@@ -142,8 +142,12 @@ final class CasesRepo
                 LEFT JOIN users u ON u.id = c.assigned_user_id";
 
         if ($statusCode) {
-            $where[] = "cs.code = :scode";
-            $params[':scode'] = $statusCode;
+            if (in_array($statusCode, ['ESCALADO', 'ESCALATED'], true)) {
+                $where[] = "cs.code IN ('ESCALADO', 'ESCALATED')";
+            } else {
+                $where[] = "cs.code = :scode";
+                $params[':scode'] = $statusCode;
+            }
         }
         if ($assignedUserId !== null) {
             $where[] = "c.assigned_user_id = :uid";
